@@ -1,0 +1,17 @@
+position: Vec3 = Vec3.zero(),
+rotation: Vec3 = Vec3.zero(),
+scale: Vec3 = Vec3.one(),
+model: ?[]const u8 = null,
+pub fn getModelMatrix(self: @This()) Mat4 {
+    const translation = Mat4.fromTranslate(self.position);
+    const rotation = Mat4.fromEulerAngles(self.rotation);
+    const scale = Mat4.fromScale(self.scale);
+    return Mat4.mul(Mat4.mul(scale, rotation), translation);
+}
+
+const std = @import("std");
+const Mesh = @import("mesh.zig");
+const Camera3D = @import("camera3d.zig");
+const Vec3 = @import("zalgebra").Vec3;
+const Mat4 = @import("zalgebra").Mat4;
+const Uniforms = @import("uniforms.zig");
