@@ -24,11 +24,11 @@ pub fn main() !void {
     defer scene.deinit();
     const entity1 = Entity{
         .position = Vec3.zero(),
-        .model = "cube",
+        .model = "box",
     };
     const entity2 = Entity{
         .position = Vec3{ .data = .{ 1, 1, 1 } },
-        .model = "pyramid",
+        .model = "BarramundiFish",
     };
     try scene.addEntity(entity1);
     try scene.addEntity(entity2);
