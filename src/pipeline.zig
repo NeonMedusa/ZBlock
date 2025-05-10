@@ -56,18 +56,18 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
         .vertex = .{
             .bufferCount = 1,
             .buffers = &wgpu.WGPUVertexBufferLayout{
-                .arrayStride = (3 + 3) * @sizeOf(f32), // xyz + rgb
+                .arrayStride = @sizeOf(VertexAttribute), // xyz + rgb
                 .stepMode = wgpu.WGPUVertexStepMode_Vertex,
                 .attributeCount = 2,
                 .attributes = &[_]wgpu.WGPUVertexAttribute{
                     .{
-                        .format = wgpu.WGPUVertexFormat_Float32x3, // vec3<f32> for XYZ
+                        .format = wgpu.WGPUVertexFormat_Float32x3, // XYZ占用3个f32
                         .offset = 0,
                         .shaderLocation = 0,
                     },
                     .{
-                        .format = wgpu.WGPUVertexFormat_Float32x3, // vec3<f32> for RGB
-                        .offset = 3 * @sizeOf(f32), // 位置属性占用了前3个f32
+                        .format = wgpu.WGPUVertexFormat_Float32x4, // RGBA占用4个F32
+                        .offset = 3 * @sizeOf(f32), // 位置属性XYZ占用了前3个f32
                         .shaderLocation = 1,
                     },
                 },
@@ -161,6 +161,7 @@ const Gctx = @import("gctx.zig");
 const Vec3 = algebra.Vec3;
 const Mat4 = algebra.Mat4;
 const Uniforms = @import("uniforms.zig");
+const VertexAttribute = @import("vertex_attribute.zig");
 
 const wgpu = @cImport({
     @cInclude("wgpu.h");

@@ -40,6 +40,7 @@ pub fn update(self: *@This()) !void {
     self.uniform_buffer_obj.view_matrix = self.main_camera.getViewMatrix();
     // entity移动
     self.entities.items[0].position = Vec3.new(1, @floatCast(self.current_frame_time), 1);
+    self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
 }
 
 const std = @import("std");
