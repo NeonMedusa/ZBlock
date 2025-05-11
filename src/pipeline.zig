@@ -156,13 +156,9 @@ pub fn createShaderModule(device: wgpu.WGPUDevice, shader_file_path: []const u8)
 }
 
 const std = @import("std");
-const algebra = @import("zalgebra");
 const Gctx = @import("gctx.zig");
-const Vec3 = algebra.Vec3;
-const Mat4 = algebra.Mat4;
 const Uniforms = @import("uniforms.zig");
 const VertexAttribute = @import("vertex_attribute.zig");
-
 const wgpu = @cImport({
     @cInclude("wgpu.h");
 });

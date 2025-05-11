@@ -105,7 +105,5 @@ const wgpu = @cImport({
 const Gctx = @import("gctx.zig");
 const Pipeline = @import("pipeline.zig");
 const Uniforms = @import("uniforms.zig");
-// const Mesh = @import("mesh.zig");
 const Scene = @import("scene.zig");
-
 const ModelManager = @import("model_manager.zig").ModelManager;

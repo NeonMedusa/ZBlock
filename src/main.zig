@@ -24,7 +24,7 @@ pub fn main() !void {
     defer scene.deinit();
     const entity1 = Entity{
         .position = Vec3.zero(),
-        .model = "box",
+        .model = "Buggy",
     };
     const entity2 = Entity{
         .position = Vec3{ .data = .{ 1, 1, 1 } },
