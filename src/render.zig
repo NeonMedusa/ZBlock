@@ -46,16 +46,15 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
     // 设置渲染管线
     wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipeline.handle);
 
-    // 为每个instance写入transform
+    // 为每个模型写入transform
     const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
     const aligned_uniform_size = ((@sizeOf(Uniforms) + min_align_size - 1) / min_align_size) * min_align_size;
     for (scene.entities.items, 0..) |entity, i| {
+        const model = model_manager.models.get(entity.model.?);
         var uniform_buffer_obj = scene.uniform_buffer_obj;
         uniform_buffer_obj.model_matrix = entity.getModelMatrix();
-        // 计算动态偏移量
+        // 计算动态偏移量并更新uniformbuffer
         const dynamic_offset = @as(u32, @intCast(i)) * aligned_uniform_size;
-        // 更新 uniform buffer 的对应部分
-        const model = model_manager.models.get(entity.model.?);
         wgpu.wgpuQueueWriteBuffer(
             gctx.queue,
             pipeline.uniform_buffer,
@@ -63,23 +62,39 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
             &uniform_buffer_obj,
             @sizeOf(Uniforms),
         );
-        wgpu.wgpuRenderPassEncoderSetVertexBuffer(
-            pass,
-            0,
-            model_manager.vertex_buffer,
-            model.?.vertex_offset,
-            model.?.vertex_size,
-        );
-        wgpu.wgpuRenderPassEncoderSetIndexBuffer(
-            pass,
-            model_manager.index_buffer,
-            wgpu.WGPUIndexFormat_Uint16,
-            model.?.index_offset,
-            model.?.index_size,
-        );
-        // 设置 bind group 并指定动态偏移量
-        wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, pipeline.bind_group, 1, &dynamic_offset);
-        wgpu.wgpuRenderPassEncoderDrawIndexed(pass, model.?.index_count, 1, 0, 0, 0);
+        // 渲染每个模型中的所有mesh
+        for (model.?.items) |mesh| {
+            wgpu.wgpuRenderPassEncoderSetVertexBuffer(
+                pass,
+                0,
+                model_manager.vertex_buffer,
+                mesh.vertex_offset,
+                mesh.vertex_size,
+            );
+            wgpu.wgpuRenderPassEncoderSetIndexBuffer(
+                pass,
+                model_manager.index_buffer,
+                wgpu.WGPUIndexFormat_Uint16,
+                mesh.index_offset,
+                mesh.index_size,
+            );
+            // 设置 bind group 并指定动态偏移量
+            wgpu.wgpuRenderPassEncoderSetBindGroup(
+                pass,
+                0,
+                pipeline.bind_group,
+                1,
+                &dynamic_offset,
+            );
+            wgpu.wgpuRenderPassEncoderDrawIndexed(
+                pass,
+                mesh.index_count,
+                1,
+                0,
+                0,
+                0,
+            );
+        }
     }
 
     // 结束渲染通道
@@ -107,3 +122,7 @@ const Pipeline = @import("pipeline.zig");
 const Uniforms = @import("uniforms.zig");
 const Scene = @import("scene.zig");
 const ModelManager = @import("model_manager.zig").ModelManager;
+
+const Algebra = @import("zalgebra");
+const Vec3 = Algebra.Vec3;
+const Mat4 = Algebra.Mat4;

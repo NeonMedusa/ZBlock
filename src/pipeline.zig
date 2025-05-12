@@ -14,7 +14,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
     // 获取对齐大小
     const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
     const aligned_uniform_size = ((@sizeOf(Uniforms) + min_align_size - 1) / min_align_size) * min_align_size;
-    const max_entities = 100;
+    const max_entities = 1000;
     const uniform_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
         .size = aligned_uniform_size * max_entities,
         .usage = wgpu.WGPUBufferUsage_Uniform | wgpu.WGPUBufferUsage_CopyDst,
@@ -51,26 +51,32 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
         .bindGroupLayouts = &bind_group_layout,
     });
 
+    const attributes = [_]wgpu.WGPUVertexAttribute{
+        .{
+            .format = wgpu.WGPUVertexFormat_Float32x3,
+            .offset = @offsetOf(VertexAttribute, "pos"),
+            .shaderLocation = 0,
+        },
+        .{
+            .format = wgpu.WGPUVertexFormat_Float32x3,
+            .offset = @offsetOf(VertexAttribute, "normal"),
+            .shaderLocation = 1,
+        },
+        .{
+            .format = wgpu.WGPUVertexFormat_Float32x4,
+            .offset = @offsetOf(VertexAttribute, "color"),
+            .shaderLocation = 2,
+        },
+    };
     const pipeline_desc = wgpu.WGPURenderPipelineDescriptor{
         .layout = pipeline_layout, // 添加管线布局
         .vertex = .{
             .bufferCount = 1,
             .buffers = &wgpu.WGPUVertexBufferLayout{
-                .arrayStride = @sizeOf(VertexAttribute), // xyz + rgb
+                .arrayStride = @sizeOf(VertexAttribute),
                 .stepMode = wgpu.WGPUVertexStepMode_Vertex,
-                .attributeCount = 2,
-                .attributes = &[_]wgpu.WGPUVertexAttribute{
-                    .{
-                        .format = wgpu.WGPUVertexFormat_Float32x3, // XYZ占用3个f32
-                        .offset = 0,
-                        .shaderLocation = 0,
-                    },
-                    .{
-                        .format = wgpu.WGPUVertexFormat_Float32x4, // RGBA占用4个F32
-                        .offset = 3 * @sizeOf(f32), // 位置属性XYZ占用了前3个f32
-                        .shaderLocation = 1,
-                    },
-                },
+                .attributeCount = attributes.len,
+                .attributes = &attributes,
             },
             .module = shader_module,
             .entryPoint = .{

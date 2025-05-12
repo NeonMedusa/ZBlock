@@ -10,7 +10,7 @@ delta_time_f32: f32 = 0,
 // 可以添加 map 字段，等你有地图系统时
 pub fn init(allocator: std.mem.Allocator, window: *Window) @This() {
     var camera = Camera3D.init();
-    camera.movement_speed = 1.0;
+    camera.movement_speed = 5.0;
     var uniform_buffer_obj = Uniforms.init(window.*);
     uniform_buffer_obj.color = .{ 0.0, 1.0, 0.4, 1.0 };
     uniform_buffer_obj.view_matrix = camera.getViewMatrix();
@@ -40,8 +40,8 @@ pub fn update(self: *@This()) !void {
     self.main_camera.updateFromKeyboard(self.window.*, self.delta_time_f32);
     self.uniform_buffer_obj.view_matrix = self.main_camera.getViewMatrix();
     // entity移动
-    self.entities.items[0].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
-    self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    // self.entities.items[0].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    // self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
 }
 
 const std = @import("std");

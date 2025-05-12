@@ -22,16 +22,33 @@ pub fn main() !void {
 
     var scene = Scene.init(allocator, &window);
     defer scene.deinit();
-    const entity1 = Entity{
+
+    const barramundi_fish = Entity{
+        .scale = Vec3{ .data = .{ 4, 4, 4 } },
         .position = Vec3.zero(),
-        .model = "Buggy",
-    };
-    const entity2 = Entity{
-        .position = Vec3{ .data = .{ 1, 1, 1 } },
         .model = "BarramundiFish",
     };
-    try scene.addEntity(entity1);
-    try scene.addEntity(entity2);
+    try scene.addEntity(barramundi_fish);
+
+    const box = Entity{
+        .position = Vec3{ .data = .{ 2, 2, 2 } },
+        .model = "box",
+    };
+    try scene.addEntity(box);
+
+    const avocado = Entity{
+        .position = Vec3{ .data = .{ 4, 4, 4 } },
+        .scale = Vec3{ .data = .{ 50, 50, 50 } },
+        .model = "Avocado",
+    };
+    try scene.addEntity(avocado);
+
+    const buggy = Entity{
+        .scale = Vec3{ .data = .{ 0.05, 0.05, 0.05 } },
+        .position = Vec3{ .data = .{ 8, 8, 8 } },
+        .model = "Buggy",
+    };
+    try scene.addEntity(buggy);
 
     // 主循环
     while (window.shouldClose()) {
