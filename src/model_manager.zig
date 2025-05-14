@@ -2,13 +2,13 @@ pub const ModelManager = struct {
     allocator: std.mem.Allocator,
     vertex_buffer: wgpu.WGPUBuffer,
     index_buffer: wgpu.WGPUBuffer,
-    models: std.StringHashMap(std.ArrayList(Mesh)),
+    models: std.StringHashMap(std.ArrayList(Node)),
     pub fn init(gctx: Gctx, allocator: std.mem.Allocator) !ModelManager {
         var all_vertex_data = std.ArrayList(VertexAttribute).init(allocator);
         defer all_vertex_data.deinit();
         var all_index_data = std.ArrayList(u16).init(allocator);
         defer all_index_data.deinit();
-        var models = std.StringHashMap(std.ArrayList(Mesh)).init(allocator);
+        var models = std.StringHashMap(std.ArrayList(Node)).init(allocator);
         try loadAllModels(allocator, &models, &all_vertex_data, &all_index_data);
 
         const vertex_buffer_desc = wgpu.WGPUBufferDescriptor{
@@ -58,7 +58,7 @@ const Mesh = struct {
 
 fn loadAllModels(
     allocator: std.mem.Allocator,
-    models: *std.StringHashMap(std.ArrayList(Mesh)),
+    models: *std.StringHashMap(std.ArrayList(Node)),
     all_vertex_data: *std.ArrayList(VertexAttribute),
     all_index_data: *std.ArrayList(u16),
 ) !void {
@@ -69,87 +69,119 @@ fn loadAllModels(
     defer dir_iter.deinit();
     // 遍历目录中的所有文件
     while (try dir_iter.next()) |entry| {
-        if (entry.kind == .file and std.mem.endsWith(u8, entry.basename, ".glb")) {
-            // 加载并解析模型
-            const file_path = try std.fs.path.join(allocator, &.{ "resources/models", entry.basename });
-            defer allocator.free(file_path);
-            const file_buf = try std.fs.cwd().readFileAllocOptions(
-                allocator,
-                file_path,
-                std.math.maxInt(usize),
-                null,
-                4,
-                null,
-            );
-            defer allocator.free(file_buf);
-            var gltf = Gltf.init(allocator);
-            defer gltf.deinit();
-            try gltf.parse(file_buf);
-            // 一个模型文件中会有多个mesh
-            var model = std.ArrayList(Mesh).init(allocator);
-            for (gltf.data.meshes.items) |mesh| {
-                for (mesh.primitives.items) |primitive| {
-                    var vertices = std.ArrayList(VertexAttribute).init(allocator);
-                    defer vertices.deinit();
-                    var indices = std.ArrayList(u16).init(allocator);
-                    defer indices.deinit();
-                    // 提取indices
-                    if (primitive.indices) |indices_accessor_index| {
-                        const accessor = gltf.data.accessors.items[indices_accessor_index];
-                        var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
-                        while (it.next()) |indice|
-                            try indices.append(indice[0]);
-                    } // 提取vertices
-                    for (primitive.attributes.items) |attribute| {
-                        switch (attribute) {
-                            .position => |idx| {
-                                const accessor = gltf.data.accessors.items[idx];
-                                var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                                var i: f32 = 0; // 暂时只添加一些随机性的颜色
-                                while (it.next()) |v| : (i += 0.001) {
-                                    try vertices.append(.{
-                                        .pos = .{ v[0], v[1], v[2] },
-                                        .normal = .{ 1, 1, 1 },
-                                        .color = .{ @mod(i / 0.1, 1), @mod(i / 0.2, 1), @mod(i / 0.3, 1), 1 },
-                                    });
-                                }
-                            },
-                            .normal => |idx| {
-                                const accessor = gltf.data.accessors.items[idx];
-                                var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                                var i: u32 = 0;
-                                while (it.next()) |n| : (i += 1)
-                                    vertices.items[i].normal = .{ n[0], n[1], n[2] };
-                            },
-                            .color => |idx| {
-                                const accessor = gltf.data.accessors.items[idx];
-                                var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                                var i: u32 = 0;
-                                while (it.next()) |c| : (i += 1)
-                                    vertices.items[i].color = .{ c[0], c[1], c[2], c[3] };
-                            },
-                            else => {},
-                        }
+        if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".glb")) continue;
+        // 加载并解析模型
+        const file_path = try std.fs.path.join(allocator, &.{ "resources/models", entry.basename });
+        defer allocator.free(file_path);
+        const file_buf = try std.fs.cwd().readFileAllocOptions(
+            allocator,
+            file_path,
+            std.math.maxInt(usize),
+            null,
+            4,
+            null,
+        );
+        defer allocator.free(file_buf);
+        var gltf = Gltf.init(allocator);
+        defer gltf.deinit();
+        try gltf.parse(file_buf);
+        // 先获取所有mesh
+        var meshs = std.ArrayList(Mesh).init(allocator);
+        defer meshs.deinit();
+        for (gltf.data.meshes.items) |mesh| {
+            var vertex_data = std.ArrayList(VertexAttribute).init(allocator);
+            defer vertex_data.deinit();
+            var index_data = std.ArrayList(u16).init(allocator);
+            defer index_data.deinit();
+            // 由于一个mesh中可能会有多个primitive，所以我们需要为索引计算顶点偏移
+            var vertex_offset: u16 = 0;
+            for (mesh.primitives.items) |primitive| {
+                vertex_offset += @intCast(vertex_data.items.len);
+                // 提取indices
+                if (primitive.indices) |indices_accessor_index| {
+                    const accessor = gltf.data.accessors.items[indices_accessor_index];
+                    var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
+                    while (it.next()) |indice|
+                        try index_data.append(indice[0] + vertex_offset);
+                } // 提取vertices
+                for (primitive.attributes.items) |attribute| {
+                    switch (attribute) {
+                        .position => |idx| {
+                            const accessor = gltf.data.accessors.items[idx];
+                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                            var i: f32 = 0; // 暂时只添加一些随机性的颜色
+                            while (it.next()) |v| : (i += 0.001) {
+                                try vertex_data.append(.{
+                                    .pos = .{ v[0], v[1], v[2] },
+                                    .normal = .{ 1, 1, 1 },
+                                    .color = .{ @mod(i / 0.1, 1), @mod(i / 0.2, 1), @mod(i / 0.3, 1), 1 },
+                                });
+                            }
+                        },
+                        .normal => |idx| {
+                            const accessor = gltf.data.accessors.items[idx];
+                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                            var i: u32 = 0;
+                            while (it.next()) |n| : (i += 1)
+                                vertex_data.items[i].normal = .{ n[0], n[1], n[2] };
+                        },
+                        .color => |idx| {
+                            const accessor = gltf.data.accessors.items[idx];
+                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                            var i: u32 = 0;
+                            while (it.next()) |c| : (i += 1)
+                                vertex_data.items[i].color = .{ c[0], c[1], c[2], c[3] };
+                        },
+                        else => {},
                     }
-                    // 为模型记录当前mesh信息
-                    try model.append(Mesh{
-                        .vertex_offset = @intCast(all_vertex_data.items.len * @sizeOf(VertexAttribute)),
-                        .vertex_size = @intCast(vertices.items.len * @sizeOf(VertexAttribute)),
-                        .vertex_count = @intCast(vertices.items.len),
-                        .index_offset = @intCast(all_index_data.items.len * @sizeOf(u16)),
-                        .index_size = @intCast(indices.items.len * @sizeOf(u16)),
-                        .index_count = @intCast(indices.items.len),
-                    }); // 将当前mesh数据追加到全局数组中
-                    try all_vertex_data.appendSlice(vertices.items);
-                    try all_index_data.appendSlice(indices.items);
                 }
-            } // 记录当前模型的信息
-            const model_name = try allocator.dupe(u8, std.fs.path.stem(entry.basename));
-            try models.put(model_name, model);
-            std.debug.print("{s} mesh count:{d}\n", .{ model_name, model.items.len });
+            }
+            // 为模型记录当前mesh信息
+            try meshs.append(Mesh{
+                .vertex_offset = @intCast(all_vertex_data.items.len * @sizeOf(VertexAttribute)),
+                .vertex_size = @intCast(vertex_data.items.len * @sizeOf(VertexAttribute)),
+                .vertex_count = @intCast(vertex_data.items.len),
+                .index_offset = @intCast(all_index_data.items.len * @sizeOf(u16)),
+                .index_size = @intCast(index_data.items.len * @sizeOf(u16)),
+                .index_count = @intCast(index_data.items.len),
+            });
+            // 将当前mesh数据追加到全局数组中
+            try all_vertex_data.appendSlice(vertex_data.items);
+            try all_index_data.appendSlice(index_data.items);
         }
+        // 将node和mesh信息绑定
+        var model = std.ArrayList(Node).init(allocator);
+        for (gltf.data.nodes.items) |node| {
+            if (node.mesh != null) {
+                var out_node = Node{ .mesh = meshs.items[node.mesh.?] };
+                std.debug.print("{any}\n", .{node.scale});
+                if (node.matrix != null) {
+                    const flat = node.matrix.?;
+                    const transform = Mat4{
+                        .data = [4][4]f32{
+                            .{ flat[0], flat[1], flat[2], flat[3] },
+                            .{ flat[4], flat[5], flat[6], flat[7] },
+                            .{ flat[8], flat[9], flat[10], flat[11] },
+                            .{ flat[12], flat[13], flat[14], flat[15] },
+                        },
+                    };
+                    out_node.transform = transform;
+                }
+                try model.append(out_node);
+            }
+        }
+        // 记录当前模型的信息
+        const model_name = try allocator.dupe(u8, std.fs.path.stem(entry.basename));
+        try models.put(model_name, model);
+        std.debug.print("------{s}------", .{model_name});
+        gltf.debugPrint();
     }
 }
+
+const Node = struct {
+    transform: Mat4 = Mat4.identity(),
+    mesh: Mesh,
+};
 
 const wgpu = @cImport({
     @cInclude("wgpu.h");
@@ -158,3 +190,7 @@ const Gctx = @import("gctx.zig");
 const std = @import("std");
 const Gltf = @import("zgltf");
 const VertexAttribute = @import("vertex_attribute.zig");
+
+const Algebra = @import("zalgebra");
+const Vec3 = Algebra.Vec3;
+const Mat4 = Algebra.Mat4;
