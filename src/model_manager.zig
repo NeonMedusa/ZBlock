@@ -86,8 +86,8 @@ fn loadAllModels(
         defer gltf.deinit();
         try gltf.parse(file_buf);
         // 先获取所有mesh
-        var meshs = std.ArrayList(Mesh).init(allocator);
-        defer meshs.deinit();
+        var meshes = std.ArrayList(Mesh).init(allocator);
+        defer meshes.deinit();
         for (gltf.data.meshes.items) |mesh| {
             var vertex_data = std.ArrayList(VertexAttribute).init(allocator);
             defer vertex_data.deinit();
@@ -137,7 +137,7 @@ fn loadAllModels(
                 }
             }
             // 为模型记录当前mesh信息
-            try meshs.append(Mesh{
+            try meshes.append(Mesh{
                 .vertex_offset = @intCast(all_vertex_data.items.len * @sizeOf(VertexAttribute)),
                 .vertex_size = @intCast(vertex_data.items.len * @sizeOf(VertexAttribute)),
                 .vertex_count = @intCast(vertex_data.items.len),
@@ -149,33 +149,58 @@ fn loadAllModels(
             try all_vertex_data.appendSlice(vertex_data.items);
             try all_index_data.appendSlice(index_data.items);
         }
-        // 将node和mesh信息绑定
+        // 将node和mesh关联，gltf中的node是树形结构，我们需要递归遍历
         var model = std.ArrayList(Node).init(allocator);
-        for (gltf.data.nodes.items) |node| {
-            if (node.mesh != null) {
-                var out_node = Node{ .mesh = meshs.items[node.mesh.?] };
-                std.debug.print("{any}\n", .{node.scale});
-                if (node.matrix != null) {
-                    const flat = node.matrix.?;
-                    const transform = Mat4{
-                        .data = [4][4]f32{
-                            .{ flat[0], flat[1], flat[2], flat[3] },
-                            .{ flat[4], flat[5], flat[6], flat[7] },
-                            .{ flat[8], flat[9], flat[10], flat[11] },
-                            .{ flat[12], flat[13], flat[14], flat[15] },
-                        },
-                    };
-                    out_node.transform = transform;
-                }
-                try model.append(out_node);
-            }
-        }
+        const root_node_idx = gltf.data.scene.?;
+        const root_node = gltf.data.nodes.items[root_node_idx];
+        try foreachNode(
+            &model,
+            &meshes,
+            &gltf.data,
+            root_node,
+            Mat4.identity(),
+        );
         // 记录当前模型的信息
         const model_name = try allocator.dupe(u8, std.fs.path.stem(entry.basename));
         try models.put(model_name, model);
         std.debug.print("------{s}------", .{model_name});
         gltf.debugPrint();
     }
+}
+
+fn foreachNode(
+    models: *std.ArrayList(Node),
+    meshes: *std.ArrayList(Mesh),
+    gltf_data: *Gltf.Data,
+    root_node: Gltf.Node,
+    parent_transform: Mat4,
+) !void {
+    var cur_transform = Mat4.identity();
+    if (root_node.matrix) |flat| {
+        cur_transform = Mat4{
+            .data = [4][4]f32{
+                .{ flat[0], flat[1], flat[2], flat[3] },
+                .{ flat[4], flat[5], flat[6], flat[7] },
+                .{ flat[8], flat[9], flat[10], flat[11] },
+                .{ flat[12], flat[13], flat[14], flat[15] },
+            },
+        };
+    }
+    const mixed_transform = Mat4.mul(parent_transform, cur_transform);
+    if (root_node.mesh) |mesh_idx| {
+        try models.append(Node{
+            .mesh = meshes.items[mesh_idx],
+            .transform = mixed_transform,
+        });
+    }
+    for (root_node.children.items) |child_idx|
+        try foreachNode(
+            models,
+            meshes,
+            gltf_data,
+            gltf_data.nodes.items[child_idx],
+            mixed_transform,
+        );
 }
 
 const Node = struct {
