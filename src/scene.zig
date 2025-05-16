@@ -40,8 +40,10 @@ pub fn update(self: *@This()) !void {
     self.main_camera.updateFromKeyboard(self.window.*, self.delta_time_f32);
     self.uniform_buffer_obj.view_matrix = self.main_camera.getViewMatrix();
     // entity移动
-    // self.entities.items[0].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
-    // self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    self.entities.items[0].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    self.entities.items[2].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    self.entities.items[3].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
 }
 
 const std = @import("std");

@@ -9,7 +9,7 @@ pub const ModelManager = struct {
         var all_index_data = std.ArrayList(u16).init(allocator);
         defer all_index_data.deinit();
         var models = std.StringHashMap(std.ArrayList(Node)).init(allocator);
-        try loadAllModels(allocator, &models, &all_vertex_data, &all_index_data);
+        try extractModelData(allocator, &models, &all_vertex_data, &all_index_data);
 
         const vertex_buffer_desc = wgpu.WGPUBufferDescriptor{
             .size = @sizeOf(VertexAttribute) * all_vertex_data.items.len,
@@ -56,7 +56,7 @@ const Mesh = struct {
     // 可继续添加材质、纹理引用等
 };
 
-fn loadAllModels(
+fn extractModelData(
     allocator: std.mem.Allocator,
     models: *std.StringHashMap(std.ArrayList(Node)),
     all_vertex_data: *std.ArrayList(VertexAttribute),
@@ -85,6 +85,7 @@ fn loadAllModels(
         var gltf = Gltf.init(allocator);
         defer gltf.deinit();
         try gltf.parse(file_buf);
+
         // 先获取所有mesh
         var meshes = std.ArrayList(Mesh).init(allocator);
         defer meshes.deinit();
@@ -115,6 +116,7 @@ fn loadAllModels(
                                     .pos = .{ v[0], v[1], v[2] },
                                     .normal = .{ 1, 1, 1 },
                                     .color = .{ @mod(i / 0.1, 1), @mod(i / 0.2, 1), @mod(i / 0.3, 1), 1 },
+                                    .joints = 0,
                                 });
                             }
                         },
@@ -131,6 +133,13 @@ fn loadAllModels(
                             var i: u32 = 0;
                             while (it.next()) |c| : (i += 1)
                                 vertex_data.items[i].color = .{ c[0], c[1], c[2], c[3] };
+                        },
+                        .joints => |idx| {
+                            const accessor = gltf.data.accessors.items[idx];
+                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                            var i: u32 = 0;
+                            while (it.next()) |j| : (i += 1)
+                                vertex_data.items[i].joints = j[0];
                         },
                         else => {},
                     }
@@ -153,7 +162,7 @@ fn loadAllModels(
         var model = std.ArrayList(Node).init(allocator);
         const root_node_idx = gltf.data.scene.?;
         const root_node = gltf.data.nodes.items[root_node_idx];
-        try foreachNode(
+        try linkNodeAndMesh(
             &model,
             &meshes,
             &gltf.data,
@@ -165,10 +174,12 @@ fn loadAllModels(
         try models.put(model_name, model);
         std.debug.print("------{s}------", .{model_name});
         gltf.debugPrint();
+
+        //  动画加载测试
     }
 }
 
-fn foreachNode(
+fn linkNodeAndMesh(
     models: *std.ArrayList(Node),
     meshes: *std.ArrayList(Mesh),
     gltf_data: *Gltf.Data,
@@ -194,7 +205,7 @@ fn foreachNode(
         });
     }
     for (root_node.children.items) |child_idx|
-        try foreachNode(
+        try linkNodeAndMesh(
             models,
             meshes,
             gltf_data,

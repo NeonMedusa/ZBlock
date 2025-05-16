@@ -17,7 +17,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
     const max_entities = 1000;
     const uniform_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
         .size = aligned_uniform_size * max_entities,
-        .usage = wgpu.WGPUBufferUsage_Uniform | wgpu.WGPUBufferUsage_CopyDst,
+        .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst,
         .mappedAtCreation = 0,
     });
 
@@ -28,7 +28,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
             .binding = 0,
             .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
             .buffer = .{
-                .type = wgpu.WGPUBufferBindingType_Uniform,
+                .type = wgpu.WGPUBufferBindingType_ReadOnlyStorage,
                 .hasDynamicOffset = 1,
             },
         },
@@ -51,23 +51,8 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
         .bindGroupLayouts = &bind_group_layout,
     });
 
-    const attributes = [_]wgpu.WGPUVertexAttribute{
-        .{
-            .format = wgpu.WGPUVertexFormat_Float32x3,
-            .offset = @offsetOf(VertexAttribute, "pos"),
-            .shaderLocation = 0,
-        },
-        .{
-            .format = wgpu.WGPUVertexFormat_Float32x3,
-            .offset = @offsetOf(VertexAttribute, "normal"),
-            .shaderLocation = 1,
-        },
-        .{
-            .format = wgpu.WGPUVertexFormat_Float32x4,
-            .offset = @offsetOf(VertexAttribute, "color"),
-            .shaderLocation = 2,
-        },
-    };
+    const attributes = generateVertexAttributes(VertexAttribute);
+
     const pipeline_desc = wgpu.WGPURenderPipelineDescriptor{
         .layout = pipeline_layout, // 添加管线布局
         .vertex = .{
@@ -159,6 +144,28 @@ pub fn createShaderModule(device: wgpu.WGPUDevice, shader_file_path: []const u8)
         .nextInChain = &shader_source.chain,
     };
     return wgpu.wgpuDeviceCreateShaderModule(device, &shader_desc);
+}
+
+fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(VertexType).len]wgpu.WGPUVertexAttribute {
+    const fields = std.meta.fields(VertexType);
+    var attributes: [fields.len]wgpu.WGPUVertexAttribute = undefined;
+    var offset: usize = 0;
+    inline for (fields, 0..) |field, i| {
+        const format = switch (field.type) {
+            [3]f32 => wgpu.WGPUVertexFormat_Float32x3,
+            [4]f32 => wgpu.WGPUVertexFormat_Float32x4,
+            f32 => wgpu.WGPUVertexFormat_Float32,
+            u32 => wgpu.WGPUVertexFormat_Uint32,
+            else => @compileError("Unsupported vertex attribute type: " ++ @typeName(field.type)),
+        };
+        attributes[i] = .{
+            .format = format,
+            .offset = offset,
+            .shaderLocation = @intCast(i),
+        };
+        offset += @sizeOf(field.type);
+    }
+    return attributes;
 }
 
 const std = @import("std");
