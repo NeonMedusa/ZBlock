@@ -46,24 +46,33 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
     // 设置渲染管线
     wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipeline.handle);
 
+    // 更新uniformbuffer
+    wgpu.wgpuQueueWriteBuffer(
+        gctx.queue,
+        pipeline.uniform_buffer,
+        0,
+        &scene.uniform_buffer_obj,
+        @sizeOf(Uniform),
+    );
     // 为每个模型实例写入transform
     const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
-    const aligned_uniform_size = ((@sizeOf(Uniforms) + min_align_size - 1) / min_align_size) * min_align_size;
+    const aligned_uniform_size = ((@sizeOf(Uniform) + min_align_size - 1) / min_align_size) * min_align_size;
     var cur_instance_idx: u32 = 0;
     for (scene.entities.items) |entity| {
         // 渲染每个模型实例中的所有mesh
         const model = model_manager.models.get(entity.model.?);
         for (model.?.items) |node| {
             // 计算动态偏移量并更新uniformbuffer
-            var ubo = scene.uniform_buffer_obj;
-            ubo.model_matrix = Mat4.mul(entity.getModelMatrix(), node.transform);
+            const instance_data = InstanceData{
+                .model_matrix = Mat4.mul(entity.getModelMatrix(), node.transform),
+            };
             const dynamic_offset = @as(u32, @intCast(cur_instance_idx)) * aligned_uniform_size;
             wgpu.wgpuQueueWriteBuffer(
                 gctx.queue,
-                pipeline.uniform_buffer,
+                pipeline.instances_data_buffer,
                 dynamic_offset,
-                &ubo,
-                @sizeOf(Uniforms),
+                &instance_data,
+                @sizeOf(InstanceData),
             );
             wgpu.wgpuRenderPassEncoderSetVertexBuffer(
                 pass,
@@ -126,7 +135,11 @@ const wgpu = @cImport({
 });
 const Gctx = @import("gctx.zig");
 const Pipeline = @import("pipeline.zig");
-const Uniforms = @import("uniforms.zig");
+
+const ShaderTypes = @import("shader_types.zig");
+const Uniform = ShaderTypes.Uniform;
+const InstanceData = ShaderTypes.InstanceData;
+
 const Scene = @import("scene.zig");
 const ModelManager = @import("model_manager.zig").ModelManager;
 

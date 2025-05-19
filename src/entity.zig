@@ -11,4 +11,4 @@ pub fn getModelMatrix(self: @This()) Mat4 {
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
-const Uniforms = @import("uniforms.zig");
+const Uniform = @import("shader_types.zig").Uniform;

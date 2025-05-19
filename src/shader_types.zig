@@ -1,0 +1,34 @@
+pub const Uniform = struct {
+    projection_matrix: Mat4 = undefined, // 投影变换
+    view_matrix: Mat4 = undefined, // 视图变换
+    time: f32 = undefined,
+    _padding: [3]f32 = undefined,
+    joint_matrices: [100]Mat4,
+    pub fn init(window: Window) @This() {
+        const aspect_ratio: f32 = window.widthF / window.heightF;
+        const projection_matrix = Algebra.perspective(70, aspect_ratio, 0.001, 100);
+        const view_matrix = Algebra.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero(), Vec3.up());
+        return .{
+            .projection_matrix = projection_matrix,
+            .view_matrix = view_matrix,
+            .joint_matrices = undefined,
+        };
+    }
+};
+
+pub const InstanceData = struct {
+    model_matrix: Mat4 = undefined,
+};
+
+pub const VertexAttribute = struct {
+    pos: [3]f32,
+    normal: [3]f32,
+    color: [4]f32,
+    joint_indices: [4]u32,
+    joint_weights: [4]f32,
+};
+
+const Algebra = @import("zalgebra");
+const Vec3 = Algebra.Vec3;
+const Mat4 = Algebra.Mat4;
+const Window = @import("window.zig");

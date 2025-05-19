@@ -92,7 +92,6 @@ const Gltf = @import("zgltf");
 const Gctx = @import("gctx.zig");
 const Window = @import("window.zig");
 const Pipeline = @import("pipeline.zig");
-const Uniforms = @import("uniforms.zig");
 const Mesh = @import("mesh.zig");
 const Render = @import("render.zig");
 const Camera3D = @import("camera3d.zig");

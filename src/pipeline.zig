@@ -1,6 +1,7 @@
 handle: wgpu.WGPURenderPipeline,
-aligned_uniform_size: u64,
+aligned_instances_data_size: u64,
 uniform_buffer: wgpu.WGPUBuffer,
+instances_data_buffer: wgpu.WGPUBuffer,
 bind_group_layout: wgpu.WGPUBindGroupLayout,
 bind_group: wgpu.WGPUBindGroup,
 pipeline_layout: wgpu.WGPUPipelineLayout,
@@ -11,37 +12,64 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
         shader_file_path,
     );
 
-    // 获取对齐大小
-    const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
-    const aligned_uniform_size = ((@sizeOf(Uniforms) + min_align_size - 1) / min_align_size) * min_align_size;
-    const max_entities = 1000;
     const uniform_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
-        .size = aligned_uniform_size * max_entities,
+        .size = @sizeOf(Uniform),
         .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst,
         .mappedAtCreation = 0,
     });
 
-    // 创建 binding group layout 时启用动态偏移
-    const bind_group_layout = wgpu.wgpuDeviceCreateBindGroupLayout(gctx.device, &wgpu.WGPUBindGroupLayoutDescriptor{
-        .entryCount = 1,
-        .entries = &wgpu.WGPUBindGroupLayoutEntry{
+    // 获取对齐大小
+    const max_entities = 1000;
+    const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
+    const aligned_instances_data_size = ((@sizeOf(Uniform) + min_align_size - 1) / min_align_size) * min_align_size;
+    const instance_data_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
+        .size = aligned_instances_data_size * max_entities,
+        .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst,
+        .mappedAtCreation = 0,
+    });
+
+    // 创建 binding group
+    const bgl_entries = [_]wgpu.WGPUBindGroupLayoutEntry{
+        .{ // Uniform
             .binding = 0,
+            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .buffer = .{
+                .type = wgpu.WGPUBufferBindingType_ReadOnlyStorage,
+                .hasDynamicOffset = 0,
+            },
+        },
+        .{ // instances_data
+            .binding = 1,
             .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
             .buffer = .{
                 .type = wgpu.WGPUBufferBindingType_ReadOnlyStorage,
                 .hasDynamicOffset = 1,
             },
         },
-    });
-
+    };
+    const bind_group_layout = wgpu.wgpuDeviceCreateBindGroupLayout(
+        gctx.device,
+        &wgpu.WGPUBindGroupLayoutDescriptor{
+            .entryCount = bgl_entries.len,
+            .entries = &bgl_entries,
+        },
+    );
     const bind_group = wgpu.wgpuDeviceCreateBindGroup(gctx.device, &wgpu.WGPUBindGroupDescriptor{
         .layout = bind_group_layout,
-        .entryCount = 1,
-        .entries = &wgpu.WGPUBindGroupEntry{
-            .binding = 0,
-            .buffer = uniform_buffer,
-            .offset = 0,
-            .size = aligned_uniform_size,
+        .entryCount = bgl_entries.len,
+        .entries = &[_]wgpu.WGPUBindGroupEntry{
+            .{
+                .binding = 0,
+                .buffer = uniform_buffer,
+                .offset = 0,
+                .size = @sizeOf(Uniform),
+            },
+            .{
+                .binding = 1,
+                .buffer = instance_data_buffer,
+                .offset = 0,
+                .size = aligned_instances_data_size,
+            },
         },
     });
 
@@ -106,17 +134,19 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
     return @This(){
         .handle = pipeline,
         .uniform_buffer = uniform_buffer,
-        .aligned_uniform_size = aligned_uniform_size,
+        .aligned_instances_data_size = aligned_instances_data_size,
         .bind_group_layout = bind_group_layout,
         .bind_group = bind_group,
         .pipeline_layout = pipeline_layout,
         .shader_module = shader_module,
+        .instances_data_buffer = instance_data_buffer,
     };
 }
 
 pub fn deinit(self: @This()) void {
     wgpu.wgpuRenderPipelineRelease(self.handle);
     wgpu.wgpuBufferRelease(self.uniform_buffer);
+    wgpu.wgpuBufferRelease(self.instances_data_buffer);
     wgpu.wgpuBindGroupLayoutRelease(self.bind_group_layout);
     wgpu.wgpuBindGroupRelease(self.bind_group);
     wgpu.wgpuPipelineLayoutRelease(self.pipeline_layout);
@@ -171,8 +201,12 @@ fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(VertexTy
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");
-const Uniforms = @import("uniforms.zig");
-const VertexAttribute = @import("vertex_attribute.zig");
+
+const ShaderTypes = @import("shader_types.zig");
+const Uniform = ShaderTypes.Uniform;
+const InstanceData = ShaderTypes.InstanceData;
+const VertexAttribute = ShaderTypes.VertexAttribute;
+
 const wgpu = @cImport({
     @cInclude("wgpu.h");
 });

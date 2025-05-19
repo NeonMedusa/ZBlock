@@ -1,4 +1,4 @@
-uniform_buffer_obj: Uniforms,
+uniform_buffer_obj: Uniform,
 allocator: std.mem.Allocator,
 main_camera: Camera3D,
 entities: std.ArrayList(Entity),
@@ -11,8 +11,7 @@ delta_time_f32: f32 = 0,
 pub fn init(allocator: std.mem.Allocator, window: *Window) @This() {
     var camera = Camera3D.init();
     camera.movement_speed = 5.0;
-    var uniform_buffer_obj = Uniforms.init(window.*);
-    uniform_buffer_obj.color = .{ 0.0, 1.0, 0.4, 1.0 };
+    var uniform_buffer_obj = Uniform.init(window.*);
     uniform_buffer_obj.view_matrix = camera.getViewMatrix();
     return .{
         .uniform_buffer_obj = uniform_buffer_obj,
@@ -61,6 +60,10 @@ const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
-const Uniforms = @import("uniforms.zig");
+
+const ShaderTypes = @import("shader_types.zig");
+const Uniform = ShaderTypes.Uniform;
+const InstanceData = ShaderTypes.InstanceData;
+
 const Camera3D = @import("camera3d.zig");
 const Entity = @import("entity.zig");
