@@ -12,7 +12,7 @@ struct VertexInput {
     @location(0) position : vec3f,
     @location(1) normal : vec3f,
     @location(2) color : vec4f,
-    @location(3) joints : f32,
+    @location(3) joints : vec4u,
     @builtin(instance_index) ins_idx : u32,
 };
 

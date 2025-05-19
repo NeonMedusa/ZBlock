@@ -23,30 +23,41 @@ pub fn main() !void {
     var scene = Scene.init(allocator, &window);
     defer scene.deinit();
 
-    const barramundi_fish = Entity{
-        .scale = Vec3{ .data = .{ 4, 4, 4 } },
+    // 为每种模型创建一个实体
+    // var it = model_manager.models.iterator().hm.keyIterator();
+    // var i: f32 = 0;
+    // while (it.next()) |model| : (i += 2) {
+    //     const entity = Entity{
+    //         .position = Vec3{ .data = .{ i, 0, 0 } },
+    //         .model = model.*,
+    //     };
+    //     try scene.addEntity(entity);
+    // }
+
+    const cesium_man = Entity{
+        .model = "CesiumMan",
         .position = Vec3.zero(),
+    };
+    try scene.addEntity(cesium_man);
+
+    const barramundi_fish = Entity{
         .model = "BarramundiFish",
+        .position = Vec3{ .data = .{ 2, 0, 0 } },
+        .scale = Vec3{ .data = .{ 4, 4, 4 } },
     };
     try scene.addEntity(barramundi_fish);
 
-    const box = Entity{
-        .position = Vec3{ .data = .{ 2, 2, 2 } },
-        .model = "box",
-    };
-    try scene.addEntity(box);
-
     const avocado = Entity{
-        .position = Vec3{ .data = .{ 4, 4, 4 } },
-        .scale = Vec3{ .data = .{ 50, 50, 50 } },
         .model = "Avocado",
+        .position = Vec3{ .data = .{ 4, 0, 0 } },
+        .scale = Vec3{ .data = .{ 50, 50, 50 } },
     };
     try scene.addEntity(avocado);
 
     const buggy = Entity{
-        .scale = Vec3{ .data = .{ 0.05, 0.05, 0.05 } },
-        .position = Vec3{ .data = .{ 8, 8, 8 } },
         .model = "Buggy",
+        .position = Vec3{ .data = .{ 10, 0, 0 } },
+        .scale = Vec3{ .data = .{ 0.05, 0.05, 0.05 } },
     };
     try scene.addEntity(buggy);
 

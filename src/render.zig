@@ -46,12 +46,12 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
     // 设置渲染管线
     wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipeline.handle);
 
-    // 为每个模型写入transform
+    // 为每个模型实例写入transform
     const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
     const aligned_uniform_size = ((@sizeOf(Uniforms) + min_align_size - 1) / min_align_size) * min_align_size;
     var cur_instance_idx: u32 = 0;
     for (scene.entities.items) |entity| {
-        // 渲染每个模型中的所有mesh
+        // 渲染每个模型实例中的所有mesh
         const model = model_manager.models.get(entity.model.?);
         for (model.?.items) |node| {
             // 计算动态偏移量并更新uniformbuffer

@@ -152,10 +152,11 @@ fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(VertexTy
     var offset: usize = 0;
     inline for (fields, 0..) |field, i| {
         const format = switch (field.type) {
+            f32 => wgpu.WGPUVertexFormat_Float32,
             [3]f32 => wgpu.WGPUVertexFormat_Float32x3,
             [4]f32 => wgpu.WGPUVertexFormat_Float32x4,
-            f32 => wgpu.WGPUVertexFormat_Float32,
             u32 => wgpu.WGPUVertexFormat_Uint32,
+            [4]u32 => wgpu.WGPUVertexFormat_Uint32x4,
             else => @compileError("Unsupported vertex attribute type: " ++ @typeName(field.type)),
         };
         attributes[i] = .{

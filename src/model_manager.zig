@@ -116,7 +116,8 @@ fn extractModelData(
                                     .pos = .{ v[0], v[1], v[2] },
                                     .normal = .{ 1, 1, 1 },
                                     .color = .{ @mod(i / 0.1, 1), @mod(i / 0.2, 1), @mod(i / 0.3, 1), 1 },
-                                    .joints = 0,
+                                    .joints = .{ 0, 0, 0, 0 },
+                                    .weights = .{ 0, 0, 0, 0 },
                                 });
                             }
                         },
@@ -136,10 +137,34 @@ fn extractModelData(
                         },
                         .joints => |idx| {
                             const accessor = gltf.data.accessors.items[idx];
+                            switch (accessor.component_type) {
+                                .unsigned_byte => {
+                                    var it = accessor.iterator(u8, &gltf, gltf.glb_binary.?);
+                                    var i: usize = 0;
+                                    while (it.next()) |j| : (i += 1)
+                                        vertex_data.items[i].joints = .{ j[0], j[1], j[2], j[3] };
+                                },
+                                .unsigned_short => {
+                                    var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
+                                    var i: usize = 0;
+                                    while (it.next()) |j| : (i += 1)
+                                        vertex_data.items[i].joints = .{ j[0], j[1], j[2], j[3] };
+                                },
+                                .unsigned_integer => {
+                                    var it = accessor.iterator(u32, &gltf, gltf.glb_binary.?);
+                                    var i: usize = 0;
+                                    while (it.next()) |j| : (i += 1)
+                                        vertex_data.items[i].joints = .{ j[0], j[1], j[2], j[3] };
+                                },
+                                else => @panic("Type matching error, please refer to the definition of 'accessor.iterator'"),
+                            }
+                        },
+                        .weights => |idx| {
+                            const accessor = gltf.data.accessors.items[idx];
                             var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                             var i: u32 = 0;
-                            while (it.next()) |j| : (i += 1)
-                                vertex_data.items[i].joints = j[0];
+                            while (it.next()) |w| : (i += 1)
+                                vertex_data.items[i].weights = .{ w[0], w[1], w[2], w[3] };
                         },
                         else => {},
                     }
@@ -174,8 +199,6 @@ fn extractModelData(
         try models.put(model_name, model);
         std.debug.print("------{s}------", .{model_name});
         gltf.debugPrint();
-
-        //  动画加载测试
     }
 }
 
