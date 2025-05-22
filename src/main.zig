@@ -61,6 +61,14 @@ pub fn main() !void {
     };
     try scene.addEntity(buggy);
 
+    const model = model_manager.models.get("Buggy");
+    for (model.?.nodes.items) |node| {
+        if (node.gpu_mesh_idx != null) {
+            const mat = node.getWorldMatrix();
+            Std.debug.print("{?}", .{mat});
+        }
+    }
+
     // 主循环
     while (window.shouldClose()) {
         // ESC键关闭窗口
@@ -98,4 +106,4 @@ const Camera3D = @import("camera3d.zig");
 const Input = @import("input.zig");
 const Entity = @import("entity.zig");
 const Scene = @import("scene.zig");
-const ModelManager = @import("model_manager.zig").ModelManager;
+const ModelManager = @import("zgltf_wapper.zig").ModelManager;

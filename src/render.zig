@@ -61,55 +61,63 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
     for (scene.entities.items) |entity| {
         // 渲染每个模型实例中的所有mesh
         const model = model_manager.models.get(entity.model.?);
-        for (model.?.items) |node| {
-            // 计算动态偏移量并更新uniformbuffer
-            const instance_data = InstanceData{
-                .model_matrix = Mat4.mul(entity.getModelMatrix(), node.transform),
-            };
-            const dynamic_offset = @as(u32, @intCast(cur_instance_idx)) * aligned_uniform_size;
-            wgpu.wgpuQueueWriteBuffer(
-                gctx.queue,
-                pipeline.instances_data_buffer,
-                dynamic_offset,
-                &instance_data,
-                @sizeOf(InstanceData),
-            );
-            wgpu.wgpuRenderPassEncoderSetVertexBuffer(
-                pass,
-                0,
-                model_manager.vertex_buffer,
-                node.mesh.vertex_offset,
-                node.mesh.vertex_size,
-            );
-            wgpu.wgpuRenderPassEncoderSetIndexBuffer(
-                pass,
-                model_manager.index_buffer,
-                wgpu.WGPUIndexFormat_Uint16,
-                node.mesh.index_offset,
-                node.mesh.index_size,
-            );
-            // 设置 bind group 并指定动态偏移量
-            wgpu.wgpuRenderPassEncoderSetBindGroup(
-                pass,
-                0,
-                pipeline.bind_group,
-                1,
-                &dynamic_offset,
-            );
-            // 渲染
-            if (node.mesh.index_count != 0) {
-                wgpu.wgpuRenderPassEncoderDrawIndexed(
-                    pass,
-                    node.mesh.index_count,
-                    1,
-                    0,
-                    0,
-                    0,
+        for (model.?.nodes.items) |node| {
+            if (node.gpu_mesh_idx) |mesh_idx| {
+                // 计算动态偏移量并更新model_matrix
+                const instance_data = InstanceData{
+                    .model_matrix = Mat4.mul(entity.getModelMatrix(), node.getWorldMatrix()),
+                };
+                const dynamic_offset = @as(u32, @intCast(cur_instance_idx)) * aligned_uniform_size;
+                wgpu.wgpuQueueWriteBuffer(
+                    gctx.queue,
+                    pipeline.instances_data_buffer,
+                    dynamic_offset,
+                    &instance_data,
+                    @sizeOf(InstanceData),
                 );
-            } else if (node.mesh.vertex_count != 0) {
-                wgpu.wgpuRenderPassEncoderDraw(pass, node.mesh.vertex_count, 1, node.mesh.vertex_offset, 0);
+                wgpu.wgpuRenderPassEncoderSetVertexBuffer(
+                    pass,
+                    0,
+                    model_manager.vertex_buffer,
+                    model.?.meshes.items[mesh_idx].vertex_offset,
+                    model.?.meshes.items[mesh_idx].vertex_size,
+                );
+                wgpu.wgpuRenderPassEncoderSetIndexBuffer(
+                    pass,
+                    model_manager.index_buffer,
+                    wgpu.WGPUIndexFormat_Uint16,
+                    model.?.meshes.items[mesh_idx].index_offset,
+                    model.?.meshes.items[mesh_idx].index_size,
+                );
+                // 设置 bind group 并指定动态偏移量
+                wgpu.wgpuRenderPassEncoderSetBindGroup(
+                    pass,
+                    0,
+                    pipeline.bind_group,
+                    1,
+                    &dynamic_offset,
+                );
+                // 渲染
+                if (model.?.meshes.items[mesh_idx].index_count != 0) {
+                    wgpu.wgpuRenderPassEncoderDrawIndexed(
+                        pass,
+                        model.?.meshes.items[mesh_idx].index_count,
+                        1,
+                        0,
+                        0,
+                        0,
+                    );
+                } else if (model.?.meshes.items[mesh_idx].vertex_count != 0) {
+                    wgpu.wgpuRenderPassEncoderDraw(
+                        pass,
+                        model.?.meshes.items[mesh_idx].vertex_count,
+                        1,
+                        model.?.meshes.items[mesh_idx].vertex_offset,
+                        0,
+                    );
+                }
+                cur_instance_idx += 1;
             }
-            cur_instance_idx += 1;
         }
     }
 
@@ -141,7 +149,7 @@ const Uniform = ShaderTypes.Uniform;
 const InstanceData = ShaderTypes.InstanceData;
 
 const Scene = @import("scene.zig");
-const ModelManager = @import("model_manager.zig").ModelManager;
+const ModelManager = @import("zgltf_wapper.zig").ModelManager;
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;

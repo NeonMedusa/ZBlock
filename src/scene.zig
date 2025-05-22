@@ -11,10 +11,14 @@ delta_time_f32: f32 = 0,
 pub fn init(allocator: std.mem.Allocator, window: *Window) @This() {
     var camera = Camera3D.init();
     camera.movement_speed = 5.0;
-    var uniform_buffer_obj = Uniform.init(window.*);
-    uniform_buffer_obj.view_matrix = camera.getViewMatrix();
+    var ubo = Uniform.init(window.*);
+    ubo.view_matrix = camera.getViewMatrix();
+    for (ubo.joint_matrices, 0..) |_, i| {
+        ubo.joint_matrices[i] = Mat4.identity();
+    }
+
     return .{
-        .uniform_buffer_obj = uniform_buffer_obj,
+        .uniform_buffer_obj = ubo,
         .allocator = allocator,
         .main_camera = camera,
         .entities = std.ArrayList(Entity).init(allocator),

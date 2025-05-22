@@ -66,8 +66,8 @@ pub fn getViewMatrix(self: @This()) Mat4 {
 
 const algebra = @import("zalgebra");
 const Vec3 = algebra.Vec3;
-const Window = @import("window.zig");
 const Mat4 = algebra.Mat4;
+const Window = @import("window.zig");
 const glfw = @cImport({
     @cDefine("GLFW_INCLUDE_NONE", "1");
     @cDefine("GLFW_EXPOSE_NATIVE_WIN32", "1");
