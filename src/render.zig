@@ -51,23 +51,34 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
         gctx.queue,
         pipeline.uniform_buffer,
         0,
-        &scene.uniform_buffer_obj,
+        &scene.ubo,
         @sizeOf(Uniform),
     );
     // 为每个模型实例写入transform
     const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
-    const aligned_uniform_size = ((@sizeOf(Uniform) + min_align_size - 1) / min_align_size) * min_align_size;
+    const aligned_instances_data_size = ((@sizeOf(InstanceData) + min_align_size - 1) / min_align_size) * min_align_size;
     var cur_instance_idx: u32 = 0;
     for (scene.entities.items) |entity| {
         // 渲染每个模型实例中的所有mesh
         const model = model_manager.models.get(entity.model.?);
         for (model.?.nodes.items) |node| {
             if (node.gpu_mesh_idx) |mesh_idx| {
-                // 计算动态偏移量并更新model_matrix
-                const instance_data = InstanceData{
-                    .model_matrix = Mat4.mul(entity.getModelMatrix(), node.getWorldMatrix()),
+                var instance_data = InstanceData{
+                    .entity_transform = entity.getTransform(),
                 };
-                const dynamic_offset = @as(u32, @intCast(cur_instance_idx)) * aligned_uniform_size;
+                if (node.skin_idx) |skin_idx| {
+                    const skin = model.?.skins.items[skin_idx];
+                    for (skin.joints, 0..) |joint, i| {
+                        instance_data.joint_matrices[i] = Mat4.mul(
+                            joint.getWorldMatrix(),
+                            skin.inverse_bind_matrices[i],
+                        );
+                    }
+                } else {
+                    instance_data.joint_matrices[0] = Mat4.identity();
+                    instance_data.entity_transform = Mat4.mul(instance_data.entity_transform, node.getWorldMatrix());
+                }
+                const dynamic_offset = @as(u32, @intCast(cur_instance_idx)) * aligned_instances_data_size;
                 wgpu.wgpuQueueWriteBuffer(
                     gctx.queue,
                     pipeline.instances_data_buffer,
@@ -89,7 +100,6 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
                     model.?.meshes.items[mesh_idx].index_offset,
                     model.?.meshes.items[mesh_idx].index_size,
                 );
-                // 设置 bind group 并指定动态偏移量
                 wgpu.wgpuRenderPassEncoderSetBindGroup(
                     pass,
                     0,
@@ -97,7 +107,6 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
                     1,
                     &dynamic_offset,
                 );
-                // 渲染
                 if (model.?.meshes.items[mesh_idx].index_count != 0) {
                     wgpu.wgpuRenderPassEncoderDrawIndexed(
                         pass,

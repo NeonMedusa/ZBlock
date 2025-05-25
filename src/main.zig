@@ -1,6 +1,6 @@
 pub fn main() !void {
     // 创建内存分配器
-    var gpa = Std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -23,51 +23,18 @@ pub fn main() !void {
     var scene = Scene.init(allocator, &window);
     defer scene.deinit();
 
-    // 为每种模型创建一个实体
-    // var it = model_manager.models.iterator().hm.keyIterator();
-    // var i: f32 = 0;
-    // while (it.next()) |model| : (i += 2) {
-    //     const entity = Entity{
-    //         .position = Vec3{ .data = .{ i, 0, 0 } },
-    //         .model = model.*,
-    //     };
-    //     try scene.addEntity(entity);
-    // }
-
     const cesium_man = Entity{
         .model = "CesiumMan",
         .position = Vec3.zero(),
     };
     try scene.addEntity(cesium_man);
 
-    const barramundi_fish = Entity{
-        .model = "BarramundiFish",
-        .position = Vec3{ .data = .{ 2, 0, 0 } },
-        .scale = Vec3{ .data = .{ 4, 4, 4 } },
-    };
-    try scene.addEntity(barramundi_fish);
-
-    const avocado = Entity{
-        .model = "Avocado",
-        .position = Vec3{ .data = .{ 4, 0, 0 } },
-        .scale = Vec3{ .data = .{ 50, 50, 50 } },
-    };
-    try scene.addEntity(avocado);
-
     const buggy = Entity{
         .model = "Buggy",
-        .position = Vec3{ .data = .{ 10, 0, 0 } },
+        .position = Vec3{ .data = .{ 5, 0, 0 } },
         .scale = Vec3{ .data = .{ 0.05, 0.05, 0.05 } },
     };
     try scene.addEntity(buggy);
-
-    const model = model_manager.models.get("Buggy");
-    for (model.?.nodes.items) |node| {
-        if (node.gpu_mesh_idx != null) {
-            const mat = node.getWorldMatrix();
-            Std.debug.print("{?}", .{mat});
-        }
-    }
 
     // 主循环
     while (window.shouldClose()) {
@@ -81,7 +48,7 @@ pub fn main() !void {
     }
 }
 
-const Std = @import("std");
+const std = @import("std");
 const wgpu = @cImport({
     @cInclude("wgpu.h");
 });

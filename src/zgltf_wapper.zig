@@ -7,7 +7,7 @@ const GpuMesh = struct {
     index_size: u32,
     index_count: u32,
 };
-/// 包装后的节点层级结构（支持变换和脏标记）
+/// 包装后的节点层级结构
 pub const SceneNode = struct {
     parent: ?*SceneNode = null,
     children: std.ArrayList(*SceneNode),
@@ -17,24 +17,28 @@ pub const SceneNode = struct {
     local_matrix: Mat4 = Mat4.identity(),
     world_matrix: Mat4 = Mat4.identity(),
     gpu_mesh_idx: ?usize = null,
-    skin: ?SkinData = null,
+    skin_idx: ?usize = null,
     pub fn init(allocator: std.mem.Allocator, gltf_node: *Gltf.Node) !SceneNode {
         var node = SceneNode{
             .children = std.ArrayList(*SceneNode).init(allocator),
             .local_translation = Vec3{ .data = gltf_node.translation },
             .local_scale = Vec3{ .data = gltf_node.scale },
             .local_rotation = Quat.new(
+                gltf_node.rotation[3],
                 gltf_node.rotation[0],
                 gltf_node.rotation[1],
                 gltf_node.rotation[2],
-                gltf_node.rotation[3],
             ),
             .gpu_mesh_idx = gltf_node.mesh,
+            .skin_idx = gltf_node.skin,
         };
         if (gltf_node.matrix) |mat| {
             node.local_matrix = ArrToMat4(mat);
         } else {
-            node.local_matrix = Mat4.identity();
+            const t_mat = Mat4.fromTranslate(node.local_translation);
+            const r_mat = node.local_rotation.toMat4();
+            const s_mat = Mat4.fromScale(node.local_scale);
+            node.local_matrix = Mat4.mul(t_mat, Mat4.mul(r_mat, s_mat));
         }
         return node;
     }
@@ -50,13 +54,7 @@ pub const SceneNode = struct {
 pub const SkinData = struct {
     joints: []*SceneNode,
     inverse_bind_matrices: []Mat4,
-    joint_matrices: []Mat4, // 最终传递给着色器的数据
-    /// 计算所有关节的当前矩阵
-    pub fn updateJointMatrices(self: *SkinData) void {
-        for (self.joints, 0..) |joint, i| {
-            self.joint_matrices[i] = Mat4.mul(joint.getWorldMatrix(), self.inverse_bind_matrices[i]);
-        }
-    }
+    skeleton: ?*SceneNode = null,
 };
 
 pub const Model = struct {
@@ -102,16 +100,15 @@ pub const Model = struct {
             defer cur_mesh_vertex_data.deinit();
             var cur_mesh_index_data = std.ArrayList(u16).init(self.allocator);
             defer cur_mesh_index_data.deinit();
-            // 由于一个mesh中可能会有多个primitive，所以我们需要为当前primitive的索引计算顶点偏移
-            var cur_primitive_vertex_offset: u16 = 0;
             for (mesh.primitives.items) |primitive| {
-                cur_primitive_vertex_offset += @intCast(cur_mesh_vertex_data.items.len);
+                // 由于一个mesh中可能会有多个primitive，所以我们需要为当前primitive计算索引偏移
+                const vertex_start = cur_mesh_vertex_data.items.len;
                 // 提取索引数据
                 if (primitive.indices) |indices_accessor_index| {
                     const accessor = gltf.data.accessors.items[indices_accessor_index];
                     var it = accessor.iterator(u16, gltf, gltf.glb_binary.?);
                     while (it.next()) |indice|
-                        try cur_mesh_index_data.append(indice[0] + cur_primitive_vertex_offset);
+                        try cur_mesh_index_data.append(indice[0] + @as(u16, @intCast(vertex_start)));
                 } // 提取顶点数据
                 for (primitive.attributes.items) |attribute| {
                     switch (attribute) {
@@ -132,14 +129,14 @@ pub const Model = struct {
                         .normal => |idx| {
                             const accessor = gltf.data.accessors.items[idx];
                             var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
-                            var i: u32 = 0;
+                            var i: usize = vertex_start;
                             while (it.next()) |n| : (i += 1)
                                 cur_mesh_vertex_data.items[i].normal = .{ n[0], n[1], n[2] };
                         },
                         .color => |idx| {
                             const accessor = gltf.data.accessors.items[idx];
                             var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
-                            var i: u32 = 0;
+                            var i: usize = vertex_start;
                             while (it.next()) |c| : (i += 1)
                                 cur_mesh_vertex_data.items[i].color = .{ c[0], c[1], c[2], c[3] };
                         },
@@ -148,19 +145,19 @@ pub const Model = struct {
                             switch (accessor.component_type) {
                                 .unsigned_byte => {
                                     var it = accessor.iterator(u8, gltf, gltf.glb_binary.?);
-                                    var i: usize = 0;
+                                    var i: usize = vertex_start;
                                     while (it.next()) |j| : (i += 1)
                                         cur_mesh_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
                                 },
                                 .unsigned_short => {
                                     var it = accessor.iterator(u16, gltf, gltf.glb_binary.?);
-                                    var i: usize = 0;
+                                    var i: usize = vertex_start;
                                     while (it.next()) |j| : (i += 1)
                                         cur_mesh_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
                                 },
                                 .unsigned_integer => {
                                     var it = accessor.iterator(u32, gltf, gltf.glb_binary.?);
-                                    var i: usize = 0;
+                                    var i: usize = vertex_start;
                                     while (it.next()) |j| : (i += 1)
                                         cur_mesh_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
                                 },
@@ -170,9 +167,12 @@ pub const Model = struct {
                         .weights => |idx| {
                             const accessor = gltf.data.accessors.items[idx];
                             var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
-                            var i: u32 = 0;
-                            while (it.next()) |w| : (i += 1)
-                                cur_mesh_vertex_data.items[i].joint_weights = .{ w[0], w[1], w[2], w[3] };
+                            var i: usize = vertex_start;
+                            while (it.next()) |w| : (i += 1) {
+                                var weights = Vec4.new(w[0], w[1], w[2], w[3]);
+                                weights = weights.norm();
+                                cur_mesh_vertex_data.items[i].joint_weights = .{ weights.x(), weights.y(), weights.z(), weights.w() };
+                            }
                         },
                         else => {},
                     }
@@ -191,9 +191,31 @@ pub const Model = struct {
             try vertex_data.appendSlice(cur_mesh_vertex_data.items);
             try index_data.appendSlice(cur_mesh_index_data.items);
         }
+
+        // 处理皮肤数据
+        for (gltf.data.skins.items) |gltf_skin| {
+            var skin = SkinData{
+                .joints = try self.allocator.alloc(*SceneNode, gltf_skin.joints.items.len),
+                .inverse_bind_matrices = try self.allocator.alloc(Mat4, gltf_skin.joints.items.len),
+                .skeleton = if (gltf_skin.skeleton) |idx| self.nodes.items[idx] else null,
+            };
+            // 提取关节节点
+            for (gltf_skin.joints.items, 0..) |joint_idx, i|
+                skin.joints[i] = self.nodes.items[joint_idx];
+            // 提取逆绑定矩阵
+            if (gltf_skin.inverse_bind_matrices) |matrices_accessor| {
+                const accessor = gltf.data.accessors.items[matrices_accessor];
+                var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                var i: usize = 0;
+                while (it.next()) |arr| : (i += 1)
+                    skin.inverse_bind_matrices[i] = ArrToMat4(arr[0..16].*);
+            } else { // 如果没有提供逆绑定矩阵，使用单位矩阵
+                for (skin.inverse_bind_matrices) |*mat|
+                    mat.* = Mat4.identity();
+            }
+            try self.skins.append(skin);
+        }
     }
-    // 加载Skin
-    // ...
 };
 
 pub const ModelManager = struct {
@@ -241,8 +263,6 @@ pub const ModelManager = struct {
             const model_name = try allocator.dupe(u8, std.fs.path.stem(entry.basename));
             try models.put(model_name, model);
         }
-        std.debug.print("new_vertexCount:{d}\n", .{all_vertex_data.items.len});
-        std.debug.print("new_indexCount:{d}\n", .{all_index_data.items.len});
         const vertex_buffer_desc = wgpu.WGPUBufferDescriptor{
             .size = @sizeOf(VertexAttribute) * all_vertex_data.items.len,
             .usage = wgpu.WGPUBufferUsage_CopyDst | wgpu.WGPUBufferUsage_Vertex,
@@ -318,3 +338,4 @@ const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Quat = Algebra.Quat;
+const Vec4 = Algebra.Vec4;

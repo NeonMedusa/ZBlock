@@ -2,7 +2,7 @@ position: Vec3 = Vec3.zero(),
 rotation: Vec3 = Vec3.zero(),
 scale: Vec3 = Vec3.one(),
 model: ?[]const u8 = null,
-pub fn getModelMatrix(self: @This()) Mat4 {
+pub fn getTransform(self: @This()) Mat4 {
     const translation = Mat4.fromTranslate(self.position);
     const rotation = Mat4.fromEulerAngles(self.rotation);
     const scale = Mat4.fromScale(self.scale);

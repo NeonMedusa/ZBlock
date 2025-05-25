@@ -1467,7 +1467,7 @@ test "gltf.parse" {
     try expectEqualSlices(u8, nodes[0].name, "Z_UP");
     try expectEqualSlices(usize, nodes[0].children.items, &[_]usize{1});
     try expectEqualSlices(u8, nodes[2].name, "Cylinder");
-    try expectEqual(nodes[2].skin, 0);
+    try expectEqual(nodes[2].skin_idx, 0);
 
     try expectEqual(gltf.data.buffers.items.len > 0, true);
 

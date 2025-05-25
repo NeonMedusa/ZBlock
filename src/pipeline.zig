@@ -21,7 +21,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
     // 获取对齐大小
     const max_entities = 1000;
     const min_align_size = gctx.device_limits.minUniformBufferOffsetAlignment;
-    const aligned_instances_data_size = ((@sizeOf(Uniform) + min_align_size - 1) / min_align_size) * min_align_size;
+    const aligned_instances_data_size = ((@sizeOf(InstanceData) + min_align_size - 1) / min_align_size) * min_align_size;
     const instance_data_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
         .size = aligned_instances_data_size * max_entities,
         .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst,

@@ -3,12 +3,12 @@ struct Uniform {
     projection_matrix : mat4x4 < f32>,
     view_matrix : mat4x4 < f32>,
     time : f32,
-    joint_matrices : array<mat4x4 < f32>, 100>,
-};
 
+};
 @group(0) @binding(1) var<storage, read> instances_data : array<InstanceData>;
 struct InstanceData {
-    model_matrix : mat4x4 < f32>,
+    entity_transform : mat4x4 < f32>,
+    joint_matrices : array<mat4x4 < f32>, 50>,
 };
 
 struct VertexInput {
@@ -30,13 +30,18 @@ fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexO
     let ins_data = instances_data[ins_idx];
 
     let skin_matrix =
-    in.joint_weights.x * uniform.joint_matrices[in.joint_indices.x] +
-    in.joint_weights.y * uniform.joint_matrices[in.joint_indices.y] +
-    in.joint_weights.z * uniform.joint_matrices[in.joint_indices.z] +
-    in.joint_weights.w * uniform.joint_matrices[in.joint_indices.w];
+    in.joint_weights.x * ins_data.joint_matrices[in.joint_indices.x] +
+    in.joint_weights.y * ins_data.joint_matrices[in.joint_indices.y] +
+    in.joint_weights.z * ins_data.joint_matrices[in.joint_indices.z] +
+    in.joint_weights.w * ins_data.joint_matrices[in.joint_indices.w];
 
     var out : VertexOutput;
-    out.position = uniform.projection_matrix * uniform.view_matrix * ins_data.model_matrix * skin_matrix * vec4f(in.position, 1.0);
+    out.position = uniform.projection_matrix *
+    uniform.view_matrix *
+    ins_data.entity_transform *             //实体变换
+    skin_matrix *                           //骨骼变换
+    vec4f(in.position, 1.0);
+
     out.color = in.color;
     return out;
 }

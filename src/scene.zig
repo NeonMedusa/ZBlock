@@ -1,4 +1,4 @@
-uniform_buffer_obj: Uniform,
+ubo: Uniform,
 allocator: std.mem.Allocator,
 main_camera: Camera3D,
 entities: std.ArrayList(Entity),
@@ -13,12 +13,8 @@ pub fn init(allocator: std.mem.Allocator, window: *Window) @This() {
     camera.movement_speed = 5.0;
     var ubo = Uniform.init(window.*);
     ubo.view_matrix = camera.getViewMatrix();
-    for (ubo.joint_matrices, 0..) |_, i| {
-        ubo.joint_matrices[i] = Mat4.identity();
-    }
-
     return .{
-        .uniform_buffer_obj = ubo,
+        .ubo = ubo,
         .allocator = allocator,
         .main_camera = camera,
         .entities = std.ArrayList(Entity).init(allocator),
@@ -37,16 +33,16 @@ pub fn update(self: *@This()) !void {
     self.delta_time_f64 = self.current_frame_time - self.last_frame_time;
     self.delta_time_f32 = @floatCast(self.delta_time_f64);
     self.last_frame_time = self.current_frame_time;
-    self.uniform_buffer_obj.time = @floatCast(self.current_frame_time);
+    self.ubo.time = @floatCast(self.current_frame_time);
     // 更新摄像头
     self.main_camera.updateFromMouse(self.window.*);
     self.main_camera.updateFromKeyboard(self.window.*, self.delta_time_f32);
-    self.uniform_buffer_obj.view_matrix = self.main_camera.getViewMatrix();
+    self.ubo.view_matrix = self.main_camera.getViewMatrix();
     // entity移动
-    self.entities.items[0].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
-    self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
-    self.entities.items[2].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
-    self.entities.items[3].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    // self.entities.items[0].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    // self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    // self.entities.items[2].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+    // self.entities.items[3].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
 }
 
 const std = @import("std");
