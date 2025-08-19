@@ -50,11 +50,30 @@ pub const SceneNode = struct {
         return self.world_matrix;
     }
 };
-/// 蒙皮数据（用于 GPU 上传）
+// 蒙皮数据（用于 GPU 上传）
 pub const SkinData = struct {
     joints: []*SceneNode,
     inverse_bind_matrices: []Mat4,
     skeleton: ?*SceneNode = null,
+};
+
+pub const AnimationClip = struct {
+    name: []const u8,
+    channels: std.ArrayList(AnimationChannel),
+    samplers: std.ArrayList(AnimationSampler),
+    duration: f32,
+};
+
+pub const AnimationChannel = struct {
+    target_node: *SceneNode,
+    target_property: Gltf.TargetProperty,
+    sampler: *AnimationSampler,
+};
+
+pub const AnimationSampler = struct {
+    input: []f32, // 时间戳
+    output: []f32, // 输出值
+    interpolation: Gltf.Interpolation,
 };
 
 pub const Model = struct {
@@ -63,6 +82,7 @@ pub const Model = struct {
     root_nodes: std.ArrayList(*SceneNode),
     skins: std.ArrayList(SkinData),
     meshes: std.ArrayList(GpuMesh),
+    animations: std.ArrayList(AnimationClip),
     pub fn init(allocator: std.mem.Allocator) Model {
         return .{
             .allocator = allocator,
@@ -70,9 +90,10 @@ pub const Model = struct {
             .root_nodes = std.ArrayList(*SceneNode).init(allocator),
             .skins = std.ArrayList(SkinData).init(allocator),
             .meshes = std.ArrayList(GpuMesh).init(allocator),
+            .animations = std.ArrayList(AnimationClip).init(allocator),
         };
     }
-    /// 从 Gltf 加载并构建层级
+    // 从 Gltf 加载并构建层级
     pub fn loadFromGltf(
         self: *Model,
         gltf: *Gltf,
@@ -214,6 +235,203 @@ pub const Model = struct {
                     mat.* = Mat4.identity();
             }
             try self.skins.append(skin);
+        }
+
+        try self.loadAnimations(gltf);
+    }
+
+    // 新增方法：加载动画
+    fn loadAnimations(self: *Model, gltf: *Gltf) !void {
+        for (gltf.data.animations.items) |gltf_animation| {
+            // 处理可能为null的动画名称
+            const anim_name = if (gltf_animation.name) |name|
+                try self.allocator.dupe(u8, name)
+            else
+                try std.fmt.allocPrint(self.allocator, "animation_{d}", .{self.animations.items.len});
+            var clip = AnimationClip{
+                .name = anim_name,
+                .channels = std.ArrayList(AnimationChannel).init(self.allocator),
+                .samplers = std.ArrayList(AnimationSampler).init(self.allocator),
+                .duration = 0,
+            };
+            // 加载采样器
+            for (gltf_animation.samplers.items) |gltf_sampler| {
+                const input_accessor = gltf.data.accessors.items[gltf_sampler.input];
+                const output_accessor = gltf.data.accessors.items[gltf_sampler.output];
+                // 提取时间戳数据
+                var input_data = try self.allocator.alloc(f32, @as(usize, @intCast(input_accessor.count)));
+                var input_it = input_accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                var i: usize = 0;
+                while (input_it.next()) |v| : (i += 1) {
+                    input_data[i] = v[0];
+                    if (v[0] > clip.duration) {
+                        clip.duration = v[0];
+                    }
+                }
+                // 提取输出数据
+                var output_data = try self.allocator.alloc(f32, @as(usize, @intCast(output_accessor.count * 4))); // 假设最大是vec4
+                var output_it = output_accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                i = 0;
+                while (output_it.next()) |v| {
+                    for (v) |component| {
+                        output_data[i] = component;
+                        i += 1;
+                    }
+                }
+                try clip.samplers.append(.{
+                    .input = input_data,
+                    .output = output_data,
+                    .interpolation = gltf_sampler.interpolation,
+                });
+            }
+            // 加载通道
+            for (gltf_animation.channels.items) |gltf_channel| {
+                const node = self.nodes.items[gltf_channel.target.node];
+
+                try clip.channels.append(.{
+                    .target_node = node,
+                    .target_property = gltf_channel.target.property,
+                    .sampler = &clip.samplers.items[gltf_channel.sampler],
+                });
+            }
+            try self.animations.append(clip);
+        }
+    }
+};
+
+pub const AnimationPlayer = struct {
+    current_time: f32 = 0,
+    playback_speed: f32 = 1.0,
+    is_playing: bool = false,
+    loop: bool = true,
+    current_clip: ?*AnimationClip = null,
+    pub fn update(self: *AnimationPlayer, delta_time: f32) void {
+        if (!self.is_playing or self.current_clip == null) return;
+        self.current_time += delta_time * self.playback_speed;
+        if (self.current_time > self.current_clip.?.duration) {
+            if (self.loop) {
+                self.current_time = 0;
+            } else {
+                self.current_time = self.current_clip.?.duration;
+                self.is_playing = false;
+            }
+        }
+        self.applyAnimation();
+    }
+    pub fn play(self: *AnimationPlayer, clip: *AnimationClip) void {
+        self.current_clip = clip;
+        self.current_time = 0;
+        self.is_playing = true;
+    }
+    fn applyAnimation(self: *AnimationPlayer) void {
+        const clip = self.current_clip orelse return;
+        for (clip.channels.items) |channel| {
+            const sampler = channel.sampler;
+            const node = channel.target_node;
+            // 找到当前时间对应的关键帧
+            var prev_index: usize = 0;
+            while (prev_index < sampler.input.len - 1 and sampler.input[prev_index + 1] <= self.current_time) {
+                prev_index += 1;
+            }
+            if (prev_index >= sampler.input.len - 1) {
+                prev_index = sampler.input.len - 2;
+            }
+            const next_index = prev_index + 1;
+            const t0 = sampler.input[prev_index];
+            const t1 = sampler.input[next_index];
+            const alpha = if (t0 == t1) 0.0 else (self.current_time - t0) / (t1 - t0);
+            // 根据不同的插值类型处理
+            switch (sampler.interpolation) {
+                .linear => {
+                    switch (channel.target_property) {
+                        .translation => {
+                            const prev = Vec3.new(
+                                sampler.output[prev_index * 3],
+                                sampler.output[prev_index * 3 + 1],
+                                sampler.output[prev_index * 3 + 2],
+                            );
+                            const next = Vec3.new(
+                                sampler.output[next_index * 3],
+                                sampler.output[next_index * 3 + 1],
+                                sampler.output[next_index * 3 + 2],
+                            );
+                            node.local_translation = Vec3.lerp(prev, next, alpha);
+                        },
+                        .rotation => {
+                            const prev = Quat.new(
+                                sampler.output[prev_index * 4 + 3],
+                                sampler.output[prev_index * 4],
+                                sampler.output[prev_index * 4 + 1],
+                                sampler.output[prev_index * 4 + 2],
+                            );
+                            const next = Quat.new(
+                                sampler.output[next_index * 4 + 3],
+                                sampler.output[next_index * 4],
+                                sampler.output[next_index * 4 + 1],
+                                sampler.output[next_index * 4 + 2],
+                            );
+                            node.local_rotation = Quat.slerp(prev, next, alpha);
+                        },
+                        .scale => {
+                            const prev = Vec3.new(
+                                sampler.output[prev_index * 3],
+                                sampler.output[prev_index * 3 + 1],
+                                sampler.output[prev_index * 3 + 2],
+                            );
+                            const next = Vec3.new(
+                                sampler.output[next_index * 3],
+                                sampler.output[next_index * 3 + 1],
+                                sampler.output[next_index * 3 + 2],
+                            );
+                            node.local_scale = Vec3.lerp(prev, next, alpha);
+                        },
+                        .weights => {
+                            // 处理 morph target 权重
+                            // 这里需要根据你的模型实现
+                        },
+                    }
+                },
+                .step => {
+                    // 直接使用前一关键帧的值
+                    switch (channel.target_property) {
+                        .translation => {
+                            node.local_translation = Vec3.new(
+                                sampler.output[prev_index * 3],
+                                sampler.output[prev_index * 3 + 1],
+                                sampler.output[prev_index * 3 + 2],
+                            );
+                        },
+                        .rotation => {
+                            node.local_rotation = Quat.new(
+                                sampler.output[prev_index * 4 + 3],
+                                sampler.output[prev_index * 4],
+                                sampler.output[prev_index * 4 + 1],
+                                sampler.output[prev_index * 4 + 2],
+                            );
+                        },
+                        .scale => {
+                            node.local_scale = Vec3.new(
+                                sampler.output[prev_index * 3],
+                                sampler.output[prev_index * 3 + 1],
+                                sampler.output[prev_index * 3 + 2],
+                            );
+                        },
+                        .weights => {
+                            // 处理 morph target 权重
+                        },
+                    }
+                },
+                .cubicspline => {
+                    // 三次样条插值 - 更复杂的插值方式
+                    // 实现类似上面的线性插值，但需要考虑切线
+                    // 这里需要根据你的需求实现
+                },
+            }
+            // 更新节点的局部矩阵
+            const t_mat = Mat4.fromTranslate(node.local_translation);
+            const r_mat = node.local_rotation.toMat4();
+            const s_mat = Mat4.fromScale(node.local_scale);
+            node.local_matrix = Mat4.mul(t_mat, Mat4.mul(r_mat, s_mat));
         }
     }
 };

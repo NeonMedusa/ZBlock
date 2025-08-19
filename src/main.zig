@@ -29,12 +29,18 @@ pub fn main() !void {
     };
     try scene.addEntity(cesium_man);
 
-    const buggy = Entity{
-        .model = "Buggy",
+    const cesium_man2 = Entity{
+        .model = "CesiumMan",
         .position = Vec3{ .data = .{ 5, 0, 0 } },
-        .scale = Vec3{ .data = .{ 0.05, 0.05, 0.05 } },
     };
-    try scene.addEntity(buggy);
+    try scene.addEntity(cesium_man2);
+
+    // const buggy = Entity{
+    //     .model = "Buggy",
+    //     .position = Vec3{ .data = .{ 5, 0, 0 } },
+    //     .scale = Vec3{ .data = .{ 0.05, 0.05, 0.05 } },
+    // };
+    // try scene.addEntity(buggy);
 
     // 主循环
     while (window.shouldClose()) {

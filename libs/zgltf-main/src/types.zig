@@ -3,6 +3,7 @@ const Gltf = @import("main.zig");
 const pi = std.math.pi;
 const ArrayList = std.ArrayList;
 const panic = std.debug.panic;
+const json = @import("std").json;
 
 /// Index of element in data arrays.
 pub const Index = usize;
@@ -20,8 +21,7 @@ pub const Index = usize;
 /// an animation.channel.target), matrix must not be present.
 pub const Node = struct {
     /// The user-defined name of this object.
-    /// Default to `Node_{index}`.
-    name: []const u8,
+    name: ?[]const u8 = null,
     /// The index of the node's parent.
     /// A node is called a root node when it doesn’t have a parent.
     parent: ?Index = null,
@@ -49,6 +49,8 @@ pub const Node = struct {
     weights: ?[]usize = null,
     ///The index of the light referenced by this node.
     light: ?Index = null,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// A buffer points to binary geometry, animation, or skins.
@@ -59,6 +61,8 @@ pub const Buffer = struct {
     uri: ?[]const u8 = null,
     /// The length of the buffer in bytes.
     byte_length: usize,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// A view into a buffer generally representing a subset of the buffer.
@@ -74,6 +78,8 @@ pub const BufferView = struct {
     /// The hint representing the intended GPU buffer type
     /// to use with this buffer view.
     target: ?Target = null,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// A typed view into a buffer view that contains raw binary data.
@@ -92,6 +98,8 @@ pub const Accessor = struct {
     count: i32,
     /// Specifies whether integer data values are normalized before usage.
     normalized: bool = false,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 
     pub fn iterator(
         accessor: Accessor,
@@ -191,15 +199,17 @@ pub fn AccessorIterator(comptime T: type) type {
 /// The root nodes of a scene.
 pub const Scene = struct {
     /// The user-defined name of this object.
-    name: []const u8,
+    name: ?[]const u8 = null,
     /// The indices of each root node.
     nodes: ?ArrayList(Index) = null,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Joints and matrices defining a skin.
 pub const Skin = struct {
     /// The user-defined name of this object.
-    name: []const u8,
+    name: ?[]const u8 = null,
     /// The index of the accessor containing the floating-point
     /// 4x4 inverse-bind matrices.
     inverse_bind_matrices: ?Index = null,
@@ -207,6 +217,8 @@ pub const Skin = struct {
     skeleton: ?Index = null,
     /// Indices of skeleton nodes, used as joints in this skin.
     joints: ArrayList(Index),
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Reference to a texture.
@@ -260,7 +272,7 @@ pub const MetallicRoughness = struct {
 /// The material appearance of a primitive.
 pub const Material = struct {
     /// The user-defined name of this object.
-    name: []const u8,
+    name: ?[]const u8 = null,
     /// A set of parameter values that are used to define
     /// the metallic-roughness material model
     /// from Physically Based Rendering methodology.
@@ -309,11 +321,13 @@ pub const Material = struct {
     /// The strength of the dispersion effect.
     /// Note: from khr_materials_dispersion extension.
     dispersion: f32 = 0.0,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// The material’s alpha rendering mode enumeration specifying
 /// the interpretation of the alpha value of the base color.
-const AlphaMode = enum {
+pub const AlphaMode = enum {
     /// The alpha value is ignored, and the rendered output is fully opaque.
     @"opaque",
     /// The rendered output is either fully opaque or fully transparent
@@ -344,6 +358,8 @@ pub const Texture = struct {
             source: Index,
         } = null,
     } = .{},
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Image data used to create a texture.
@@ -362,6 +378,8 @@ pub const Image = struct {
     /// The image's data calculated from the buffer/buffer_view.
     /// Only there if glb file is loaded.
     data: ?[]const u8 = null,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 pub const WrapMode = enum(u32) {
@@ -394,6 +412,8 @@ pub const TextureSampler = struct {
     wrap_s: WrapMode = .repeat,
     /// T (U) wrapping mode.
     wrap_t: WrapMode = .repeat,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Values are Accessor's index.
@@ -480,6 +500,8 @@ pub const Channel = struct {
         /// of the Morph Targets it instantiates.
         property: TargetProperty,
     },
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Interpolation algorithm.
@@ -505,12 +527,14 @@ pub const AnimationSampler = struct {
     output: Index,
     /// Interpolation algorithm.
     interpolation: Interpolation = .linear,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// A keyframe animation.
 pub const Animation = struct {
     /// The user-defined name of this object.
-    name: []const u8,
+    name: ?[]const u8 = null,
     /// An array of animation channels.
     /// An animation channel combines an animation sampler with a target
     /// property being animated.
@@ -520,6 +544,8 @@ pub const Animation = struct {
     /// An animation sampler combines timestamps with a sequence of output
     /// values and defines an interpolation algorithm.
     samplers: ArrayList(AnimationSampler),
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Geometry to be rendered with the given material.
@@ -531,15 +557,19 @@ pub const Primitive = struct {
     indices: ?Index = null,
     /// The index of the material to apply to this primitive when rendering.
     material: ?Index = null,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// A set of primitives to be rendered.
 /// Its global transform is defined by a node that references it.
 pub const Mesh = struct {
     /// The user-defined name of this object.
-    name: []const u8,
+    name: ?[]const u8 = null,
     /// An array of primitives, each defining geometry to be rendered.
     primitives: ArrayList(Primitive),
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Metadata about the glTF asset.
@@ -550,6 +580,8 @@ pub const Asset = struct {
     generator: ?[]const u8 = null,
     /// A copyright message suitable for display to credit the content creator.
     copyright: ?[]const u8 = null,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// A camera’s projection.
@@ -589,11 +621,13 @@ pub const Camera = struct {
         znear: f32,
     };
 
-    name: []const u8,
+    name: ?[]const u8 = null,
     type: union(enum) {
         perspective: Perspective,
         orthographic: Orthographic,
     },
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 /// Specifies the light type.
@@ -623,7 +657,7 @@ pub const LightType = enum {
 
 /// A directional, point or spot light.
 pub const Light = struct {
-    name: ?[]const u8,
+    name: ?[]const u8 = null,
     /// Color of the light source.
     color: [3]f32 = .{ 1, 1, 1 },
     /// Intensity of the light source. `point` and `spot` lights use luminous intensity in candela (lm/sr)
@@ -635,6 +669,8 @@ pub const Light = struct {
     spot: ?LightSpot,
     /// A distance cutoff at which the light's intensity may be considered to have reached zero.
     range: f32,
+    /// Any extra, custom attributes.
+    extras: ?json.ObjectMap = null,
 };
 
 pub const LightSpot = struct {

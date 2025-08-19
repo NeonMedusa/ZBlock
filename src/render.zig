@@ -61,12 +61,21 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
     for (scene.entities.items) |entity| {
         // 渲染每个模型实例中的所有mesh
         const model = model_manager.models.get(entity.model.?);
+        var animation_player = AnimationPlayer{};
+        // 播放动画
+        animation_player.play(&model.?.animations.items[0]);
+        animation_player.update(@mod(scene.ubo.time, 1.0));
         for (model.?.nodes.items) |node| {
             if (node.gpu_mesh_idx) |mesh_idx| {
                 var instance_data = InstanceData{
-                    .entity_transform = entity.getTransform(),
+                    .entity_transform = Mat4.mul(
+                        entity.getTransform(),
+                        node.getWorldMatrix(),
+                    ),
                 };
+                instance_data.joint_matrices[0] = Mat4.identity();
                 if (node.skin_idx) |skin_idx| {
+                    instance_data.entity_transform = entity.getTransform();
                     const skin = model.?.skins.items[skin_idx];
                     for (skin.joints, 0..) |joint, i| {
                         instance_data.joint_matrices[i] = Mat4.mul(
@@ -74,9 +83,6 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
                             skin.inverse_bind_matrices[i],
                         );
                     }
-                } else {
-                    instance_data.joint_matrices[0] = Mat4.identity();
-                    instance_data.entity_transform = Mat4.mul(instance_data.entity_transform, node.getWorldMatrix());
                 }
                 const dynamic_offset = @as(u32, @intCast(cur_instance_idx)) * aligned_instances_data_size;
                 wgpu.wgpuQueueWriteBuffer(
@@ -159,6 +165,7 @@ const InstanceData = ShaderTypes.InstanceData;
 
 const Scene = @import("scene.zig");
 const ModelManager = @import("zgltf_wapper.zig").ModelManager;
+const AnimationPlayer = @import("zgltf_wapper.zig").AnimationPlayer;
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
