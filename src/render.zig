@@ -153,9 +153,7 @@ pub fn draw(gctx: Gctx, pipeline: Pipeline, scene: Scene, model_manager: ModelMa
 }
 
 const std = @import("std");
-const wgpu = @cImport({
-    @cInclude("wgpu.h");
-});
+const wgpu = @import("cimprot.zig").wgpu;
 const Gctx = @import("gctx.zig");
 const Pipeline = @import("pipeline.zig");
 

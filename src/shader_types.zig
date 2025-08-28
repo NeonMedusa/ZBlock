@@ -27,6 +27,16 @@ pub const VertexAttribute = struct {
     joint_weights: [4]f32,
 };
 
+// 包装后的 Mesh 资源信息（对应 GPU 缓冲区）
+pub const GpuMesh = struct {
+    vertex_offset: u32,
+    vertex_size: u32,
+    vertex_count: u32,
+    index_offset: u32,
+    index_size: u32,
+    index_count: u32,
+};
+
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;

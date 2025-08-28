@@ -6,9 +6,11 @@ pub fn build(b: *std.Build) void {
     // 创建主程序
     const exe = b.addExecutable(.{
         .name = "ZigGame",
-        .root_source_file = .{ .src_path = .{ .owner = b, .sub_path = "src/main.zig" } }, // 使用 .path 而不是 .src_path
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // GLFW

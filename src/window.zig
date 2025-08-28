@@ -61,12 +61,7 @@ pub fn pollEvents() void {
     glfw.glfwPollEvents();
 }
 
-const glfw = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cDefine("GLFW_EXPOSE_NATIVE_WIN32", "1");
-    @cInclude("glfw3.h");
-    @cInclude("glfw3native.h");
-});
+const glfw = @import("cimprot.zig").glfw;
 const Gctx = @import("gctx.zig");
 const algebra = @import("zalgebra");
 const Vec2_f64 = algebra.Vec2_f64;

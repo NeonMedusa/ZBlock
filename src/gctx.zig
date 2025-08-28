@@ -120,7 +120,7 @@ fn requestAdapterCallback(
     message: wgpu.WGPUStringView,
     userdata1: ?*anyopaque,
     userdata2: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = message;
     _ = userdata2;
     if (status == wgpu.WGPURequestAdapterStatus_Success) {
@@ -136,7 +136,7 @@ fn requestDeviceCallback(
     message: wgpu.WGPUStringView,
     userdata1: ?*anyopaque,
     userdata2: ?*anyopaque,
-) callconv(.C) void {
+) callconv(.c) void {
     _ = message;
     _ = userdata2;
     if (status == wgpu.WGPURequestDeviceStatus_Success) {
@@ -148,12 +148,5 @@ fn requestDeviceCallback(
 const std = @import("std");
 const Window = @import("window.zig");
 
-const wgpu = @cImport({
-    @cInclude("wgpu.h");
-});
-const glfw = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cDefine("GLFW_EXPOSE_NATIVE_WIN32", "1");
-    @cInclude("glfw3.h");
-    @cInclude("glfw3native.h");
-});
+const wgpu = @import("cimprot.zig").wgpu;
+const glfw = @import("cimprot.zig").glfw;

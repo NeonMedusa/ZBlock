@@ -158,7 +158,8 @@ pub fn createShaderModule(device: wgpu.WGPUDevice, shader_file_path: []const u8)
     defer code_file.close();
 
     var shader_code: [4096]u8 = undefined;
-    const size = try code_file.reader().readAll(&shader_code);
+    var reader = code_file.reader(&shader_code);
+    const size = try reader.read(&shader_code);
 
     // 确保以null结尾
     const shader_source = wgpu.struct_WGPUShaderSourceWGSL{
@@ -207,6 +208,4 @@ const Uniform = ShaderTypes.Uniform;
 const InstanceData = ShaderTypes.InstanceData;
 const VertexAttribute = ShaderTypes.VertexAttribute;
 
-const wgpu = @cImport({
-    @cInclude("wgpu.h");
-});
+const wgpu = @import("cimprot.zig").wgpu;

@@ -2,13 +2,13 @@
     .name = .ZigGame,
     .version = "0.0.0",
     .fingerprint = 0xbc7ddde633a1cedb,
-    .minimum_zig_version = "0.14.0",
+    .minimum_zig_version = "0.15.1",
     .dependencies = .{
         .zgltf = .{
-            .path = "libs/zgltf-main",
+            .path = "libs/zgltf",
         },
         .zalgebra = .{
-            .path = "libs/zalgebra-main",
+            .path = "libs/zalgebra",
         },
     },
     .paths = .{

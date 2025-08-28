@@ -1,11 +1,14 @@
-/// 包装后的 Mesh 资源信息（对应 GPU 缓冲区）
-const GpuMesh = struct {
-    vertex_offset: u32,
-    vertex_size: u32,
-    vertex_count: u32,
-    index_offset: u32,
-    index_size: u32,
-    index_count: u32,
+pub const Interpolation = enum {
+    /// The animated values are linearly interpolated between keyframes.
+    /// When targeting a rotation, spherical linear interpolation (slerp)
+    /// should be used to interpolate quaternions.
+    linear,
+    /// The animated values remain constant to the output of the first
+    /// keyframe, until the next keyframe.
+    step,
+    /// The animation’s interpolation is computed using a cubic
+    /// spline with specified tangents.
+    cubicspline,
 };
 /// 包装后的节点层级结构
 pub const SceneNode = struct {
@@ -18,9 +21,9 @@ pub const SceneNode = struct {
     world_matrix: Mat4 = Mat4.identity(),
     gpu_mesh_idx: ?usize = null,
     skin_idx: ?usize = null,
-    pub fn init(allocator: std.mem.Allocator, gltf_node: *Gltf.Node) !SceneNode {
+    pub fn init(gltf_node: *Gltf.Node) !SceneNode {
         var node = SceneNode{
-            .children = std.ArrayList(*SceneNode).init(allocator),
+            .children = std.ArrayList(*SceneNode){},
             .local_translation = Vec3{ .data = gltf_node.translation },
             .local_scale = Vec3{ .data = gltf_node.scale },
             .local_rotation = Quat.new(
@@ -73,7 +76,7 @@ pub const AnimationChannel = struct {
 pub const AnimationSampler = struct {
     input: []f32, // 时间戳
     output: []f32, // 输出值
-    interpolation: Gltf.Interpolation,
+    interpolation: Interpolation,
 };
 
 pub const Model = struct {
@@ -86,83 +89,87 @@ pub const Model = struct {
     pub fn init(allocator: std.mem.Allocator) Model {
         return .{
             .allocator = allocator,
-            .nodes = std.ArrayList(*SceneNode).init(allocator),
-            .root_nodes = std.ArrayList(*SceneNode).init(allocator),
-            .skins = std.ArrayList(SkinData).init(allocator),
-            .meshes = std.ArrayList(GpuMesh).init(allocator),
-            .animations = std.ArrayList(AnimationClip).init(allocator),
+            .nodes = std.ArrayList(*SceneNode){},
+            .root_nodes = std.ArrayList(*SceneNode){},
+            .skins = std.ArrayList(SkinData){},
+            .meshes = std.ArrayList(GpuMesh){},
+            .animations = std.ArrayList(AnimationClip){},
         };
     }
     // 从 Gltf 加载并构建层级
     pub fn loadFromGltf(
         self: *Model,
+        allocator: std.mem.Allocator,
         gltf: *Gltf,
         vertex_data: *std.ArrayList(VertexAttribute),
         index_data: *std.ArrayList(u16),
     ) !void {
         // 创建所有节点
-        for (gltf.data.nodes.items) |*gltf_node| {
+        for (gltf.data.nodes) |*gltf_node| {
             const node = try self.allocator.create(SceneNode);
-            node.* = try SceneNode.init(self.allocator, gltf_node);
-            try self.nodes.append(node);
+            node.* = try SceneNode.init(gltf_node);
+            try self.nodes.append(allocator, node);
         }
         // 构建父子关系
-        for (gltf.data.nodes.items, 0..) |gltf_node, i| {
+        for (gltf.data.nodes, 0..) |gltf_node, i| {
             if (gltf_node.parent) |parent_index| {
                 self.nodes.items[i].parent = self.nodes.items[parent_index];
-                try self.nodes.items[parent_index].children.append(self.nodes.items[i]);
+                try self.nodes.items[parent_index].children.append(allocator, self.nodes.items[i]);
             }
         }
         // 加载 Mesh
-        var gpu_meshes = std.ArrayList(GpuMesh).init(self.allocator);
-        defer gpu_meshes.deinit();
-        for (gltf.data.meshes.items) |mesh| {
-            var cur_mesh_vertex_data = std.ArrayList(VertexAttribute).init(self.allocator);
-            defer cur_mesh_vertex_data.deinit();
-            var cur_mesh_index_data = std.ArrayList(u16).init(self.allocator);
-            defer cur_mesh_index_data.deinit();
-            for (mesh.primitives.items) |primitive| {
+        var gpu_meshes = std.ArrayList(GpuMesh){};
+        defer gpu_meshes.deinit(allocator);
+        for (gltf.data.meshes) |mesh| {
+            var cur_mesh_vertex_data = std.ArrayList(VertexAttribute){};
+            defer cur_mesh_vertex_data.deinit(allocator);
+            var cur_mesh_index_data = std.ArrayList(u16){};
+            defer cur_mesh_index_data.deinit(allocator);
+            for (mesh.primitives) |primitive| {
                 // 由于一个mesh中可能会有多个primitive，所以我们需要为当前primitive计算索引偏移
                 const vertex_start = cur_mesh_vertex_data.items.len;
                 // 提取索引数据
                 if (primitive.indices) |indices_accessor_index| {
-                    const accessor = gltf.data.accessors.items[indices_accessor_index];
+                    const accessor = gltf.data.accessors[indices_accessor_index];
                     var it = accessor.iterator(u16, gltf, gltf.glb_binary.?);
                     while (it.next()) |indice|
-                        try cur_mesh_index_data.append(indice[0] + @as(u16, @intCast(vertex_start)));
+                        try cur_mesh_index_data.append(allocator, indice[0] + @as(u16, @intCast(vertex_start)));
                 } // 提取顶点数据
-                for (primitive.attributes.items) |attribute| {
+                for (primitive.attributes) |attribute| {
                     switch (attribute) {
                         .position => |idx| {
-                            const accessor = gltf.data.accessors.items[idx];
+                            const accessor = gltf.data.accessors[idx];
                             var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
                             var i: f32 = 0; // 暂时只添加一些随机性的颜色
                             while (it.next()) |v| : (i += 0.001) {
-                                try cur_mesh_vertex_data.append(.{
-                                    .pos = .{ v[0], v[1], v[2] },
-                                    .normal = .{ 1, 1, 1 },
-                                    .color = .{ @mod(i / 0.1, 1), @mod(i / 0.2, 1), @mod(i / 0.3, 1), 1 },
-                                    .joint_indices = .{ 0, 0, 0, 0 },
-                                    .joint_weights = .{ 1, 0, 0, 0 },
-                                });
+                                try cur_mesh_vertex_data.append(
+                                    allocator,
+                                    .{
+                                        .pos = .{ v[0], v[1], v[2] },
+                                        .normal = .{ 1, 1, 1 },
+                                        .color = .{ @mod(i / 0.1, 1), @mod(i / 0.2, 1), @mod(i / 0.3, 1), 1 },
+                                        .joint_indices = .{ 0, 0, 0, 0 },
+                                        .joint_weights = .{ 1, 0, 0, 0 },
+                                    },
+                                );
                             }
                         },
                         .normal => |idx| {
-                            const accessor = gltf.data.accessors.items[idx];
+                            const accessor = gltf.data.accessors[idx];
                             var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
                             var i: usize = vertex_start;
                             while (it.next()) |n| : (i += 1)
                                 cur_mesh_vertex_data.items[i].normal = .{ n[0], n[1], n[2] };
                         },
                         .color => |idx| {
-                            const accessor = gltf.data.accessors.items[idx];
+                            const accessor = gltf.data.accessors[idx];
                             var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
                             var i: usize = vertex_start;
                             while (it.next()) |c| : (i += 1)
                                 cur_mesh_vertex_data.items[i].color = .{ c[0], c[1], c[2], c[3] };
                         },
                         .joints => |idx| {
-                            const accessor = gltf.data.accessors.items[idx];
+                            const accessor = gltf.data.accessors[idx];
                             switch (accessor.component_type) {
                                 .unsigned_byte => {
                                     var it = accessor.iterator(u8, gltf, gltf.glb_binary.?);
@@ -186,7 +193,7 @@ pub const Model = struct {
                             }
                         },
                         .weights => |idx| {
-                            const accessor = gltf.data.accessors.items[idx];
+                            const accessor = gltf.data.accessors[idx];
                             var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
                             var i: usize = vertex_start;
                             while (it.next()) |w| : (i += 1) {
@@ -200,32 +207,35 @@ pub const Model = struct {
                 }
             }
             // 记录当前mesh在VertexBuffer中的偏移、大小等信息
-            try self.meshes.append(.{
-                .vertex_offset = @intCast(vertex_data.items.len * @sizeOf(VertexAttribute)),
-                .vertex_size = @intCast(cur_mesh_vertex_data.items.len * @sizeOf(VertexAttribute)),
-                .vertex_count = @intCast(cur_mesh_vertex_data.items.len),
-                .index_offset = @intCast(index_data.items.len * @sizeOf(u16)),
-                .index_size = @intCast(cur_mesh_index_data.items.len * @sizeOf(u16)),
-                .index_count = @intCast(cur_mesh_index_data.items.len),
-            });
+            try self.meshes.append(
+                allocator,
+                .{
+                    .vertex_offset = @intCast(vertex_data.items.len * @sizeOf(VertexAttribute)),
+                    .vertex_size = @intCast(cur_mesh_vertex_data.items.len * @sizeOf(VertexAttribute)),
+                    .vertex_count = @intCast(cur_mesh_vertex_data.items.len),
+                    .index_offset = @intCast(index_data.items.len * @sizeOf(u16)),
+                    .index_size = @intCast(cur_mesh_index_data.items.len * @sizeOf(u16)),
+                    .index_count = @intCast(cur_mesh_index_data.items.len),
+                },
+            );
             // 将当前mesh数据追加到全局数组中
-            try vertex_data.appendSlice(cur_mesh_vertex_data.items);
-            try index_data.appendSlice(cur_mesh_index_data.items);
+            try vertex_data.appendSlice(allocator, cur_mesh_vertex_data.items);
+            try index_data.appendSlice(allocator, cur_mesh_index_data.items);
         }
 
         // 处理皮肤数据
-        for (gltf.data.skins.items) |gltf_skin| {
+        for (gltf.data.skins) |gltf_skin| {
             var skin = SkinData{
-                .joints = try self.allocator.alloc(*SceneNode, gltf_skin.joints.items.len),
-                .inverse_bind_matrices = try self.allocator.alloc(Mat4, gltf_skin.joints.items.len),
+                .joints = try self.allocator.alloc(*SceneNode, gltf_skin.joints.len),
+                .inverse_bind_matrices = try self.allocator.alloc(Mat4, gltf_skin.joints.len),
                 .skeleton = if (gltf_skin.skeleton) |idx| self.nodes.items[idx] else null,
             };
             // 提取关节节点
-            for (gltf_skin.joints.items, 0..) |joint_idx, i|
+            for (gltf_skin.joints, 0..) |joint_idx, i|
                 skin.joints[i] = self.nodes.items[joint_idx];
             // 提取逆绑定矩阵
             if (gltf_skin.inverse_bind_matrices) |matrices_accessor| {
-                const accessor = gltf.data.accessors.items[matrices_accessor];
+                const accessor = gltf.data.accessors[matrices_accessor];
                 var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
                 var i: usize = 0;
                 while (it.next()) |arr| : (i += 1)
@@ -234,15 +244,15 @@ pub const Model = struct {
                 for (skin.inverse_bind_matrices) |*mat|
                     mat.* = Mat4.identity();
             }
-            try self.skins.append(skin);
+            try self.skins.append(allocator, skin);
         }
 
-        try self.loadAnimations(gltf);
+        try self.loadAnimations(allocator, gltf);
     }
 
     // 新增方法：加载动画
-    fn loadAnimations(self: *Model, gltf: *Gltf) !void {
-        for (gltf.data.animations.items) |gltf_animation| {
+    fn loadAnimations(self: *Model, allocator: std.mem.Allocator, gltf: *Gltf) !void {
+        for (gltf.data.animations) |gltf_animation| {
             // 处理可能为null的动画名称
             const anim_name = if (gltf_animation.name) |name|
                 try self.allocator.dupe(u8, name)
@@ -250,14 +260,14 @@ pub const Model = struct {
                 try std.fmt.allocPrint(self.allocator, "animation_{d}", .{self.animations.items.len});
             var clip = AnimationClip{
                 .name = anim_name,
-                .channels = std.ArrayList(AnimationChannel).init(self.allocator),
-                .samplers = std.ArrayList(AnimationSampler).init(self.allocator),
+                .channels = std.ArrayList(AnimationChannel){},
+                .samplers = std.ArrayList(AnimationSampler){},
                 .duration = 0,
             };
             // 加载采样器
-            for (gltf_animation.samplers.items) |gltf_sampler| {
-                const input_accessor = gltf.data.accessors.items[gltf_sampler.input];
-                const output_accessor = gltf.data.accessors.items[gltf_sampler.output];
+            for (gltf_animation.samplers) |gltf_sampler| {
+                const input_accessor = gltf.data.accessors[gltf_sampler.input];
+                const output_accessor = gltf.data.accessors[gltf_sampler.output];
                 // 提取时间戳数据
                 var input_data = try self.allocator.alloc(f32, @as(usize, @intCast(input_accessor.count)));
                 var input_it = input_accessor.iterator(f32, gltf, gltf.glb_binary.?);
@@ -278,23 +288,30 @@ pub const Model = struct {
                         i += 1;
                     }
                 }
-                try clip.samplers.append(.{
+                try clip.samplers.append(allocator, .{
                     .input = input_data,
                     .output = output_data,
-                    .interpolation = gltf_sampler.interpolation,
+                    .interpolation = switch (gltf_sampler.interpolation) {
+                        .linear => .linear,
+                        .step => .step,
+                        .cubicspline => .cubicspline,
+                    },
                 });
             }
             // 加载通道
-            for (gltf_animation.channels.items) |gltf_channel| {
+            for (gltf_animation.channels) |gltf_channel| {
                 const node = self.nodes.items[gltf_channel.target.node];
 
-                try clip.channels.append(.{
-                    .target_node = node,
-                    .target_property = gltf_channel.target.property,
-                    .sampler = &clip.samplers.items[gltf_channel.sampler],
-                });
+                try clip.channels.append(
+                    allocator,
+                    .{
+                        .target_node = node,
+                        .target_property = gltf_channel.target.property,
+                        .sampler = &clip.samplers.items[gltf_channel.sampler],
+                    },
+                );
             }
-            try self.animations.append(clip);
+            try self.animations.append(allocator, clip);
         }
     }
 };
@@ -442,10 +459,12 @@ pub const ModelManager = struct {
     index_buffer: wgpu.WGPUBuffer,
     models: std.StringHashMap(Model),
     pub fn init(gctx: Gctx, allocator: std.mem.Allocator) !@This() {
-        var all_vertex_data = std.ArrayList(VertexAttribute).init(allocator);
-        defer all_vertex_data.deinit();
-        var all_index_data = std.ArrayList(u16).init(allocator);
-        defer all_index_data.deinit();
+        // var all_vertex_data = std.ArrayList(VertexAttribute).init(allocator);
+        var all_vertex_data = std.ArrayList(VertexAttribute){};
+        defer all_vertex_data.deinit(allocator);
+        // var all_index_data = std.ArrayList(u16).init(allocator);
+        var all_index_data = std.ArrayList(u16){};
+        defer all_index_data.deinit(allocator);
         var models = std.StringHashMap(Model).init(allocator);
         // 打开models目录
         var models_dir = try std.fs.cwd().openDir("resources/models", .{ .iterate = true });
@@ -463,7 +482,7 @@ pub const ModelManager = struct {
                 file_path,
                 std.math.maxInt(usize),
                 null,
-                4,
+                .@"16",
                 null,
             );
             defer allocator.free(file_buf);
@@ -473,6 +492,7 @@ pub const ModelManager = struct {
             // 创建模型，让模型填充vertex_data和index_data
             var model = Model.init(allocator);
             try model.loadFromGltf(
+                allocator,
                 &gltf,
                 &all_vertex_data,
                 &all_index_data,
@@ -544,9 +564,7 @@ pub fn ArrToMat4(arr: [16]f32) Mat4 {
     };
 }
 
-const wgpu = @cImport({
-    @cInclude("wgpu.h");
-});
+const wgpu = @import("cimprot.zig").wgpu;
 
 const Gctx = @import("gctx.zig");
 const std = @import("std");
@@ -557,3 +575,4 @@ const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Quat = Algebra.Quat;
 const Vec4 = Algebra.Vec4;
+const GpuMesh = @import("shader_types.zig").GpuMesh;

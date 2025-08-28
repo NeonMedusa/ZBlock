@@ -13,7 +13,7 @@ pub fn main() !void {
     defer gctx.deinit();
 
     // 创建pipeline
-    const pipeline = try Pipeline.init(&gctx, "resources/shader.wgsl");
+    const pipeline = try Pipeline.init(&gctx, "resources/shaders/render_shader.wgsl");
     defer pipeline.deinit();
 
     // 模型管理器测试

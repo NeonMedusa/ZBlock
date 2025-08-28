@@ -17,15 +17,15 @@ pub fn init(allocator: std.mem.Allocator, window: *Window) @This() {
         .ubo = ubo,
         .allocator = allocator,
         .main_camera = camera,
-        .entities = std.ArrayList(Entity).init(allocator),
+        .entities = std.ArrayList(Entity){},
         .window = window,
     };
 }
 pub fn deinit(self: *@This()) void {
-    self.entities.deinit();
+    self.entities.deinit(self.allocator);
 }
 pub fn addEntity(self: *@This(), entity: Entity) !void {
-    try self.entities.append(entity);
+    try self.entities.append(self.allocator, entity);
 }
 pub fn update(self: *@This()) !void {
     // 获取帧间延迟
