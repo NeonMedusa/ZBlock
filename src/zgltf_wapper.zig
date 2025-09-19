@@ -568,7 +568,7 @@ const wgpu = @import("cimprot.zig").wgpu;
 
 const Gctx = @import("gctx.zig");
 const std = @import("std");
-const Gltf = @import("zgltf");
+const Gltf = @import("zgltf").Gltf;
 const VertexAttribute = @import("shader_types.zig").VertexAttribute;
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
