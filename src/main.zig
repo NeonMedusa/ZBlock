@@ -1,3 +1,4 @@
+//main.zig:
 pub fn main() !void {
     // 创建内存分配器
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -12,35 +13,52 @@ pub fn main() !void {
     var gctx = try Gctx.init(&window);
     defer gctx.deinit();
 
-    // 创建pipeline
-    const pipeline = try Pipeline.init(&gctx, "resources/shaders/render_shader.wgsl");
-    defer pipeline.deinit();
+    // 测试GPU资源管理器
+    const grm = try ResourceManager.init(allocator, &gctx);
 
-    // 模型管理器测试
-    var model_manager = try ModelManager.init(gctx, allocator);
-    defer model_manager.deinit();
+    // 创建计算管线
+    const compute_pipeline = try ComputePipeline.init(
+        &gctx,
+        "resources/shaders/compute_shader.wgsl",
+        &grm,
+    );
+    defer compute_pipeline.deinit();
+
+    // 创建渲染管线
+    const render_pipeline = try RenderPipeline.init(
+        &gctx,
+        "resources/shaders/render_shader.wgsl",
+        &grm,
+    );
+    defer render_pipeline.deinit();
 
     var scene = Scene.init(allocator, &window);
     defer scene.deinit();
 
-    const cesium_man = Entity{
-        .model = "CesiumMan",
+    const entity0 = Entity{
+        .model = 0,
         .position = Vec3.zero(),
     };
-    try scene.addEntity(cesium_man);
+    try scene.addEntity(entity0);
 
-    const cesium_man2 = Entity{
-        .model = "CesiumMan",
-        .position = Vec3{ .data = .{ 5, 0, 0 } },
+    const entity1 = Entity{
+        .model = 1,
+        .position = Vec3{ .data = .{ 3, 0, 0 } },
     };
-    try scene.addEntity(cesium_man2);
+    try scene.addEntity(entity1);
 
-    // const buggy = Entity{
-    //     .model = "Buggy",
-    //     .position = Vec3{ .data = .{ 5, 0, 0 } },
-    //     .scale = Vec3{ .data = .{ 0.05, 0.05, 0.05 } },
-    // };
-    // try scene.addEntity(buggy);
+    const entity2 = Entity{
+        .model = 2,
+        .position = Vec3{ .data = .{ 6, 0, 0 } },
+        .scale = Vec3{ .data = .{ 0.025, 0.025, 0.025 } },
+    };
+    try scene.addEntity(entity2);
+
+    const entity3 = Entity{
+        .model = 3,
+        .position = Vec3{ .data = .{ 9, 0, 0 } },
+    };
+    try scene.addEntity(entity3);
 
     // 主循环
     while (window.shouldClose()) {
@@ -48,22 +66,16 @@ pub fn main() !void {
         if (window.input.isKeyPressed(.escape))
             window.setWindowShouldClose();
         Window.pollEvents();
+        // 更新场景
         try scene.update();
         // 渲染
-        try Render.draw(gctx, pipeline, scene, model_manager);
+        try Render.draw(&gctx, &compute_pipeline, &render_pipeline, &scene, &grm);
     }
 }
 
 const std = @import("std");
-const wgpu = @cImport({
-    @cInclude("wgpu.h");
-});
-const glfw = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cDefine("GLFW_EXPOSE_NATIVE_WIN32", "1");
-    @cInclude("glfw3.h");
-    @cInclude("glfw3native.h");
-});
+const wgpu = @import("cimprots.zig").wgpu;
+const glfw = @import("cimprots.zig").glfw;
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
@@ -72,11 +84,11 @@ const Gltf = @import("zgltf");
 
 const Gctx = @import("gctx.zig");
 const Window = @import("window.zig");
-const Pipeline = @import("pipeline.zig");
-const Mesh = @import("mesh.zig");
 const Render = @import("render.zig");
 const Camera3D = @import("camera3d.zig");
 const Input = @import("input.zig");
 const Entity = @import("entity.zig");
 const Scene = @import("scene.zig");
-const ModelManager = @import("zgltf_wapper.zig").ModelManager;
+const ResourceManager = @import("resource_manager.zig");
+const ComputePipeline = @import("compute_pipeline.zig");
+const RenderPipeline = @import("render_pipeline.zig");

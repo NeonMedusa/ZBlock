@@ -1,4 +1,5 @@
-ubo: Uniform,
+//scene.zig:
+ubo: SceneUniform,
 allocator: std.mem.Allocator,
 main_camera: Camera3D,
 entities: std.ArrayList(Entity),
@@ -11,7 +12,7 @@ delta_time_f32: f32 = 0,
 pub fn init(allocator: std.mem.Allocator, window: *Window) @This() {
     var camera = Camera3D.init();
     camera.movement_speed = 5.0;
-    var ubo = Uniform.init(window.*);
+    var ubo = SceneUniform.init(window.*);
     ubo.view_matrix = camera.getViewMatrix();
     return .{
         .ubo = ubo,
@@ -34,6 +35,8 @@ pub fn update(self: *@This()) !void {
     self.delta_time_f32 = @floatCast(self.delta_time_f64);
     self.last_frame_time = self.current_frame_time;
     self.ubo.time = @floatCast(self.current_frame_time);
+    // 更新实例数量
+    self.ubo.active_entity_count = @intCast(self.entities.items.len);
     // 更新摄像头
     self.main_camera.updateFromMouse(self.window.*);
     self.main_camera.updateFromKeyboard(self.window.*, self.delta_time_f32);
@@ -46,15 +49,8 @@ pub fn update(self: *@This()) !void {
 }
 
 const std = @import("std");
-const wgpu = @cImport({
-    @cInclude("wgpu.h");
-});
-const glfw = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cDefine("GLFW_EXPOSE_NATIVE_WIN32", "1");
-    @cInclude("glfw3.h");
-    @cInclude("glfw3native.h");
-});
+const wgpu = @import("cimprots.zig").wgpu;
+const glfw = @import("cimprots.zig").glfw;
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
@@ -62,8 +58,7 @@ const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
 
 const ShaderTypes = @import("shader_types.zig");
-const Uniform = ShaderTypes.Uniform;
-const InstanceData = ShaderTypes.InstanceData;
+const SceneUniform = ShaderTypes.SceneUniform;
 
 const Camera3D = @import("camera3d.zig");
 const Entity = @import("entity.zig");

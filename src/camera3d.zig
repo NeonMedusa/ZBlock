@@ -68,9 +68,4 @@ const algebra = @import("zalgebra");
 const Vec3 = algebra.Vec3;
 const Mat4 = algebra.Mat4;
 const Window = @import("window.zig");
-const glfw = @cImport({
-    @cDefine("GLFW_INCLUDE_NONE", "1");
-    @cDefine("GLFW_EXPOSE_NATIVE_WIN32", "1");
-    @cInclude("glfw3.h");
-    @cInclude("glfw3native.h");
-});
+const glfw = @import("cimprots.zig").glfw;

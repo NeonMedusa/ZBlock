@@ -24,16 +24,29 @@ pub fn init(
     window: *Window,
 ) !@This() {
     // 创建WGPU实例
-    const instance = wgpu.wgpuCreateInstance(null);
+    const instance_extras = wgpu.WGPUInstanceExtras{
+        .chain = wgpu.WGPUChainedStruct{
+            .sType = wgpu.WGPUSType_InstanceExtras,
+        },
+        .backends = wgpu.WGPUInstanceBackend_Vulkan, // 或者使用具体的后端组合
+    };
+    // 2. 创建主描述符，并将扩展结构体链入
+    const instance_descriptor = wgpu.WGPUInstanceDescriptor{
+        .nextInChain = @ptrCast(&instance_extras.chain), // 通过链式结构连接
+    };
+    // 3. 创建实例
+    const instance = wgpu.wgpuCreateInstance(&instance_descriptor);
     if (instance == null) return error.InstanceCreationFailed;
 
     // 创建Surface
     const hwnd = glfw.glfwGetWin32Window(window.handle);
+    const hinstance = glfw.GetModuleHandleW(null); // 获取实例句柄
     const win32_surface_desc = wgpu.WGPUSurfaceSourceWindowsHWND{
         .chain = wgpu.WGPUChainedStruct{
             .sType = wgpu.WGPUSType_SurfaceSourceWindowsHWND,
         },
         .hwnd = hwnd,
+        .hinstance = hinstance, // 添加实例句柄
     };
     const surface_desc = wgpu.WGPUSurfaceDescriptor{
         .nextInChain = @ptrCast(&win32_surface_desc.chain),
@@ -58,8 +71,16 @@ pub fn init(
     if (adapter == null) return error.AdapterRequestFailed;
 
     // 创建设备
+    const required_features = &[_]wgpu.WGPUFeatureName{
+        wgpu.WGPUFeatureName_IndirectFirstInstance,
+        wgpu.WGPUNativeFeature_MultiDrawIndirect,
+    };
+
     var device: wgpu.WGPUDevice = undefined;
-    const device_desc = wgpu.WGPUDeviceDescriptor{};
+    const device_desc = wgpu.WGPUDeviceDescriptor{
+        .requiredFeatures = required_features,
+        .requiredFeatureCount = required_features.len,
+    };
     _ = wgpu.wgpuAdapterRequestDevice(adapter, &device_desc, .{
         .mode = wgpu.WGPUCallbackMode_AllowSpontaneous,
         .callback = requestDeviceCallback, // 直接传递回调函数
@@ -145,8 +166,55 @@ fn requestDeviceCallback(
     }
 }
 
+pub fn createShaderModule(gctx: *Gctx, shader_file_path: []const u8) !wgpu.WGPUShaderModule {
+    const code_file = try std.fs.cwd().openFile(shader_file_path, .{});
+    defer code_file.close();
+
+    var shader_code: [128 * 4096]u8 = undefined;
+    var reader = code_file.reader(&shader_code);
+    const size = try reader.read(&shader_code);
+
+    const shader_source = wgpu.struct_WGPUShaderSourceWGSL{
+        .code = .{
+            .data = shader_code[0..size].ptr,
+            .length = size,
+        },
+        .chain = .{
+            .sType = wgpu.WGPUSType_ShaderSourceWGSL,
+        },
+    };
+    const shader_desc = wgpu.WGPUShaderModuleDescriptor{
+        .nextInChain = &shader_source.chain,
+    };
+    return wgpu.wgpuDeviceCreateShaderModule(gctx.device, &shader_desc);
+}
+
+pub fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(VertexType).len]wgpu.WGPUVertexAttribute {
+    const fields = std.meta.fields(VertexType);
+    var attributes: [fields.len]wgpu.WGPUVertexAttribute = undefined;
+    var offset: usize = 0;
+    inline for (fields, 0..) |field, i| {
+        const format = switch (field.type) {
+            f32 => wgpu.WGPUVertexFormat_Float32,
+            [3]f32 => wgpu.WGPUVertexFormat_Float32x3,
+            [4]f32 => wgpu.WGPUVertexFormat_Float32x4,
+            u32 => wgpu.WGPUVertexFormat_Uint32,
+            [4]u32 => wgpu.WGPUVertexFormat_Uint32x4,
+            else => @compileError("Unsupported vertex attribute type: " ++ @typeName(field.type)),
+        };
+        attributes[i] = .{
+            .format = format,
+            .offset = offset,
+            .shaderLocation = @intCast(i),
+        };
+        offset += @sizeOf(field.type);
+    }
+    return attributes;
+}
+
 const std = @import("std");
 const Window = @import("window.zig");
+const Gctx = @import("gctx.zig");
 
-const wgpu = @import("cimprot.zig").wgpu;
-const glfw = @import("cimprot.zig").glfw;
+const wgpu = @import("cimprots.zig").wgpu;
+const glfw = @import("cimprots.zig").glfw;

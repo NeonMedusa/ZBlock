@@ -1,54 +1,35 @@
-@group(0) @binding(0) var<storage, read> uniform : Uniform;
-struct Uniform {
-    projection_matrix : mat4x4 < f32>,
-    view_matrix : mat4x4 < f32>,
+//render_shader.wgsl:
+@group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;
+//存储每个渲染实例的最终世界变换矩阵，由计算着色器计算和写入
+@group(0) @binding(1) var<storage, read> world_matrices : array<mat4x4f>;
+struct SceneUniform {
+    proj_matrix : mat4x4f,
+    view_matrix : mat4x4f,
     time : f32,
-
+    active_entity_count : u32,
 };
-@group(0) @binding(1) var<storage, read> instances_data : array<InstanceData>;
-struct InstanceData {
-    entity_transform : mat4x4 < f32>,
-    joint_matrices : array<mat4x4 < f32>, 50>,
-};
-
 struct VertexInput {
     @location(0) position : vec3f,
-    @location(1) normal : vec3f,
-    @location(2) color : vec4f,
-    @location(3) joint_indices : vec4u, //关节矩阵索引
-    @location(4) joint_weights : vec4f, //关节权重
+    @location(1) color : vec4f,
 };
-
 struct VertexOutput {
     @builtin(position) position : vec4f,
     @location(0) color : vec4f,
 };
-
 @vertex
 fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexOutput {
-    //通过instance索引获取对应的数据
-    let ins_data = instances_data[ins_idx];
-
-    let skin_matrix =
-    in.joint_weights.x * ins_data.joint_matrices[in.joint_indices.x] +
-    in.joint_weights.y * ins_data.joint_matrices[in.joint_indices.y] +
-    in.joint_weights.z * ins_data.joint_matrices[in.joint_indices.z] +
-    in.joint_weights.w * ins_data.joint_matrices[in.joint_indices.w];
-
     var out : VertexOutput;
-    out.position = uniform.projection_matrix *
-    uniform.view_matrix *
-    ins_data.entity_transform *             //实体变换
-    skin_matrix *                           //骨骼变换
-    vec4f(in.position, 1.0);
-
-    out.color = in.color;
+    //计算顶点位置
+    out.position =
+    scene_uniform.proj_matrix * //投影矩阵
+    scene_uniform.view_matrix * //视图矩阵
+    world_matrices[ins_idx] *   //模型矩阵
+    vec4f(in.position, 1.0);    //顶点位置
+    out.color = in.color;       //顶点颜色
     return out;
 }
-
 @fragment
 fn fs_main(in : VertexOutput) -> @location(0) vec4f {
-    //伽玛校正
-    let corrected_color = pow(in.color, vec4f(2.2));
+    let corrected_color = pow(in.color, vec4f(2.2));    //伽玛校正
     return vec4f(corrected_color);
 }

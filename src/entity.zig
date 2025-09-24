@@ -1,7 +1,8 @@
+//entity.zig:
 position: Vec3 = Vec3.zero(),
 rotation: Vec3 = Vec3.zero(),
 scale: Vec3 = Vec3.one(),
-model: ?[]const u8 = null,
+model: ?u32 = null,
 pub fn getTransform(self: @This()) Mat4 {
     const translation = Mat4.fromTranslate(self.position);
     const rotation = Mat4.fromEulerAngles(self.rotation);
@@ -11,4 +12,3 @@ pub fn getTransform(self: @This()) Mat4 {
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
-const Uniform = @import("shader_types.zig").Uniform;
