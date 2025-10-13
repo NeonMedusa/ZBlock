@@ -1,7 +1,6 @@
 //render.zig:
 pub fn draw(
     gctx: *const Gctx,
-    compute_pipeline: *const ComputePipeline,
     render_pipeline: *const RenderPipeline,
     scene: *const Scene,
     grm: *const ResourceManager,
@@ -24,69 +23,39 @@ pub fn draw(
         &scene.ubo,
         wgpu.wgpuBufferGetSize(grm.scene_uniform_buffer),
     );
-    // 用CPU计算
-    _ = compute_pipeline;
+
     // 重置渲染实例计数器
     var entity_counter: u32 = 0;
-    var draw_ins_counter: u32 = 0;
-    wgpu.wgpuQueueWriteBuffer(
-        gctx.queue,
-        grm.instance_counter_buffer,
-        0,
-        &draw_ins_counter,
-        wgpu.wgpuBufferGetSize(grm.instance_counter_buffer),
-    );
-
     for (scene.entities.items) |entity| {
         if (entity.model) |model_idx| {
-            grm.entities_data[entity_counter] = .{
-                .model_idx = model_idx,
+            grm.entities_data[entity_counter] = EntityData{
                 .transform = entity.getTransform(),
             };
-            entity_counter += 1;
             const model = grm.models_data.items[model_idx];
-            var node_idx = model.first_node_idx;
-            const entity_translation = entity.getTransform();
-            while (node_idx < model.first_node_idx + model.node_count) : (node_idx += 1) {
-                const node = grm.nodes_data.items[node_idx];
-                if (node.mesh_idx != std.math.maxInt(u32)) {
-                    const mesh = grm.meshes_data.items[node.mesh_idx];
-                    const node_global_transform = calculate_global_transform(node_idx, grm);
-                    const final_world_matrix = entity_translation.mul(node_global_transform);
-                    grm.world_matrices[draw_ins_counter] = final_world_matrix;
-                    grm.indexed_indirect_cmds[draw_ins_counter].indexCount = mesh.index_count;
-                    grm.indexed_indirect_cmds[draw_ins_counter].instanceCount = 1;
-                    grm.indexed_indirect_cmds[draw_ins_counter].firstIndex = mesh.first_index_idx;
-                    grm.indexed_indirect_cmds[draw_ins_counter].baseVertex = mesh.first_vertex_idx;
-                    grm.indexed_indirect_cmds[draw_ins_counter].firstInstance = draw_ins_counter;
-                    draw_ins_counter += 1;
-                }
-            }
+            grm.indexed_indirect_cmds[entity_counter].indexCount = model.index_count;
+            grm.indexed_indirect_cmds[entity_counter].instanceCount = 1;
+            grm.indexed_indirect_cmds[entity_counter].firstIndex = model.first_index_idx;
+            grm.indexed_indirect_cmds[entity_counter].baseVertex = model.first_vertex_idx;
+            grm.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
         }
+        entity_counter += 1;
     }
     // 更新entities_data_buffer
     wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         grm.entities_data_buffer,
         0,
-        @ptrCast(grm.entities_data),
+        grm.entities_data.ptr,
         @sizeOf(EntityData) * entity_counter,
     );
+
     // 更新indexed_indirect_cmds_buffer
     wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         grm.indexed_indirect_cmds_buffer,
         0,
         grm.indexed_indirect_cmds.ptr,
-        @sizeOf(IndexedIndirectCmd) * draw_ins_counter,
-    );
-    // 更新world_matrices_buffer
-    wgpu.wgpuQueueWriteBuffer(
-        gctx.queue,
-        grm.world_matrices_buffer,
-        0,
-        grm.world_matrices.ptr,
-        @sizeOf(Mat4) * draw_ins_counter,
+        @sizeOf(IndexedIndirectCmd) * entity_counter,
     );
     // 执行渲染
     const color_attachment = wgpu.WGPURenderPassColorAttachment{
@@ -123,7 +92,7 @@ pub fn draw(
     wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, grm.vertex_buffer, 0, wgpu.wgpuBufferGetSize(grm.vertex_buffer));
     wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, grm.index_buffer, wgpu.WGPUIndexFormat_Uint32, 0, wgpu.wgpuBufferGetSize(grm.index_buffer));
     // 间接绘制所有可见实例
-    wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, grm.indexed_indirect_cmds_buffer, 0, draw_ins_counter);
+    wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, grm.indexed_indirect_cmds_buffer, 0, entity_counter);
     // 结束并释放渲染通道
     wgpu.wgpuRenderPassEncoderEnd(pass);
     wgpu.wgpuRenderPassEncoderRelease(pass);
@@ -135,16 +104,6 @@ pub fn draw(
     // 呈现表面后释放纹理
     _ = wgpu.wgpuSurfacePresent(gctx.surface);
     wgpu.wgpuTextureRelease(surface_texture.texture);
-}
-// 计算节点全局transform
-fn calculate_global_transform(node_idx: u32, grm: *const ResourceManager) Mat4 {
-    var current_idx = node_idx;
-    var result = grm.nodes_data.items[current_idx].local_matrix;
-    while (grm.nodes_data.items[current_idx].parent_idx != std.math.maxInt(u32)) {
-        current_idx = grm.nodes_data.items[current_idx].parent_idx;
-        result = grm.nodes_data.items[current_idx].local_matrix.mul(result);
-    }
-    return result;
 }
 
 const std = @import("std");
@@ -164,8 +123,6 @@ const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
 const VertexAttribute = ShaderType.VertexAttribute;
 const EntityData = ShaderType.EntityData;
-const GltfNodeData = ShaderType.GltfNodeData;
-const MeshData = ShaderType.MeshData;
 const ModelData = ShaderType.ModelData;
 const IndexedIndirectCmd = ShaderType.IndexedIndirectCmd;
 const VertexIndirectCmd = ShaderType.VertexIndirectCmd;

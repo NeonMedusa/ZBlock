@@ -35,8 +35,6 @@ pub fn update(self: *@This()) !void {
     self.delta_time_f32 = @floatCast(self.delta_time_f64);
     self.last_frame_time = self.current_frame_time;
     self.ubo.time = @floatCast(self.current_frame_time);
-    // 更新实例数量
-    self.ubo.active_entity_count = @intCast(self.entities.items.len);
     // 更新摄像头
     self.main_camera.updateFromMouse(self.window.*);
     self.main_camera.updateFromKeyboard(self.window.*, self.delta_time_f32);

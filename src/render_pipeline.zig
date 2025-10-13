@@ -16,7 +16,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
                 .hasDynamicOffset = 0,
             },
         },
-        .{ // world_matrices
+        .{ // entities_data
             .binding = 1,
             .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
             .buffer = .{
@@ -42,11 +42,11 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
                 .offset = 0,
                 .size = wgpu.wgpuBufferGetSize(grm.scene_uniform_buffer),
             },
-            .{ // world_matrices
+            .{ // entities_data
                 .binding = 1,
-                .buffer = grm.world_matrices_buffer,
+                .buffer = grm.entities_data_buffer,
                 .offset = 0,
-                .size = wgpu.wgpuBufferGetSize(grm.world_matrices_buffer),
+                .size = wgpu.wgpuBufferGetSize(grm.entities_data_buffer),
             },
         },
     });
@@ -121,18 +121,6 @@ pub fn deinit(self: @This()) void {
     wgpu.wgpuShaderModuleRelease(self.shader_module);
 }
 
-fn calculate_global_transform(node_idx: u32, grm: *const ResourceManager) Mat4 {
-    var current_idx = node_idx;
-    var result = grm.nodes_data.items[current_idx].local_matrix;
-
-    while (grm.nodes_data.items[current_idx].parent_idx != std.math.maxInt(u32)) {
-        current_idx = grm.nodes_data.items[current_idx].parent_idx;
-        result = grm.nodes_data.items[current_idx].local_matrix.mul(result);
-    }
-
-    return result;
-}
-
 const std = @import("std");
 const Gctx = @import("gctx.zig");
 const Algebra = @import("zalgebra");
@@ -147,6 +135,4 @@ const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
 const VertexAttribute = ShaderType.VertexAttribute;
 const EntityData = ShaderType.EntityData;
-const GltfNodeData = ShaderType.GltfNodeData;
-const MeshData = ShaderType.MeshData;
 const ModelData = ShaderType.ModelData;

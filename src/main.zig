@@ -16,14 +16,6 @@ pub fn main() !void {
     // 测试GPU资源管理器
     const grm = try ResourceManager.init(allocator, &gctx);
 
-    // 创建计算管线
-    const compute_pipeline = try ComputePipeline.init(
-        &gctx,
-        "resources/shaders/compute_shader.wgsl",
-        &grm,
-    );
-    defer compute_pipeline.deinit();
-
     // 创建渲染管线
     const render_pipeline = try RenderPipeline.init(
         &gctx,
@@ -69,7 +61,7 @@ pub fn main() !void {
         // 更新场景
         try scene.update();
         // 渲染
-        try Render.draw(&gctx, &compute_pipeline, &render_pipeline, &scene, &grm);
+        try Render.draw(&gctx, &render_pipeline, &scene, &grm);
     }
 }
 
