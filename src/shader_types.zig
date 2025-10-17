@@ -17,6 +17,7 @@ pub const SceneUniform = struct {
 };
 pub const VertexAttribute = struct {
     pos: [3]f32, //顶点位置
+    texcoord: [2]f32, //纹理UV
     color: [4]f32, //顶点颜色
 };
 pub const EntityData = struct {
@@ -27,6 +28,7 @@ pub const ModelData = struct {
     first_index_idx: u32, //model的第一个索引索引
     vertex_count: u32, //model的顶点数量
     index_count: u32, //model的索引数量
+    base_color_texture: ?wgpu.WGPUTextureView = null, //基础颜色材质
 };
 pub const IndexedIndirectCmd = struct {
     indexCount: u32,
@@ -41,8 +43,13 @@ pub const VertexIndirectCmd = struct {
     firstVertex: u32,
     firstInstance: u32,
 };
+pub const TextureInfo = struct {
+    texture: wgpu.WGPUTexture,
+    view: wgpu.WGPUTextureView,
+};
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
+const wgpu = @import("cimprots.zig").wgpu;

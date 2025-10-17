@@ -35,11 +35,11 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&copy_wgpu_dll.step);
 
     // zalgebra
-    const zalgebra = b.dependency("zalgebra", .{
+    const zalgebra_dep = b.dependency("zalgebra", .{
         .target = target,
         .optimize = optimize,
     });
-    const zalgebra_module = zalgebra.module("zalgebra");
+    const zalgebra_module = zalgebra_dep.module("zalgebra");
     exe.root_module.addImport("zalgebra", zalgebra_module);
 
     // zgltf
@@ -49,6 +49,14 @@ pub fn build(b: *std.Build) void {
     });
     const zgltf_module = zgltf_dep.module("zgltf");
     exe.root_module.addImport("zgltf", zgltf_module);
+
+    //zigimg
+    const zigimg_dep = b.dependency("zigimg", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const zigimg_module = zigimg_dep.module("zigimg");
+    exe.root_module.addImport("zigimg", zigimg_module);
 
     // 复制资源文件
     b.installDirectory(.{

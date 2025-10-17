@@ -5,10 +5,13 @@
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
         .zgltf = .{
-            .path = "libs/zgltf",
+            .path = "libs/zgltf-main",
         },
         .zalgebra = .{
-            .path = "libs/zalgebra",
+            .path = "libs/zalgebra-main",
+        },
+        .zigimg = .{
+            .path = "libs/zigimg-master",
         },
     },
     .paths = .{

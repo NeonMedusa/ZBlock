@@ -73,7 +73,6 @@ pub fn init(
     // 创建设备
     const required_features = &[_]wgpu.WGPUFeatureName{
         wgpu.WGPUFeatureName_IndirectFirstInstance,
-        wgpu.WGPUNativeFeature_MultiDrawIndirect,
     };
 
     var device: wgpu.WGPUDevice = undefined;
@@ -172,7 +171,7 @@ pub fn createShaderModule(gctx: *Gctx, shader_file_path: []const u8) !wgpu.WGPUS
 
     var shader_code: [128 * 4096]u8 = undefined;
     var reader = code_file.reader(&shader_code);
-    const size = try reader.read(&shader_code);
+    const size = try reader.file.read(&shader_code);
 
     const shader_source = wgpu.struct_WGPUShaderSourceWGSL{
         .code = .{
@@ -196,6 +195,7 @@ pub fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(Vert
     inline for (fields, 0..) |field, i| {
         const format = switch (field.type) {
             f32 => wgpu.WGPUVertexFormat_Float32,
+            [2]f32 => wgpu.WGPUVertexFormat_Float32x2,
             [3]f32 => wgpu.WGPUVertexFormat_Float32x3,
             [4]f32 => wgpu.WGPUVertexFormat_Float32x4,
             u32 => wgpu.WGPUVertexFormat_Uint32,

@@ -62,6 +62,7 @@ pub fn draw(
         .view = texture_view,
         .loadOp = wgpu.WGPULoadOp_Clear,
         .storeOp = wgpu.WGPUStoreOp_Store,
+        .depthSlice = wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
         .clearValue = wgpu.WGPUColor{
             .r = 0.1,
             .g = 0.1,
