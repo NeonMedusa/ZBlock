@@ -17,18 +17,21 @@ pub const SceneUniform = struct {
 };
 pub const VertexAttribute = struct {
     pos: [3]f32, //顶点位置
-    texcoord: [2]f32, //纹理UV
-    color: [4]f32, //顶点颜色
+    uv: [2]f32, //纹理UV
 };
 pub const EntityData = struct {
     transform: Mat4, //实例的世界变换
+    texture_size: [2]f32, //纹理的实际大小
+    uv_offset: [2]f32, //纹理uv偏移量
+    texture_index: u32, //纹理在数组中的索引
+    _padding: [3]f32 = undefined, // 需要对齐到16字节
 };
-pub const ModelData = struct {
+pub const ModelInfo = struct {
     first_vertex_idx: u32, //model的第一个顶点索引
     first_index_idx: u32, //model的第一个索引索引
     vertex_count: u32, //model的顶点数量
     index_count: u32, //model的索引数量
-    base_color_texture: ?wgpu.WGPUTextureView = null, //基础颜色材质
+    color_texture: TextureInfo, //基础颜色材质
 };
 pub const IndexedIndirectCmd = struct {
     indexCount: u32,
@@ -44,11 +47,12 @@ pub const VertexIndirectCmd = struct {
     firstInstance: u32,
 };
 pub const TextureInfo = struct {
-    texture: wgpu.WGPUTexture,
-    view: wgpu.WGPUTextureView,
+    index: u32 = 0, // 纹理在纹理数组中的索引
+    size: [2]f32 = .{ 1, 1 }, // 纹理的实际大小
+    uv_offset: [2]f32 = .{ 0, 0 }, // 纹理在纹理图集中的uv偏移量
 };
-
 const Algebra = @import("zalgebra");
+const Vec2 = Algebra.Vec2;
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");

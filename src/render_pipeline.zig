@@ -58,7 +58,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
             },
             .{ // textures
                 .binding = 2,
-                .textureView = grm.texture_infos.items[0].view,
+                .textureView = grm.texture_altas_view,
             },
         },
     });
@@ -147,4 +147,3 @@ const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
 const VertexAttribute = ShaderType.VertexAttribute;
 const EntityData = ShaderType.EntityData;
-const ModelData = ShaderType.ModelData;

@@ -6,8 +6,10 @@ entities_data: []EntityData,
 entities_data_buffer: wgpu.WGPUBuffer, // 渲染实例的世界矩阵缓冲区
 indexed_indirect_cmds: []IndexedIndirectCmd,
 indexed_indirect_cmds_buffer: wgpu.WGPUBuffer, // 间接绘制index命令缓冲区
-models_data: std.ArrayList(ModelData),
-texture_infos: std.ArrayList(TextureInfo),
+models_data: std.ArrayList(ModelInfo),
+// 纹理图集数组，ALL_IN_BOOM！包含所有的颜色、法线、高光贴图，还有动画纹理也在其中！
+texture_altas_array: wgpu.WGPUTexture,
+texture_altas_view: wgpu.WGPUTextureView,
 // 渲染限制
 const max_entities = 500; // 限制最大实体数
 pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
@@ -28,18 +30,46 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
     });
     const entities_data = try allocator.alloc(EntityData, max_entities);
     const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, max_entities);
-    var texture_infos = std.ArrayList(TextureInfo){};
+
+    const texture_desc = wgpu.WGPUTextureDescriptor{
+        .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
+        .dimension = wgpu.WGPUTextureDimension_2D,
+        .size = .{
+            .width = 2048,
+            .height = 2048,
+            // 大于1表明这是一个纹理数组，填入多少就有多少张纹理
+            // 写入纹理时通过修改origin的z轴来指定写入哪一张纹理
+            .depthOrArrayLayers = 3,
+        },
+        .format = wgpu.WGPUTextureFormat_RGBA8Unorm,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+    };
+    const texture_altas_array = wgpu.wgpuDeviceCreateTexture(gctx.device, &texture_desc);
+    const texture_altas_view = wgpu.wgpuTextureCreateView(
+        texture_altas_array,
+        &wgpu.struct_WGPUTextureViewDescriptor{
+            .aspect = wgpu.WGPUTextureAspect_All,
+            .baseArrayLayer = 0,
+            .arrayLayerCount = texture_desc.size.depthOrArrayLayers,
+            .baseMipLevel = 0,
+            .mipLevelCount = 1,
+            .dimension = wgpu.WGPUTextureViewDimension_2DArray,
+            .format = texture_desc.format,
+        },
+    );
 
     // 加载模型填充缓冲区
     var vertex_data = std.ArrayList(VertexAttribute){};
     var index_data = std.ArrayList(u32){};
     defer vertex_data.deinit(allocator);
     defer index_data.deinit(allocator);
-    var models_data = std.ArrayList(ModelData){};
+    var models_data = std.ArrayList(ModelInfo){};
     var models_dir = try std.fs.cwd().openDir("resources/models", .{ .iterate = true });
     defer models_dir.close();
     var dir_iter = try models_dir.walk(allocator);
     defer dir_iter.deinit();
+    var color_texture_count: u32 = 0;
     // 遍历模型文件夹
     while (try dir_iter.next()) |entry| {
         if (entry.kind != .file or !std.mem.endsWith(u8, entry.basename, ".glb")) continue;
@@ -58,11 +88,50 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         defer gltf.deinit();
         try gltf.parse(file_buf);
 
+        // 提取纹理数据
+        var texture_info = TextureInfo{};
+        for (gltf.data.materials) |material| {
+            if (material.metallic_roughness.base_color_texture) |color_texture_info| {
+                const color_texture_img_idx = gltf.data.textures[color_texture_info.index].source;
+                const img_source = gltf.data.images[color_texture_img_idx.?];
+                defer color_texture_count += 1;
+                var img = try zigimg.Image.fromMemory(allocator, img_source.data.?);
+                defer img.deinit(allocator);
+                try img.convert(allocator, .rgba32);
+                wgpu.wgpuQueueWriteTexture(
+                    gctx.queue,
+                    &wgpu.WGPUTexelCopyTextureInfo{
+                        .texture = texture_altas_array,
+                        .mipLevel = 0,
+                        // xy为写入时的像素偏移，我们可以利用这个特性实现纹理图集，z轴用于指定写入到哪张纹理中
+                        .origin = .{ .x = 0, .y = 0, .z = color_texture_count },
+                    },
+                    img.pixels.rgba32.ptr,
+                    img.pixels.rgba32.len * @sizeOf(zigimg.color.Rgba32),
+                    &wgpu.struct_WGPUTexelCopyBufferLayout{
+                        .offset = 0,
+                        .bytesPerRow = @intCast(img.width * 4),
+                        .rowsPerImage = @intCast(img.height),
+                    },
+                    &wgpu.struct_WGPUExtent3D{
+                        .width = @intCast(img.width),
+                        .height = @intCast(img.height),
+                        .depthOrArrayLayers = 1,
+                    },
+                );
+                texture_info.index = color_texture_count;
+                const size_x_f: f32 = @floatFromInt(img.width);
+                const size_y_f: f32 = @floatFromInt(img.height);
+                texture_info.size = .{ size_x_f, size_y_f };
+                texture_info.uv_offset = .{ 0, 0 };
+            }
+        }
+
+        // 提取有mesh的节点的vertex和index数据
         var model_vertex_data = std.ArrayList(VertexAttribute){};
         var model_index_data = std.ArrayList(u32){};
         defer model_vertex_data.deinit(allocator);
         defer model_index_data.deinit(allocator);
-        // 提取有mesh的节点的vertex和index数据
         for (gltf.data.nodes, 0..) |node, node_idx| {
             if (node.mesh) |mesh_idx| {
                 const world_matrix = calWorldMatrix(node_idx, &gltf);
@@ -76,21 +145,26 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                     var primitive_index_data = std.ArrayList(u32){};
                     defer primitive_vertex_data.deinit(allocator);
                     defer primitive_index_data.deinit(allocator);
-                    // 记录当前model的顶点数量作为偏移
+                    // 处理索引，记录当前model的顶点数量作为偏移
                     const vertex_offset: u32 = @intCast(model_vertex_data.items.len);
-                    // 处理顶点属性
+                    if (primitive.indices) |indices_accessor_index| {
+                        const accessor = gltf.data.accessors[indices_accessor_index];
+                        var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
+                        while (it.next()) |indice| {
+                            try primitive_index_data.append(allocator, indice[0] + vertex_offset);
+                        }
+                    }
+                    // 处理顶点
                     for (primitive.attributes) |attribute| {
                         switch (attribute) {
                             .position => |idx| {
                                 const accessor = gltf.data.accessors[idx];
                                 var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                                var i: f32 = 0;
-                                while (it.next()) |v| : (i += 0.001) {
+                                while (it.next()) |v| {
                                     const final_pos = world_matrix.mulByVec4(.{ .data = .{ v[0], v[1], v[2], 1.0 } });
                                     try primitive_vertex_data.append(allocator, .{
                                         .pos = .{ final_pos.data[0], final_pos.data[1], final_pos.data[2] },
-                                        .texcoord = .{ 0, 0 }, // ↓暂时只添加一些随机性的颜色
-                                        .color = .{ @mod(i / 0.1, 1), @mod(i / 0.2, 1), @mod(i / 0.3, 1), 1 },
+                                        .uv = .{ 0.1, 0.9 }, // ↓暂时只添加一些随机性的颜色
                                     });
                                 }
                             },
@@ -99,116 +173,15 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                                 var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                                 var i: u32 = 0;
                                 while (it.next()) |t| : (i += 1) {
-                                    primitive_vertex_data.items[i].texcoord = .{ t[0], t[1] };
-                                }
-                            },
-                            .color => |idx| {
-                                const accessor = gltf.data.accessors[idx];
-                                var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                                var i: u32 = 0;
-                                while (it.next()) |c| : (i += 1) {
-                                    if (i < primitive_vertex_data.items.len) {
-                                        primitive_vertex_data.items[i].color = .{ c[0], c[1], c[2], c[3] };
-                                    }
+                                    primitive_vertex_data.items[i].uv = .{ t[0], t[1] };
                                 }
                             },
                             else => {},
                         }
                     }
-                    // 处理索引
-                    if (primitive.indices) |indices_accessor_index| {
-                        const accessor = gltf.data.accessors[indices_accessor_index];
-                        var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
-                        while (it.next()) |indice| {
-                            try primitive_index_data.append(allocator, indice[0] + vertex_offset);
-                        }
-                    }
                     // 将primitive数据添加到model数据中
                     try model_vertex_data.appendSlice(allocator, primitive_vertex_data.items);
                     try model_index_data.appendSlice(allocator, primitive_index_data.items);
-
-                    // ↓材质数据提取
-                    if (gltf.data.textures.len > 0 and primitive.material != null) {
-                        const material = gltf.data.materials[primitive.material.?];
-                        if (material.metallic_roughness.base_color_texture) |base_color_tex_info| {
-                            const texture_idx = base_color_tex_info.index;
-                            const texture = gltf.data.textures[texture_idx];
-                            if (texture.source) |image_idx| {
-                                const image = gltf.data.images[image_idx];
-                                // 有几种可能的数据来源：
-                                // 1.直接从image.data获取数据（仅限 GLB 格式）
-                                // 2.从 bufferview中获取数据
-                                // 3.从外部文件uri获取数据
-                                // 暂时只实现第一种，仅支持GLB格式模型
-                                if (image.data) |image_data| {
-                                    var img = try zigimg.Image.fromMemory(allocator, image_data);
-                                    defer img.deinit(allocator);
-                                    try img.convert(allocator, .rgba32);
-
-                                    const texture_desc = wgpu.WGPUTextureDescriptor{
-                                        .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
-                                        .dimension = wgpu.WGPUTextureDimension_2D,
-                                        .size = .{
-                                            .width = @intCast(img.width),
-                                            .height = @intCast(img.height),
-                                            // 大于1表明这是一个纹理数组，填入多少就有多少层纹理
-                                            // 写入纹理时通过修改origin的z轴来指定写入哪一张纹理
-                                            .depthOrArrayLayers = 2,
-                                        },
-                                        .format = wgpu.WGPUTextureFormat_RGBA8Unorm,
-                                        .mipLevelCount = 1,
-                                        .sampleCount = 1,
-                                    };
-                                    const wgpu_texture = wgpu.wgpuDeviceCreateTexture(gctx.device, &texture_desc);
-                                    wgpu.wgpuQueueWriteTexture(
-                                        gctx.queue,
-                                        &wgpu.WGPUTexelCopyTextureInfo{
-                                            .texture = wgpu_texture,
-                                            .mipLevel = 0,
-                                            .origin = .{ .x = 0, .y = 0, .z = 1 },
-                                        },
-                                        img.pixels.rgba32.ptr,
-                                        img.pixels.rgba32.len * @sizeOf(zigimg.color.Rgba32),
-                                        &wgpu.struct_WGPUTexelCopyBufferLayout{
-                                            .offset = 0,
-                                            .bytesPerRow = @intCast(img.width * 4),
-                                            .rowsPerImage = @intCast(img.height),
-                                        },
-                                        &wgpu.struct_WGPUExtent3D{
-                                            .width = @intCast(img.width),
-                                            .height = @intCast(img.height),
-                                            .depthOrArrayLayers = 1,
-                                        },
-                                    );
-                                    const texture_view = wgpu.wgpuTextureCreateView(
-                                        wgpu_texture,
-                                        &wgpu.struct_WGPUTextureViewDescriptor{
-                                            .aspect = wgpu.WGPUTextureAspect_All,
-                                            .baseArrayLayer = 0,
-                                            .arrayLayerCount = texture_desc.size.depthOrArrayLayers,
-                                            .baseMipLevel = 0,
-                                            .mipLevelCount = 1,
-                                            .dimension = wgpu.WGPUTextureViewDimension_2DArray,
-                                            .format = texture_desc.format,
-                                        },
-                                    );
-                                    const texture_info = TextureInfo{
-                                        .texture = wgpu_texture,
-                                        .view = texture_view,
-                                    };
-                                    try texture_infos.append(allocator, texture_info);
-                                    // 保存图片
-                                    // const save_img_file_name = try std.fmt.allocPrint(allocator, "{}.png", .{std.time.microTimestamp()});
-                                    // defer allocator.free(save_img_file_name);
-                                    // var save_img_file = try std.fs.cwd().createFile(save_img_file_name, .{});
-                                    // defer save_img_file.close();
-                                    // var write_buffer: [4096]u8 = undefined; // 或者使用动态缓冲区
-                                    // try img.writeToFile(allocator, save_img_file, &write_buffer, .{ .png = .{} });
-                                }
-                            }
-                        }
-                    }
-                    // ↑材质数据提取
                 }
                 // 将当前mesh数据追加到当前model数据中
                 try model_vertex_data.appendSlice(allocator, mesh_vertex_data.items);
@@ -216,11 +189,12 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             }
         }
         // 将当前model数据追加到全局数据中
-        const model = ModelData{
+        const model = ModelInfo{
             .first_vertex_idx = @intCast(vertex_data.items.len),
             .first_index_idx = @intCast(index_data.items.len),
             .vertex_count = @intCast(model_vertex_data.items.len),
             .index_count = @intCast(model_index_data.items.len),
+            .color_texture = texture_info,
         };
         try models_data.append(allocator, model);
         try vertex_data.appendSlice(allocator, model_vertex_data.items);
@@ -261,7 +235,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         .indexed_indirect_cmds_buffer = indexed_indirect_cmds_buffer,
         .entities_data = entities_data,
         .entities_data_buffer = entities_data_buffer,
-        .texture_infos = texture_infos,
+        .texture_altas_array = texture_altas_array,
+        .texture_altas_view = texture_altas_view,
     };
 }
 
@@ -284,7 +259,7 @@ const VertexAttribute = ShaderType.VertexAttribute;
 const EntityData = ShaderType.EntityData;
 const IndexedIndirectCmd = ShaderType.IndexedIndirectCmd;
 const VertexIndirectCmd = ShaderType.VertexIndirectCmd;
-const ModelData = ShaderType.ModelData;
+const ModelInfo = ShaderType.ModelInfo;
 const TextureInfo = ShaderType.TextureInfo;
 const std = @import("std");
 const Gctx = @import("gctx.zig");

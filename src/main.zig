@@ -30,12 +30,14 @@ pub fn main() !void {
     const entity0 = Entity{
         .model = 0,
         .position = Vec3.zero(),
+        .scale = Vec3{ .data = .{ 15, 15, 15 } },
     };
     try scene.addEntity(entity0);
 
     const entity1 = Entity{
         .model = 1,
         .position = Vec3{ .data = .{ 3, 0, 0 } },
+        .scale = Vec3{ .data = .{ 4, 4, 4 } },
     };
     try scene.addEntity(entity1);
 

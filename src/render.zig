@@ -28,15 +28,19 @@ pub fn draw(
     var entity_counter: u32 = 0;
     for (scene.entities.items) |entity| {
         if (entity.model) |model_idx| {
-            grm.entities_data[entity_counter] = EntityData{
-                .transform = entity.getTransform(),
-            };
             const model = grm.models_data.items[model_idx];
             grm.indexed_indirect_cmds[entity_counter].indexCount = model.index_count;
             grm.indexed_indirect_cmds[entity_counter].instanceCount = 1;
             grm.indexed_indirect_cmds[entity_counter].firstIndex = model.first_index_idx;
             grm.indexed_indirect_cmds[entity_counter].baseVertex = model.first_vertex_idx;
             grm.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
+
+            grm.entities_data[entity_counter] = EntityData{
+                .transform = entity.getTransform(),
+                .texture_index = model.color_texture.index,
+                .texture_size = model.color_texture.size,
+                .uv_offset = model.color_texture.uv_offset,
+            };
         }
         entity_counter += 1;
     }
