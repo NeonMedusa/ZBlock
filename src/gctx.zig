@@ -28,7 +28,7 @@ pub fn init(
         .chain = wgpu.WGPUChainedStruct{
             .sType = wgpu.WGPUSType_InstanceExtras,
         },
-        .backends = wgpu.WGPUInstanceBackend_Vulkan, // 或者使用具体的后端组合
+        .backends = wgpu.WGPUInstanceBackend_DX12, // 或者使用具体的后端组合
     };
     // 2. 创建主描述符，并将扩展结构体链入
     const instance_descriptor = wgpu.WGPUInstanceDescriptor{

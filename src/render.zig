@@ -3,7 +3,7 @@ pub fn draw(
     gctx: *const Gctx,
     render_pipeline: *const RenderPipeline,
     scene: *const Scene,
-    grm: *const ResourceManager,
+    grm: *ResourceManager,
 ) !void {
     // 获取当前帧的纹理
     var surface_texture: wgpu.WGPUSurfaceTexture = undefined;
@@ -26,9 +26,35 @@ pub fn draw(
 
     // 重置渲染实例计数器
     var entity_counter: u32 = 0;
+
+    // 简单分类实例化渲染
+    // var cmd_counter: u32 = 0;
+    // var model_it = grm.models_info.iterator();
+    // while (model_it.next()) |model| : (cmd_counter += 1) {
+    //     grm.indexed_indirect_cmds[cmd_counter].firstInstance = entity_counter;
+    //     grm.indexed_indirect_cmds[cmd_counter].indexCount = model.value.index_count;
+    //     grm.indexed_indirect_cmds[cmd_counter].firstIndex = model.value.first_index_idx;
+    //     grm.indexed_indirect_cmds[cmd_counter].baseVertex = model.value.first_vertex_idx;
+    //     var cur_model_ins_counter: u32 = 0;
+    //     defer grm.indexed_indirect_cmds[cmd_counter].instanceCount = cur_model_ins_counter;
+    //     for (scene.entities.items) |entity| {
+    //         if (entity.model == model.key) {
+    //             grm.entities_data[entity_counter] = EntityData{
+    //                 .transform = entity.getTransform(),
+    //                 .texture_index = model.value.color_texture.index,
+    //                 .texture_size = model.value.color_texture.size,
+    //                 .uv_offset = model.value.color_texture.uv_offset,
+    //             };
+    //             cur_model_ins_counter += 1;
+    //             entity_counter += 1;
+    //         }
+    //     }
+    // }
+
+    // 不分类间接绘制
     for (scene.entities.items) |entity| {
-        if (entity.model) |model_idx| {
-            const model = grm.models_data.items[model_idx];
+        if (entity.model) |model_name| {
+            const model = grm.models_info.get(model_name);
             grm.indexed_indirect_cmds[entity_counter].indexCount = model.index_count;
             grm.indexed_indirect_cmds[entity_counter].instanceCount = 1;
             grm.indexed_indirect_cmds[entity_counter].firstIndex = model.first_index_idx;
@@ -44,6 +70,7 @@ pub fn draw(
         }
         entity_counter += 1;
     }
+
     // 更新entities_data_buffer
     wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
@@ -98,6 +125,11 @@ pub fn draw(
     wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, grm.index_buffer, wgpu.WGPUIndexFormat_Uint32, 0, wgpu.wgpuBufferGetSize(grm.index_buffer));
     // 间接绘制所有可见实例
     wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, grm.indexed_indirect_cmds_buffer, 0, entity_counter);
+    // wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, grm.indexed_indirect_cmds_buffer, 0, cmd_counter);
+    // for (0..cmd_counter) |idx| {
+    //     const cmd = grm.indexed_indirect_cmds[idx];
+    //     wgpu.wgpuRenderPassEncoderDrawIndexed(pass, cmd.indexCount, cmd.instanceCount, cmd.firstIndex, @intCast(cmd.baseVertex), cmd.firstInstance);
+    // }
     // 结束并释放渲染通道
     wgpu.wgpuRenderPassEncoderEnd(pass);
     wgpu.wgpuRenderPassEncoderRelease(pass);
@@ -123,11 +155,11 @@ const ResourceManager = @import("resource_manager.zig");
 const ComputePipeline = @import("compute_pipeline.zig");
 const RenderPipeline = @import("render_pipeline.zig");
 const Scene = @import("scene.zig");
+const Entity = @import("entity.zig");
 
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
 const VertexAttribute = ShaderType.VertexAttribute;
 const EntityData = ShaderType.EntityData;
-const ModelData = ShaderType.ModelData;
 const IndexedIndirectCmd = ShaderType.IndexedIndirectCmd;
 const VertexIndirectCmd = ShaderType.VertexIndirectCmd;

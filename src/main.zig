@@ -14,7 +14,7 @@ pub fn main() !void {
     defer gctx.deinit();
 
     // 测试GPU资源管理器
-    const grm = try ResourceManager.init(allocator, &gctx);
+    var grm = try ResourceManager.init(allocator, &gctx);
 
     // 创建渲染管线
     const render_pipeline = try RenderPipeline.init(
@@ -27,32 +27,40 @@ pub fn main() !void {
     var scene = Scene.init(allocator, &window);
     defer scene.deinit();
 
-    const entity0 = Entity{
-        .model = 0,
-        .position = Vec3.zero(),
-        .scale = Vec3{ .data = .{ 15, 15, 15 } },
-    };
-    try scene.addEntity(entity0);
+    for (0..100) |value| {
+        const entity0 = Entity{
+            .model = .Avocado,
+            .position = Vec3{ .data = .{ 0, 0, @floatFromInt(value) } },
+            .scale = Vec3{ .data = .{ 15, 15, 15 } },
+        };
+        try scene.addEntity(entity0);
+    }
 
-    const entity1 = Entity{
-        .model = 1,
-        .position = Vec3{ .data = .{ 3, 0, 0 } },
-        .scale = Vec3{ .data = .{ 4, 4, 4 } },
-    };
-    try scene.addEntity(entity1);
+    for (0..100) |value| {
+        const entity1 = Entity{
+            .model = .BarramundiFish,
+            .position = Vec3{ .data = .{ 3, 0, @floatFromInt(value) } },
+            .scale = Vec3{ .data = .{ 4, 4, 4 } },
+        };
+        try scene.addEntity(entity1);
+    }
 
-    const entity2 = Entity{
-        .model = 2,
-        .position = Vec3{ .data = .{ 6, 0, 0 } },
-        .scale = Vec3{ .data = .{ 0.025, 0.025, 0.025 } },
-    };
-    try scene.addEntity(entity2);
+    // for (0..100) |value| {
+    //     const entity2 = Entity{
+    //         .model = .Buggy,
+    //         .position = Vec3{ .data = .{ 6, 0, @floatFromInt(value) } },
+    //         .scale = Vec3{ .data = .{ 0.025, 0.025, 0.025 } },
+    //     };
+    //     try scene.addEntity(entity2);
+    // }
 
-    const entity3 = Entity{
-        .model = 3,
-        .position = Vec3{ .data = .{ 9, 0, 0 } },
-    };
-    try scene.addEntity(entity3);
+    for (0..100) |value| {
+        const entity3 = Entity{
+            .model = .CesiumMan,
+            .position = Vec3{ .data = .{ 9, 0, @floatFromInt(value) } },
+        };
+        try scene.addEntity(entity3);
+    }
 
     // 主循环
     while (window.shouldClose()) {
@@ -86,3 +94,5 @@ const Scene = @import("scene.zig");
 const ResourceManager = @import("resource_manager.zig");
 const ComputePipeline = @import("compute_pipeline.zig");
 const RenderPipeline = @import("render_pipeline.zig");
+
+const ModelName = @import("model.zig").ModelName;
