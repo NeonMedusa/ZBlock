@@ -33,15 +33,134 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
     const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, max_entities);
     var models_info = std.EnumArray(ModelName, ModelInfo).initUndefined();
 
+    // 加载模型填充缓冲区
+    var vertex_data = std.ArrayList(VertexAttribute){};
+    var index_data = std.ArrayList(u32){};
+    defer vertex_data.deinit(allocator);
+    defer index_data.deinit(allocator);
+
+    { // 第一遍加载模型的顶点数据，获取模型的贴图大小
+        var model_it = models_info.iterator();
+        while (model_it.next()) |model| {
+            const file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{@tagName(model.key)});
+            defer allocator.free(file_name);
+            const file_path = try std.fs.path.join(allocator, &.{ "resources", "models", file_name });
+            defer allocator.free(file_path);
+            const file_buf = try std.fs.cwd().readFileAllocOptions(
+                allocator,
+                file_path,
+                std.math.maxInt(usize),
+                null,
+                .@"16",
+                null,
+            );
+            defer allocator.free(file_buf);
+            var gltf = Gltf.init(allocator);
+            defer gltf.deinit();
+            try gltf.parse(file_buf);
+            // 获取纹理的尺寸
+            var base_color_texture_info = TextureInfo{};
+            for (gltf.data.materials) |material| {
+                if (material.metallic_roughness.base_color_texture) |color_texture_info| {
+                    const color_texture_img_idx = gltf.data.textures[color_texture_info.index].source;
+                    const img_source = gltf.data.images[color_texture_img_idx.?];
+                    var img = try zigimg.Image.fromMemory(allocator, img_source.data.?);
+                    defer img.deinit(allocator);
+                    const size_x_f: f32 = @floatFromInt(img.width);
+                    const size_y_f: f32 = @floatFromInt(img.height);
+                    base_color_texture_info.size = .{ size_x_f, size_y_f };
+                }
+            }
+            // 提取有mesh的节点的vertex和index数据
+            var model_vertex_data = std.ArrayList(VertexAttribute){};
+            var model_index_data = std.ArrayList(u32){};
+            defer model_vertex_data.deinit(allocator);
+            defer model_index_data.deinit(allocator);
+            for (gltf.data.nodes, 0..) |node, node_idx| {
+                if (node.mesh) |mesh_idx| {
+                    const world_matrix = calWorldMatrix(node_idx, &gltf);
+                    const mesh = gltf.data.meshes[mesh_idx];
+                    var mesh_vertex_data = std.ArrayList(VertexAttribute){};
+                    var mesh_index_data = std.ArrayList(u32){};
+                    defer mesh_vertex_data.deinit(allocator);
+                    defer mesh_index_data.deinit(allocator);
+                    for (mesh.primitives) |primitive| {
+                        var primitive_vertex_data = std.ArrayList(VertexAttribute){};
+                        var primitive_index_data = std.ArrayList(u32){};
+                        defer primitive_vertex_data.deinit(allocator);
+                        defer primitive_index_data.deinit(allocator);
+                        // 处理索引，记录当前model的顶点数量作为偏移
+                        const vertex_offset: u32 = @intCast(model_vertex_data.items.len);
+                        if (primitive.indices) |indices_accessor_index| {
+                            const accessor = gltf.data.accessors[indices_accessor_index];
+                            var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
+                            while (it.next()) |indice| {
+                                try primitive_index_data.append(allocator, indice[0] + vertex_offset);
+                            }
+                        }
+                        // 处理顶点
+                        for (primitive.attributes) |attribute| {
+                            switch (attribute) {
+                                .position => |idx| {
+                                    const accessor = gltf.data.accessors[idx];
+                                    var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                                    while (it.next()) |v| {
+                                        const final_pos = world_matrix.mulByVec4(.{ .data = .{ v[0], v[1], v[2], 1.0 } });
+                                        try primitive_vertex_data.append(allocator, .{
+                                            .pos = .{ final_pos.data[0], final_pos.data[1], final_pos.data[2] },
+                                            .uv = .{ 0.1, 0.9 }, // ↓暂时只添加一些随机性的颜色
+                                        });
+                                    }
+                                },
+                                .texcoord => |idx| {
+                                    const accessor = gltf.data.accessors[idx];
+                                    var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                                    var i: u32 = 0;
+                                    while (it.next()) |t| : (i += 1) {
+                                        primitive_vertex_data.items[i].uv = .{ t[0], t[1] };
+                                    }
+                                },
+                                else => {},
+                            }
+                        }
+                        // 将primitive数据添加到model数据中
+                        try model_vertex_data.appendSlice(allocator, primitive_vertex_data.items);
+                        try model_index_data.appendSlice(allocator, primitive_index_data.items);
+                    }
+                    // 将当前mesh数据追加到当前model数据中
+                    try model_vertex_data.appendSlice(allocator, mesh_vertex_data.items);
+                    try model_index_data.appendSlice(allocator, mesh_index_data.items);
+                }
+            }
+            // 将当前model数据追加到全局数据中
+            model.value.first_vertex_idx = @intCast(vertex_data.items.len);
+            model.value.first_index_idx = @intCast(index_data.items.len);
+            model.value.vertex_count = @intCast(model_vertex_data.items.len);
+            model.value.index_count = @intCast(model_index_data.items.len);
+            model.value.color_texture = base_color_texture_info;
+            try vertex_data.appendSlice(allocator, model_vertex_data.items);
+            try index_data.appendSlice(allocator, model_index_data.items);
+        }
+    }
+    // 第二遍获取了所有的贴图大小后，对贴图进行二维装箱，将贴图数据写入纹理
+    const atlas_width = 8192;
+    const atlas_height = 8192;
+    const atlas_count = try TexturePacker.packTextures(
+        allocator,
+        &models_info,
+        atlas_width,
+        atlas_height,
+    );
+    std.debug.print("{d}", .{atlas_count});
     const texture_desc = wgpu.WGPUTextureDescriptor{
         .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = wgpu.WGPUTextureDimension_2D,
         .size = .{
-            .width = 2048,
-            .height = 2048,
+            .width = atlas_width,
+            .height = atlas_height,
             // 大于1表明这是一个纹理数组，填入多少就有多少张纹理
             // 写入纹理时通过修改origin的z轴来指定写入哪一张纹理
-            .depthOrArrayLayers = models_info.values.len,
+            .depthOrArrayLayers = atlas_count,
         },
         .format = wgpu.WGPUTextureFormat_RGBA8Unorm,
         .mipLevelCount = 1,
@@ -60,16 +179,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             .format = texture_desc.format,
         },
     );
-
-    // 加载模型填充缓冲区
-    var vertex_data = std.ArrayList(VertexAttribute){};
-    var index_data = std.ArrayList(u32){};
-    defer vertex_data.deinit(allocator);
-    defer index_data.deinit(allocator);
-
     var model_it = models_info.iterator();
-    var model_idx: u32 = 0;
-    while (model_it.next()) |model| : (model_idx += 1) {
+    while (model_it.next()) |model| {
         const file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{@tagName(model.key)});
         defer allocator.free(file_name);
         const file_path = try std.fs.path.join(allocator, &.{ "resources", "models", file_name });
@@ -101,7 +212,11 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                         .texture = texture_altas_array,
                         .mipLevel = 0,
                         // xy为写入时的像素偏移，我们可以利用这个特性实现纹理图集，z轴用于指定写入到哪张纹理中
-                        .origin = .{ .x = 0, .y = 0, .z = model_idx },
+                        .origin = .{
+                            .x = @intCast(model.value.color_texture.coords_offset[0]),
+                            .y = @intCast(model.value.color_texture.coords_offset[1]),
+                            .z = model.value.color_texture.index,
+                        },
                     },
                     img.pixels.rgba32.ptr,
                     img.pixels.rgba32.len * @sizeOf(zigimg.color.Rgba32),
@@ -116,82 +231,12 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                         .depthOrArrayLayers = 1,
                     },
                 );
-                base_color_texture_info.index = model_idx;
                 const size_x_f: f32 = @floatFromInt(img.width);
                 const size_y_f: f32 = @floatFromInt(img.height);
                 base_color_texture_info.size = .{ size_x_f, size_y_f };
-                base_color_texture_info.uv_offset = .{ 0, 0 };
+                base_color_texture_info.coords_offset = .{ 0, 0 };
             }
         }
-        // 提取有mesh的节点的vertex和index数据
-        var model_vertex_data = std.ArrayList(VertexAttribute){};
-        var model_index_data = std.ArrayList(u32){};
-        defer model_vertex_data.deinit(allocator);
-        defer model_index_data.deinit(allocator);
-        for (gltf.data.nodes, 0..) |node, node_idx| {
-            if (node.mesh) |mesh_idx| {
-                const world_matrix = calWorldMatrix(node_idx, &gltf);
-                const mesh = gltf.data.meshes[mesh_idx];
-                var mesh_vertex_data = std.ArrayList(VertexAttribute){};
-                var mesh_index_data = std.ArrayList(u32){};
-                defer mesh_vertex_data.deinit(allocator);
-                defer mesh_index_data.deinit(allocator);
-                for (mesh.primitives) |primitive| {
-                    var primitive_vertex_data = std.ArrayList(VertexAttribute){};
-                    var primitive_index_data = std.ArrayList(u32){};
-                    defer primitive_vertex_data.deinit(allocator);
-                    defer primitive_index_data.deinit(allocator);
-                    // 处理索引，记录当前model的顶点数量作为偏移
-                    const vertex_offset: u32 = @intCast(model_vertex_data.items.len);
-                    if (primitive.indices) |indices_accessor_index| {
-                        const accessor = gltf.data.accessors[indices_accessor_index];
-                        var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
-                        while (it.next()) |indice| {
-                            try primitive_index_data.append(allocator, indice[0] + vertex_offset);
-                        }
-                    }
-                    // 处理顶点
-                    for (primitive.attributes) |attribute| {
-                        switch (attribute) {
-                            .position => |idx| {
-                                const accessor = gltf.data.accessors[idx];
-                                var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                                while (it.next()) |v| {
-                                    const final_pos = world_matrix.mulByVec4(.{ .data = .{ v[0], v[1], v[2], 1.0 } });
-                                    try primitive_vertex_data.append(allocator, .{
-                                        .pos = .{ final_pos.data[0], final_pos.data[1], final_pos.data[2] },
-                                        .uv = .{ 0.1, 0.9 }, // ↓暂时只添加一些随机性的颜色
-                                    });
-                                }
-                            },
-                            .texcoord => |idx| {
-                                const accessor = gltf.data.accessors[idx];
-                                var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                                var i: u32 = 0;
-                                while (it.next()) |t| : (i += 1) {
-                                    primitive_vertex_data.items[i].uv = .{ t[0], t[1] };
-                                }
-                            },
-                            else => {},
-                        }
-                    }
-                    // 将primitive数据添加到model数据中
-                    try model_vertex_data.appendSlice(allocator, primitive_vertex_data.items);
-                    try model_index_data.appendSlice(allocator, primitive_index_data.items);
-                }
-                // 将当前mesh数据追加到当前model数据中
-                try model_vertex_data.appendSlice(allocator, mesh_vertex_data.items);
-                try model_index_data.appendSlice(allocator, mesh_index_data.items);
-            }
-        }
-        // 将当前model数据追加到全局数据中
-        model.value.first_vertex_idx = @intCast(vertex_data.items.len);
-        model.value.first_index_idx = @intCast(index_data.items.len);
-        model.value.vertex_count = @intCast(model_vertex_data.items.len);
-        model.value.index_count = @intCast(model_index_data.items.len);
-        model.value.color_texture = base_color_texture_info;
-        try vertex_data.appendSlice(allocator, model_vertex_data.items);
-        try index_data.appendSlice(allocator, model_index_data.items);
     }
 
     // 写入顶点和索引缓冲区
@@ -267,3 +312,4 @@ const Gltf = @import("zgltf").Gltf;
 const wgpu = @import("cimprots.zig").wgpu;
 const zigimg = @import("zigimg");
 const ModelName = @import("model.zig").ModelName;
+const TexturePacker = @import("texture_packer.zig");

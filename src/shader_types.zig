@@ -22,7 +22,7 @@ pub const VertexAttribute = struct {
 pub const EntityData = struct {
     transform: Mat4, //实例的世界变换
     texture_size: [2]f32, //纹理的实际大小
-    uv_offset: [2]f32, //纹理uv偏移量
+    texel_coords_offset: [2]i32, //纹理uv偏移量
     texture_index: u32, //纹理在数组中的索引
     _padding: [3]f32 = undefined, // 需要对齐到16字节
 };
@@ -47,9 +47,9 @@ pub const VertexIndirectCmd = struct {
     firstInstance: u32,
 };
 pub const TextureInfo = struct {
+    size: [2]f32 = .{ 0, 0 }, // 纹理的实际大小
+    coords_offset: [2]i32 = .{ 0, 0 }, // 纹理在纹理图集中的坐标偏移量
     index: u32 = 0, // 纹理在纹理数组中的索引
-    size: [2]f32 = .{ 1, 1 }, // 纹理的实际大小
-    uv_offset: [2]f32 = .{ 0, 0 }, // 纹理在纹理图集中的uv偏移量
 };
 const Algebra = @import("zalgebra");
 const Vec2 = Algebra.Vec2;

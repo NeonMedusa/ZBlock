@@ -8,10 +8,10 @@ struct SceneUniform {
     time : f32,
 };
 struct EntityData {
-    transform : mat4x4f,        //实例的世界变换
-    texture_size : vec2f,       //纹理的实际大小
-    uv_offset : vec2f,          //纹理uv偏移量
-    texture_index : u32,        //纹理在数组中的索引
+    transform : mat4x4f,            //实例的世界变换
+    texture_size : vec2f,           //纹理的实际大小
+    texel_coords_offset : vec2i,    //纹理坐标偏移量
+    texture_index : u32,            //纹理在数组中的索引
 };
 struct VertexInput {
     @location(0) position : vec3f,
@@ -20,9 +20,10 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) position : vec4f,
     @location(0) uv : vec2f,
-    @location(1) texture_index : u32,
-    @location(2) texture_size : vec2f,
-    @location(3) uv_offset : vec2f,
+    @location(1) texture_size : vec2f,
+    @location(2) texel_coords_offset : vec2i,
+    @location(3) texture_index : u32,
+
 };
 @vertex
 fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexOutput {
@@ -38,15 +39,13 @@ fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexO
     out.uv = in.uv; //基础颜色UV
     out.texture_index = entity.texture_index;
     out.texture_size = entity.texture_size;
-    out.uv_offset = entity.uv_offset;
+    out.texel_coords_offset = entity.texel_coords_offset;
     return out;
 }
 @fragment
 fn fs_main(in : VertexOutput) -> @location(0) vec4f {
-    //应用UV偏移
-    let transformed_uv = in.uv + in.uv_offset;
     //计算纹素坐标
-    let texelCoords = vec2i(transformed_uv * in.texture_size);
+    let texelCoords = vec2i(in.uv * in.texture_size) + in.texel_coords_offset;
     //纹理采样，参数：textures, texelCoords, texture_index，mip_level
     let color = textureLoad(textures, texelCoords, in.texture_index, 0).rgba;
     //伽玛校正

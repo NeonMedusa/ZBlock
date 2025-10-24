@@ -65,7 +65,7 @@ pub fn draw(
                 .transform = entity.getTransform(),
                 .texture_index = model.color_texture.index,
                 .texture_size = model.color_texture.size,
-                .uv_offset = model.color_texture.uv_offset,
+                .texel_coords_offset = model.color_texture.coords_offset,
             };
         }
         entity_counter += 1;
