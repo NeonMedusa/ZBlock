@@ -63,9 +63,9 @@ pub fn draw(
 
             grm.entities_data[entity_counter] = EntityData{
                 .transform = entity.getTransform(),
-                .texture_index = model.color_texture.index,
-                .texture_size = model.color_texture.size,
-                .texel_coords_offset = model.color_texture.coords_offset,
+                .color_texture_index = model.color_texture.index,
+                .color_texture_size = model.color_texture.size,
+                .color_texture_start = model.color_texture.coords_offset,
             };
         }
         entity_counter += 1;

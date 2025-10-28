@@ -6,16 +6,28 @@ entities_data: []EntityData,
 entities_data_buffer: wgpu.WGPUBuffer, // 渲染实例的世界矩阵缓冲区
 indexed_indirect_cmds: []IndexedIndirectCmd,
 indexed_indirect_cmds_buffer: wgpu.WGPUBuffer, // 间接绘制index命令缓冲区
-// models_data: std.ArrayList(ModelInfo),
 // 纹理图集数组，ALL_IN_BOOM！包含所有的颜色、法线、高光贴图，还有动画纹理也在其中！
 texture_altas_array: wgpu.WGPUTexture,
 texture_altas_view: wgpu.WGPUTextureView,
 models_info: std.EnumArray(ModelName, ModelInfo),
-// 渲染限制
-const max_entities = 500; // 限制最大实体数
+// 渲染相关设置
+const MAX_ENTITIES = 500; // 限制最大实体数
+const ATLAS_WIDTH = 8192; // 每张纹理图集的宽度
+const ATLAS_HEIGHT = 8192; // 每张纹理图集的高度
+pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    wgpu.wgpuBufferRelease(self.vertex_buffer);
+    wgpu.wgpuBufferRelease(self.index_buffer);
+    wgpu.wgpuBufferRelease(self.scene_uniform_buffer);
+    allocator.free(self.entities_data);
+    wgpu.wgpuBufferRelease(self.entities_data_buffer);
+    allocator.free(self.indexed_indirect_cmds);
+    wgpu.wgpuBufferRelease(self.indexed_indirect_cmds_buffer);
+    wgpu.wgpuTextureRelease(self.texture_altas_array);
+    wgpu.wgpuTextureViewRelease(self.texture_altas_view);
+}
 pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
     const indexed_indirect_cmds_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
-        .size = @sizeOf(IndexedIndirectCmd) * max_entities,
+        .size = @sizeOf(IndexedIndirectCmd) * MAX_ENTITIES,
         .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst | wgpu.WGPUBufferUsage_Indirect,
         .mappedAtCreation = 0,
     });
@@ -25,12 +37,12 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         .mappedAtCreation = 0,
     });
     const entities_data_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
-        .size = @sizeOf(EntityData) * max_entities,
+        .size = @sizeOf(EntityData) * MAX_ENTITIES,
         .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst,
         .mappedAtCreation = 0,
     });
-    const entities_data = try allocator.alloc(EntityData, max_entities);
-    const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, max_entities);
+    const entities_data = try allocator.alloc(EntityData, MAX_ENTITIES);
+    const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, MAX_ENTITIES);
     var models_info = std.EnumArray(ModelName, ModelInfo).initUndefined();
 
     // 加载模型填充缓冲区
@@ -39,7 +51,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
     defer vertex_data.deinit(allocator);
     defer index_data.deinit(allocator);
 
-    { // 第一遍加载模型的顶点数据，获取模型的贴图大小
+    { // 第一遍加载模型的顶点数据，并获取模型的贴图大小
         var model_it = models_info.iterator();
         while (model_it.next()) |model| {
             const file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{@tagName(model.key)});
@@ -71,12 +83,29 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                     base_color_texture_info.size = .{ size_x_f, size_y_f };
                 }
             }
+            for (gltf.data.animations) |anime| {
+                for (anime.samplers) |sampler| {
+                    const input_accessor = gltf.data.accessors[sampler.input];
+                    const output_accessor = gltf.data.accessors[sampler.output];
+                    std.debug.print("input_count:{d}\n", .{input_accessor.count});
+                    std.debug.print("output_count:{d}\n", .{output_accessor.count});
+                }
+            }
+            // for (gltf.data.skins) |skin| {}
             // 提取有mesh的节点的vertex和index数据
             var model_vertex_data = std.ArrayList(VertexAttribute){};
             var model_index_data = std.ArrayList(u32){};
             defer model_vertex_data.deinit(allocator);
             defer model_index_data.deinit(allocator);
             for (gltf.data.nodes, 0..) |node, node_idx| {
+                var joint_offset: usize = 0;
+                if (node.skin) |skin| {
+                    // 当一个node同时包含mesh和skin时，
+                    // mesh顶点属性中的joint_indices就是相对于这个skin的joints数组的索引
+                    // 我打算将所有的joint矩阵全都合并存到同一个数组中，所以需要计算该skin的joint在数组中的偏移量
+                    joint_offset += skin;
+                }
+
                 if (node.mesh) |mesh_idx| {
                     const world_matrix = calWorldMatrix(node_idx, &gltf);
                     const mesh = gltf.data.meshes[mesh_idx];
@@ -94,9 +123,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                         if (primitive.indices) |indices_accessor_index| {
                             const accessor = gltf.data.accessors[indices_accessor_index];
                             var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
-                            while (it.next()) |indice| {
+                            while (it.next()) |indice|
                                 try primitive_index_data.append(allocator, indice[0] + vertex_offset);
-                            }
                         }
                         // 处理顶点
                         for (primitive.attributes) |attribute| {
@@ -107,8 +135,10 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                                     while (it.next()) |v| {
                                         const final_pos = world_matrix.mulByVec4(.{ .data = .{ v[0], v[1], v[2], 1.0 } });
                                         try primitive_vertex_data.append(allocator, .{
-                                            .pos = .{ final_pos.data[0], final_pos.data[1], final_pos.data[2] },
-                                            .uv = .{ 0.1, 0.9 }, // ↓暂时只添加一些随机性的颜色
+                                            .position = .{ final_pos.data[0], final_pos.data[1], final_pos.data[2] },
+                                            .color_uv = .{ 0.1, 0.9 },
+                                            .joint_indices = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
+                                            .joint_weights = .{ 1, 0, 0, 0 }, // 骨骼矩阵权重
                                         });
                                     }
                                 },
@@ -116,8 +146,41 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                                     const accessor = gltf.data.accessors[idx];
                                     var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                                     var i: u32 = 0;
-                                    while (it.next()) |t| : (i += 1) {
-                                        primitive_vertex_data.items[i].uv = .{ t[0], t[1] };
+                                    while (it.next()) |t| : (i += 1)
+                                        primitive_vertex_data.items[i].color_uv = .{ t[0], t[1] };
+                                },
+                                .joints => |idx| {
+                                    const accessor = gltf.data.accessors[idx];
+                                    switch (accessor.component_type) {
+                                        .unsigned_byte => {
+                                            var it = accessor.iterator(u8, &gltf, gltf.glb_binary.?);
+                                            var i: u32 = 0;
+                                            while (it.next()) |j| : (i += 1)
+                                                primitive_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                        },
+                                        .unsigned_short => {
+                                            var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
+                                            var i: u32 = 0;
+                                            while (it.next()) |j| : (i += 1)
+                                                primitive_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                        },
+                                        .unsigned_integer => {
+                                            var it = accessor.iterator(u32, &gltf, gltf.glb_binary.?);
+                                            var i: u32 = 0;
+                                            while (it.next()) |j| : (i += 1)
+                                                primitive_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                        },
+                                        else => @panic("Type matching error, please refer to the definition of 'accessor.iterator'"),
+                                    }
+                                },
+                                .weights => |idx| {
+                                    const accessor = gltf.data.accessors[idx];
+                                    var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                                    var i: u32 = 0;
+                                    while (it.next()) |w| : (i += 1) {
+                                        var weights = Vec4.new(w[0], w[1], w[2], w[3]);
+                                        weights = weights.norm();
+                                        primitive_vertex_data.items[i].joint_weights = .{ weights.x(), weights.y(), weights.z(), weights.w() };
                                     }
                                 },
                                 else => {},
@@ -142,22 +205,45 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             try index_data.appendSlice(allocator, model_index_data.items);
         }
     }
-    // 第二遍获取了所有的贴图大小后，对贴图进行二维装箱，将贴图数据写入纹理
-    const atlas_width = 8192;
-    const atlas_height = 8192;
+    // 写入顶点和索引缓冲区
+    const vertex_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+        .size = @sizeOf(VertexAttribute) * vertex_data.items.len,
+        .usage = wgpu.WGPUBufferUsage_CopyDst | wgpu.WGPUBufferUsage_Vertex,
+        .mappedAtCreation = 0,
+    });
+    wgpu.wgpuQueueWriteBuffer(
+        gctx.queue,
+        vertex_buffer,
+        0,
+        @ptrCast(vertex_data.items.ptr),
+        wgpu.wgpuBufferGetSize(vertex_buffer),
+    );
+    const index_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+        .size = @sizeOf(u32) * index_data.items.len,
+        .usage = wgpu.WGPUBufferUsage_CopyDst | wgpu.WGPUBufferUsage_Index,
+        .mappedAtCreation = 0,
+    });
+    wgpu.wgpuQueueWriteBuffer(
+        gctx.queue,
+        index_buffer,
+        0,
+        @ptrCast(index_data.items.ptr),
+        wgpu.wgpuBufferGetSize(index_buffer),
+    );
+
+    // 第二遍，获取了所有的贴图大小后，将贴图进行二维装箱、写入纹理
     const atlas_count = try TexturePacker.packTextures(
         allocator,
         &models_info,
-        atlas_width,
-        atlas_height,
+        ATLAS_WIDTH,
+        ATLAS_HEIGHT,
     );
-    std.debug.print("{d}", .{atlas_count});
     const texture_desc = wgpu.WGPUTextureDescriptor{
         .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = wgpu.WGPUTextureDimension_2D,
         .size = .{
-            .width = atlas_width,
-            .height = atlas_height,
+            .width = ATLAS_WIDTH,
+            .height = ATLAS_HEIGHT,
             // 大于1表明这是一个纹理数组，填入多少就有多少张纹理
             // 写入纹理时通过修改origin的z轴来指定写入哪一张纹理
             .depthOrArrayLayers = atlas_count,
@@ -239,36 +325,10 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         }
     }
 
-    // 写入顶点和索引缓冲区
-    const vertex_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-        .size = @sizeOf(VertexAttribute) * vertex_data.items.len,
-        .usage = wgpu.WGPUBufferUsage_CopyDst | wgpu.WGPUBufferUsage_Vertex,
-        .mappedAtCreation = 0,
-    });
-    wgpu.wgpuQueueWriteBuffer(
-        gctx.queue,
-        vertex_buffer,
-        0,
-        @ptrCast(vertex_data.items.ptr),
-        wgpu.wgpuBufferGetSize(vertex_buffer),
-    );
-    const index_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-        .size = @sizeOf(u32) * index_data.items.len,
-        .usage = wgpu.WGPUBufferUsage_CopyDst | wgpu.WGPUBufferUsage_Index,
-        .mappedAtCreation = 0,
-    });
-    wgpu.wgpuQueueWriteBuffer(
-        gctx.queue,
-        index_buffer,
-        0,
-        @ptrCast(index_data.items.ptr),
-        wgpu.wgpuBufferGetSize(index_buffer),
-    );
     // 返回实例
     return @This(){
         .vertex_buffer = vertex_buffer,
         .index_buffer = index_buffer,
-        // .models_data = models_data,
         .scene_uniform_buffer = scene_uniform_buffer,
         .indexed_indirect_cmds = indexed_indirect_cmds,
         .indexed_indirect_cmds_buffer = indexed_indirect_cmds_buffer,

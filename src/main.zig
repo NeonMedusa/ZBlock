@@ -15,6 +15,7 @@ pub fn main() !void {
 
     // 测试GPU资源管理器
     var grm = try ResourceManager.init(allocator, &gctx);
+    defer grm.deinit(allocator);
 
     // 创建渲染管线
     const render_pipeline = try RenderPipeline.init(
@@ -94,5 +95,4 @@ const Scene = @import("scene.zig");
 const ResourceManager = @import("resource_manager.zig");
 const ComputePipeline = @import("compute_pipeline.zig");
 const RenderPipeline = @import("render_pipeline.zig");
-
 const ModelName = @import("model.zig").ModelName;

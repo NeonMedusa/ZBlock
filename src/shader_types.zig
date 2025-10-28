@@ -16,15 +16,28 @@ pub const SceneUniform = struct {
     }
 };
 pub const VertexAttribute = struct {
-    pos: [3]f32, //顶点位置
-    uv: [2]f32, //纹理UV
+    position: [3]f32, //顶点位置
+    color_uv: [2]f32 = .{ 0, 0 }, //纹理UV
+    joint_indices: [4]u32 = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
+    joint_weights: [4]f32 = .{ 1, 0, 0, 0 }, // 骨骼矩阵权重
 };
 pub const EntityData = struct {
     transform: Mat4, //实例的世界变换
-    texture_size: [2]f32, //纹理的实际大小
-    texel_coords_offset: [2]i32, //纹理uv偏移量
-    texture_index: u32, //纹理在数组中的索引
-    _padding: [3]f32 = undefined, // 需要对齐到16字节
+
+    color_texture_size: [2]f32, //色彩纹理在纹理图集中的实际大小
+    color_texture_start: [2]i32, //色彩纹理在纹理图集中的起始坐标
+
+    anime_texture_size: [2]f32 = .{ 0, 0 }, //动画纹理在纹理图集中的实际大小
+    anime_texture_start: [2]i32 = .{ 0, 0 }, //动画纹理在纹理图集中的起始坐标
+
+    current_frame: f32 = 0, //实例的当前动画时间
+    frames_per_second: f32 = 0, //动画帧率
+
+    color_texture_index: u32 = 0, //色彩纹理在纹理图集数组中的索引
+    anime_texture_index: u32 = 0, //动画纹理在纹理图集数组中的索引
+
+    // _padding: [1]f32 = undefined, // 需要对齐到16字节
+
 };
 pub const ModelInfo = struct {
     first_vertex_idx: u32, //model的第一个顶点索引
