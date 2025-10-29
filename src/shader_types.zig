@@ -69,4 +69,4 @@ const Vec2 = Algebra.Vec2;
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
-const wgpu = @import("cimprots.zig").wgpu;
+const wgpu = @import("cimports.zig").wgpu;

@@ -114,4 +114,4 @@ pub const Key = enum(i32) {
         return @enumFromInt(glfw_key);
     }
 };
-const glfw = @import("cimprots.zig").glfw;
+const glfw = @import("cimports.zig").glfw;

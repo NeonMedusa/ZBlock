@@ -47,8 +47,8 @@ pub fn update(self: *@This()) !void {
 }
 
 const std = @import("std");
-const wgpu = @import("cimprots.zig").wgpu;
-const glfw = @import("cimprots.zig").glfw;
+const wgpu = @import("cimports.zig").wgpu;
+const glfw = @import("cimports.zig").glfw;
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;

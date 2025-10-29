@@ -68,4 +68,4 @@ const algebra = @import("zalgebra");
 const Vec3 = algebra.Vec3;
 const Mat4 = algebra.Mat4;
 const Window = @import("window.zig");
-const glfw = @import("cimprots.zig").glfw;
+const glfw = @import("cimports.zig").glfw;

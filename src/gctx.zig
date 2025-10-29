@@ -216,5 +216,5 @@ const std = @import("std");
 const Window = @import("window.zig");
 const Gctx = @import("gctx.zig");
 
-const wgpu = @import("cimprots.zig").wgpu;
-const glfw = @import("cimprots.zig").glfw;
+const wgpu = @import("cimports.zig").wgpu;
+const glfw = @import("cimports.zig").glfw;

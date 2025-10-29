@@ -61,7 +61,7 @@ pub fn pollEvents() void {
     glfw.glfwPollEvents();
 }
 
-const glfw = @import("cimprots.zig").glfw;
+const glfw = @import("cimports.zig").glfw;
 const Gctx = @import("gctx.zig");
 const algebra = @import("zalgebra");
 const Vec2_f64 = algebra.Vec2_f64;

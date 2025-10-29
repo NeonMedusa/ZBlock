@@ -564,7 +564,7 @@ pub fn ArrToMat4(arr: [16]f32) Mat4 {
     };
 }
 
-const wgpu = @import("cimprots.zig").wgpu;
+const wgpu = @import("cimports.zig").wgpu;
 const Gctx = @import("gctx.zig");
 const std = @import("std");
 const Gltf = @import("zgltf").Gltf;

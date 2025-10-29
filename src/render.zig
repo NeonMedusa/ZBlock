@@ -144,7 +144,7 @@ pub fn draw(
 }
 
 const std = @import("std");
-const wgpu = @import("cimprots.zig").wgpu;
+const wgpu = @import("cimports.zig").wgpu;
 const Gctx = @import("gctx.zig");
 
 const Algebra = @import("zalgebra");
