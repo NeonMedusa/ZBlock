@@ -44,6 +44,10 @@ pub fn update(self: *@This()) !void {
     // self.entities.items[1].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
     // self.entities.items[2].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
     // self.entities.items[3].rotation = Vec3.new(1, @floatCast(self.current_frame_time * 100), 1);
+
+    // 测试动画更新
+    for (self.entities.items) |*entity|
+        entity.cur_anime_time += self.delta_time_f32 * entity.anime_speed;
 }
 
 const std = @import("std");

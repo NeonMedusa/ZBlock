@@ -6,9 +6,14 @@ entities_data: []EntityData,
 entities_data_buffer: wgpu.WGPUBuffer, // 渲染实例的世界矩阵缓冲区
 indexed_indirect_cmds: []IndexedIndirectCmd,
 indexed_indirect_cmds_buffer: wgpu.WGPUBuffer, // 间接绘制index命令缓冲区
-// 纹理图集数组，ALL_IN_BOOM！包含所有的颜色、法线、高光贴图，还有动画纹理也在其中！
+// 纹理图集数组，ALL_IN_BOOM！包含所有的颜色、法线、高光贴图
 texture_altas_array: wgpu.WGPUTexture,
 texture_altas_view: wgpu.WGPUTextureView,
+
+// 好吧，虽然我也想ALL_IN_BOOM，但其实为了最终的性能考量，还是为动画单独创建一个纹理图集数组比较好
+anime_texture_array: wgpu.WGPUTexture,
+anime_texture_altas_view: wgpu.WGPUTextureView,
+
 models_info: std.EnumArray(ModelName, ModelInfo),
 // 渲染相关设置
 const MAX_ENTITIES = 500; // 限制最大实体数
@@ -24,6 +29,9 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     wgpu.wgpuBufferRelease(self.indexed_indirect_cmds_buffer);
     wgpu.wgpuTextureRelease(self.texture_altas_array);
     wgpu.wgpuTextureViewRelease(self.texture_altas_view);
+
+    wgpu.wgpuTextureRelease(self.anime_texture_array);
+    wgpu.wgpuTextureViewRelease(self.anime_texture_altas_view);
 }
 pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
     const indexed_indirect_cmds_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
@@ -70,41 +78,53 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             var gltf = Gltf.init(allocator);
             defer gltf.deinit();
             try gltf.parse(file_buf);
-            // 获取纹理的尺寸
-            var base_color_texture_info = TextureInfo{};
+
+            // 获取色彩纹理的尺寸信息，暂时只提取一个
+            var color_texture_info = TextureInfo{};
             for (gltf.data.materials) |material| {
-                if (material.metallic_roughness.base_color_texture) |color_texture_info| {
-                    const color_texture_img_idx = gltf.data.textures[color_texture_info.index].source;
+                if (material.metallic_roughness.base_color_texture) |gltf_texture_info| {
+                    const color_texture_img_idx = gltf.data.textures[gltf_texture_info.index].source;
                     const img_source = gltf.data.images[color_texture_img_idx.?];
                     var img = try zigimg.Image.fromMemory(allocator, img_source.data.?);
                     defer img.deinit(allocator);
                     const size_x_f: f32 = @floatFromInt(img.width);
                     const size_y_f: f32 = @floatFromInt(img.height);
-                    base_color_texture_info.size = .{ size_x_f, size_y_f };
+                    color_texture_info.size = .{ size_x_f, size_y_f };
                 }
             }
-            for (gltf.data.animations) |anime| {
-                for (anime.samplers) |sampler| {
-                    const input_accessor = gltf.data.accessors[sampler.input];
-                    const output_accessor = gltf.data.accessors[sampler.output];
-                    std.debug.print("input_count:{d}\n", .{input_accessor.count});
-                    std.debug.print("output_count:{d}\n", .{output_accessor.count});
-                }
+
+            // 获取动画纹理的尺寸信息，暂时只提取第一个
+            var anime_texture_info = TextureInfo{};
+            if (gltf.data.animations.len != 0) {
+                const anime = gltf.data.animations[0];
+                const sampler = anime.samplers[0];
+                const input_accessors = gltf.data.accessors[sampler.input];
+                const num_keyframes = input_accessors.count;
+                anime_texture_info.size[1] = @floatFromInt(num_keyframes);
             }
-            // for (gltf.data.skins) |skin| {}
+            // 记录每个skin的joints起始索引和joints总数
+            // 当一个node同时包含mesh和skin时，mesh顶点属性中的joint_indices就是相对于这个skin的joints数组的索引
+            // 我打算将所有的joint矩阵全都合并存到同一个数组中，所以需要计算该skin的joint在数组中的偏移量
+            var total_joints_count: u32 = 0; // 总关节数
+            var skins_joint_start_idx = std.ArrayList(u32){}; // skin的joint索引偏移
+            for (gltf.data.skins) |skin| {
+                try skins_joint_start_idx.append(allocator, total_joints_count);
+                total_joints_count += @intCast(skin.joints.len);
+            }
+            //动画纹理的宽度=1(关键帧的时间戳)+4x骨骼数量
+            anime_texture_info.size[0] = @floatFromInt(1 + total_joints_count * 4);
+
             // 提取有mesh的节点的vertex和index数据
             var model_vertex_data = std.ArrayList(VertexAttribute){};
             var model_index_data = std.ArrayList(u32){};
             defer model_vertex_data.deinit(allocator);
             defer model_index_data.deinit(allocator);
+
             for (gltf.data.nodes, 0..) |node, node_idx| {
-                var joint_offset: usize = 0;
-                if (node.skin) |skin| {
-                    // 当一个node同时包含mesh和skin时，
-                    // mesh顶点属性中的joint_indices就是相对于这个skin的joints数组的索引
-                    // 我打算将所有的joint矩阵全都合并存到同一个数组中，所以需要计算该skin的joint在数组中的偏移量
-                    joint_offset += skin;
-                }
+                // 应用joint索引偏移
+                var joint_offset: u32 = 0;
+                if (node.skin) |skin_idx|
+                    joint_offset = skins_joint_start_idx.items[skin_idx];
 
                 if (node.mesh) |mesh_idx| {
                     const world_matrix = calWorldMatrix(node_idx, &gltf);
@@ -133,12 +153,17 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                                     const accessor = gltf.data.accessors[idx];
                                     var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                                     while (it.next()) |v| {
-                                        const final_pos = world_matrix.mulByVec4(.{ .data = .{ v[0], v[1], v[2], 1.0 } });
+                                        var pos = [3]f32{ v[0], v[1], v[2] };
+                                        //对于没有动画的静态模型，直接为其计算世界变换
+                                        if (gltf.data.animations.len == 0) {
+                                            const world_pos = world_matrix.mulByVec4(.{ .data = .{ v[0], v[1], v[2], 1.0 } });
+                                            pos = .{ world_pos.data[0], world_pos.data[1], world_pos.data[2] };
+                                        }
                                         try primitive_vertex_data.append(allocator, .{
-                                            .position = .{ final_pos.data[0], final_pos.data[1], final_pos.data[2] },
+                                            .position = pos,
                                             .color_uv = .{ 0.1, 0.9 },
                                             .joint_indices = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
-                                            .joint_weights = .{ 1, 0, 0, 0 }, // 骨骼矩阵权重
+                                            .joint_weights = .{ 0, 0, 0, 0 }, // 骨骼矩阵权重
                                         });
                                     }
                                 },
@@ -156,19 +181,34 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                                             var it = accessor.iterator(u8, &gltf, gltf.glb_binary.?);
                                             var i: u32 = 0;
                                             while (it.next()) |j| : (i += 1)
-                                                primitive_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                                primitive_vertex_data.items[i].joint_indices = .{
+                                                    j[0] + joint_offset,
+                                                    j[1] + joint_offset,
+                                                    j[2] + joint_offset,
+                                                    j[3] + joint_offset,
+                                                };
                                         },
                                         .unsigned_short => {
                                             var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
                                             var i: u32 = 0;
                                             while (it.next()) |j| : (i += 1)
-                                                primitive_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                                primitive_vertex_data.items[i].joint_indices = .{
+                                                    j[0] + joint_offset,
+                                                    j[1] + joint_offset,
+                                                    j[2] + joint_offset,
+                                                    j[3] + joint_offset,
+                                                };
                                         },
                                         .unsigned_integer => {
                                             var it = accessor.iterator(u32, &gltf, gltf.glb_binary.?);
                                             var i: u32 = 0;
                                             while (it.next()) |j| : (i += 1)
-                                                primitive_vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                                primitive_vertex_data.items[i].joint_indices = .{
+                                                    j[0] + joint_offset,
+                                                    j[1] + joint_offset,
+                                                    j[2] + joint_offset,
+                                                    j[3] + joint_offset,
+                                                };
                                         },
                                         else => @panic("Type matching error, please refer to the definition of 'accessor.iterator'"),
                                     }
@@ -200,7 +240,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             model.value.first_index_idx = @intCast(index_data.items.len);
             model.value.vertex_count = @intCast(model_vertex_data.items.len);
             model.value.index_count = @intCast(model_index_data.items.len);
-            model.value.color_texture = base_color_texture_info;
+            model.value.color_texture = color_texture_info;
+            model.value.anime_texture = anime_texture_info;
             try vertex_data.appendSlice(allocator, model_vertex_data.items);
             try index_data.appendSlice(allocator, model_index_data.items);
         }
@@ -265,6 +306,42 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             .format = texture_desc.format,
         },
     );
+
+    // 创建动画纹理图集
+    const anime_atlas_count = try TexturePacker.packTextures(
+        allocator,
+        &models_info,
+        ATLAS_WIDTH,
+        ATLAS_HEIGHT,
+    );
+    const anime_texture_desc = wgpu.WGPUTextureDescriptor{
+        .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
+        .dimension = wgpu.WGPUTextureDimension_2D,
+        .size = .{
+            .width = ATLAS_WIDTH,
+            .height = ATLAS_HEIGHT,
+            // 大于1表明这是一个纹理数组，填入多少就有多少张纹理
+            // 写入纹理时通过修改origin的z轴来指定写入哪一张纹理
+            .depthOrArrayLayers = anime_atlas_count,
+        },
+        .format = wgpu.WGPUTextureFormat_RGBA32Float,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+    };
+    const anime_texture_array = wgpu.wgpuDeviceCreateTexture(gctx.device, &anime_texture_desc);
+    const anime_texture_altas_view = wgpu.wgpuTextureCreateView(
+        anime_texture_array,
+        &wgpu.struct_WGPUTextureViewDescriptor{
+            .aspect = wgpu.WGPUTextureAspect_All,
+            .baseArrayLayer = 0,
+            .arrayLayerCount = anime_texture_desc.size.depthOrArrayLayers,
+            .baseMipLevel = 0,
+            .mipLevelCount = 1,
+            .dimension = wgpu.WGPUTextureViewDimension_2DArray,
+            .format = anime_texture_desc.format,
+        },
+    );
+
     var model_it = models_info.iterator();
     while (model_it.next()) |model| {
         const file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{@tagName(model.key)});
@@ -283,8 +360,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         var gltf = Gltf.init(allocator);
         defer gltf.deinit();
         try gltf.parse(file_buf);
-        // 提取纹理数据
-        var base_color_texture_info = TextureInfo{};
+
+        // 提取并写入色彩纹理数据
         for (gltf.data.materials) |material| {
             if (material.metallic_roughness.base_color_texture) |color_texture_info| {
                 const color_texture_img_idx = gltf.data.textures[color_texture_info.index].source;
@@ -317,11 +394,181 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                         .depthOrArrayLayers = 1,
                     },
                 );
-                const size_x_f: f32 = @floatFromInt(img.width);
-                const size_y_f: f32 = @floatFromInt(img.height);
-                base_color_texture_info.size = .{ size_x_f, size_y_f };
-                base_color_texture_info.coords_offset = .{ 0, 0 };
             }
+        }
+
+        // 提取动画纹理数据
+        if (gltf.data.animations.len > 0) {
+            const anime = gltf.data.animations[0];
+            // 关键帧数量，先假设同一动画中所有sampler的关键帧数量和时间戳都是一样的，如果最后证明不行再另想办法
+            const num_keyframes = gltf.data.accessors[anime.samplers[0].input].count;
+            // 关键帧时间戳数组，同样假设同一动画中所有sampler的关键帧数量和时间戳都是一样的
+            var keyframe_times = std.ArrayList(f32){};
+            defer keyframe_times.deinit(allocator);
+            var anime_duration: f32 = 0;
+            var it = gltf.data.accessors[anime.samplers[0].input].iterator(f32, &gltf, gltf.glb_binary.?);
+            while (it.next()) |keyframe_time| {
+                try keyframe_times.append(allocator, keyframe_time[0]);
+                anime_duration = @max(anime_duration, keyframe_time[0]);
+            }
+            model.value.anime_duration = anime_duration;
+            // 为每个关键帧创建动画矩阵数组
+            var keyframe_matrices = std.ArrayList([]Mat4){};
+            defer {
+                for (keyframe_matrices.items) |matrices|
+                    allocator.free(matrices);
+                keyframe_matrices.deinit(allocator);
+            }
+
+            // 初始化所有关键帧的矩阵为单位矩阵
+            var keyframe_idx: u32 = 0;
+            while (keyframe_idx < num_keyframes) : (keyframe_idx += 1) {
+                const frame_matrices = try allocator.alloc(Mat4, gltf.data.nodes.len);
+                @memset(frame_matrices, Mat4.identity());
+                try keyframe_matrices.append(allocator, frame_matrices);
+            }
+
+            // 应用每个channel的动画数据到对应的关键帧
+            std.debug.print("channel count{d}\n", .{anime.channels.len});
+            for (anime.channels) |channel| {
+                const sampler = anime.samplers[channel.sampler];
+                const output_accessor = gltf.data.accessors[sampler.output];
+                var output_it = output_accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                //目标节点索引
+                const target_node_idx = channel.target.node;
+                // 对每个关键帧应用动画
+                var frame_idx: usize = 0;
+                while (output_it.next()) |output_data| : (frame_idx += 1) {
+                    const frame_matrices = keyframe_matrices.items[frame_idx];
+                    switch (channel.target.property) {
+                        .translation => {
+                            const trans_vec = Vec3.fromSlice(output_data);
+                            const trans_mat = Mat4.fromTranslate(trans_vec);
+                            frame_matrices[target_node_idx] = frame_matrices[target_node_idx].mul(trans_mat);
+                        },
+                        .rotation => {
+                            const rot_quat = Quat.new(
+                                output_data[3],
+                                output_data[0],
+                                output_data[1],
+                                output_data[2],
+                            );
+                            const rot_mat = rot_quat.toMat4();
+                            frame_matrices[target_node_idx] = frame_matrices[target_node_idx].mul(rot_mat);
+                        },
+                        .scale => {
+                            const scale_vec = Vec3.fromSlice(output_data);
+                            const scale_mat = Mat4.fromScale(scale_vec);
+                            frame_matrices[target_node_idx] = frame_matrices[target_node_idx].mul(scale_mat);
+                        },
+                        .weights => {
+                            // 处理 morph target 权重
+                        },
+                    }
+                }
+            }
+            // 现在 keyframe_matrices 包含了每个关键帧的所有节点变换矩阵
+            // 我们可以继续计算每个关键帧的所有节点的世界变换矩阵（考虑节点层次结构）
+            var keyframe_world_matrices = std.ArrayList([]Mat4){};
+            defer {
+                for (keyframe_world_matrices.items) |matrices|
+                    allocator.free(matrices);
+                keyframe_world_matrices.deinit(allocator);
+            }
+            for (keyframe_matrices.items) |frame_matrices| {
+                const world_matrices = try allocator.alloc(Mat4, gltf.data.nodes.len);
+                // 计算每个节点的世界矩阵（考虑父子关系）
+                for (gltf.data.nodes, 0..) |node, node_idx| {
+                    var world_matrix = frame_matrices[node_idx];
+                    // 如果有父节点，累积父节点的变换
+                    var current_parent = node.parent;
+                    while (current_parent) |parent_idx| {
+                        world_matrix = frame_matrices[parent_idx].mul(world_matrix);
+                        current_parent = gltf.data.nodes[parent_idx].parent;
+                    }
+                    world_matrices[node_idx] = world_matrix;
+                }
+                try keyframe_world_matrices.append(allocator, world_matrices);
+            }
+
+            // 获取骨骼矩阵
+            var bone_matrices = std.ArrayList(Mat4){};
+            defer bone_matrices.deinit(allocator);
+
+            for (keyframe_world_matrices.items) |keyframe_world_matrice| {
+                for (gltf.data.skins) |skin| {
+                    // 预加载所有逆绑定矩阵
+                    var inverse_bind_matrices: ?[]Mat4 = null;
+                    defer if (inverse_bind_matrices) |matrices| allocator.free(matrices);
+                    if (skin.inverse_bind_matrices) |ibms_accessor_idx| {
+                        const ibms_accessor = gltf.data.accessors[ibms_accessor_idx];
+                        var ibms_accessor_it = ibms_accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                        inverse_bind_matrices = try allocator.alloc(Mat4, ibms_accessor.count);
+                        // 一次性加载所有逆绑定矩阵
+                        for (0..ibms_accessor.count) |i| {
+                            if (ibms_accessor_it.next()) |arr|
+                                inverse_bind_matrices.?[i] = Mat4.fromSlice(arr[0..16]);
+                        }
+                    }
+
+                    // 为每个关节计算骨骼矩阵
+                    for (skin.joints, 0..) |joint_node_idx, joint_index| {
+                        const joint_world_matrix = keyframe_world_matrice[joint_node_idx];
+                        var final_bone_matrix = joint_world_matrix;
+                        // 如果存在逆绑定矩阵，应用它
+                        if (inverse_bind_matrices) |ibms|
+                            final_bone_matrix = joint_world_matrix.mul(ibms[joint_index]);
+                        try bone_matrices.append(allocator, final_bone_matrix);
+                    }
+                }
+            }
+
+            // 创建动画纹理数据
+            var total_joints_count: usize = 0; // 总关节数
+            for (gltf.data.skins) |skin|
+                total_joints_count += skin.joints.len;
+
+            const anime_texture_data = try create_animation_texture_data_specific(
+                allocator,
+                keyframe_times.items,
+                bone_matrices.items, // 计算出的骨骼矩阵数组
+                @intCast(num_keyframes),
+                @intCast(total_joints_count),
+            );
+            defer allocator.free(anime_texture_data);
+
+            // 写入到wgpu纹理
+            const anime_texture_width: u32 = @intFromFloat(model.value.anime_texture.size[0]);
+            const anime_texture_height: u32 = @intFromFloat(model.value.anime_texture.size[1]);
+
+            std.debug.print("anime_texture_width:{}\n", .{anime_texture_width});
+            std.debug.print("anime_texture_height:{}", .{anime_texture_height});
+
+            wgpu.wgpuQueueWriteTexture(
+                gctx.queue,
+                &wgpu.WGPUTexelCopyTextureInfo{
+                    .texture = anime_texture_array,
+                    .mipLevel = 0,
+                    // xy为写入时的像素偏移，我们可以利用这个特性实现纹理图集，z轴用于指定写入到哪张纹理中
+                    .origin = .{
+                        .x = @intCast(model.value.anime_texture.coords_offset[0]),
+                        .y = @intCast(model.value.anime_texture.coords_offset[1]),
+                        .z = model.value.anime_texture.index,
+                    },
+                },
+                anime_texture_data.ptr,
+                anime_texture_data.len,
+                &wgpu.struct_WGPUTexelCopyBufferLayout{
+                    .offset = 0,
+                    .bytesPerRow = anime_texture_width * 16,
+                    .rowsPerImage = anime_texture_height,
+                },
+                &wgpu.struct_WGPUExtent3D{
+                    .width = anime_texture_width,
+                    .height = anime_texture_height,
+                    .depthOrArrayLayers = 1,
+                },
+            );
         }
     }
 
@@ -336,6 +583,10 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         .entities_data_buffer = entities_data_buffer,
         .texture_altas_array = texture_altas_array,
         .texture_altas_view = texture_altas_view,
+
+        .anime_texture_array = anime_texture_array,
+        .anime_texture_altas_view = anime_texture_altas_view,
+
         .models_info = models_info,
     };
 }
@@ -353,6 +604,57 @@ fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
     return world_matrix;
 }
 
+fn create_animation_texture_data_specific(
+    allocator: std.mem.Allocator,
+    keyframe_times: []const f32,
+    bone_matrices: []const Mat4,
+    num_keyframes: u32,
+    num_bones: u32,
+) ![]u8 {
+    // 1. 计算纹理尺寸
+    const texture_width = 1 + num_bones * 4; // 1个时间戳 + 每个骨骼4列
+    const texture_height = num_keyframes;
+    // 3. 计算内存布局（不使用字节对齐，简化处理）
+    const bytes_per_pixel = 16; // RGBA32Float = 4 floats × 4 bytes
+    const bytes_per_row = texture_width * bytes_per_pixel;
+    const total_size = bytes_per_row * texture_height;
+    // 4. 分配内存
+    const texture_data = try allocator.alloc(u8, total_size);
+    errdefer allocator.free(texture_data);
+    @memset(texture_data, 0);
+    // 5. 将数据视为f32数组进行操作
+    var data_as_f32 = std.mem.bytesAsSlice(f32, texture_data);
+    // 6. 填充纹理数据
+    for (0..num_keyframes) |frame_idx| {
+        // 计算当前行的起始位置（每行有 texture_width × 4 个f32）
+        const row_start = frame_idx * texture_width * 4;
+        // 6.1 写入时间戳（第一个像素）
+        data_as_f32[row_start + 0] = keyframe_times[frame_idx]; // R通道
+        data_as_f32[row_start + 1] = 0.0; // G通道
+        data_as_f32[row_start + 2] = 0.0; // B通道
+        data_as_f32[row_start + 3] = 0.0; // A通道
+        // 6.2 写入所有骨骼的矩阵
+        for (0..num_bones) |bone_idx| {
+            // 计算当前骨骼在bone_matrices中的索引
+            const matrix_index = frame_idx * num_bones + bone_idx;
+            const matrix = bone_matrices[matrix_index];
+            // 计算当前骨骼在纹理中的起始位置
+            // 跳过时间戳(1像素=4f32) + 前面所有骨骼(每个骨骼4像素=16f32)
+            const bone_start = row_start + 4 + bone_idx * 16;
+            // 写入矩阵的4列，每列占1个像素（4个f32）
+            for (0..4) |col| {
+                const pixel_start = bone_start + col * 4;
+                // 写入矩阵列数据（列主序）
+                data_as_f32[pixel_start + 0] = matrix.data[col][0]; // 列向量的x
+                data_as_f32[pixel_start + 1] = matrix.data[col][1]; // 列向量的y
+                data_as_f32[pixel_start + 2] = matrix.data[col][2]; // 列向量的z
+                data_as_f32[pixel_start + 3] = matrix.data[col][3]; // 列向量的w
+            }
+        }
+    }
+    return texture_data;
+}
+
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
 const VertexAttribute = ShaderType.VertexAttribute;
@@ -367,6 +669,7 @@ const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Vec4 = Algebra.Vec4;
+const Quat = Algebra.Quat;
 const Window = @import("window.zig");
 const Gltf = @import("zgltf").Gltf;
 const wgpu = @import("cimports.zig").wgpu;

@@ -31,7 +31,7 @@ pub fn main() !void {
     for (0..100) |value| {
         const entity0 = Entity{
             .model = .Avocado,
-            .position = Vec3{ .data = .{ 0, 0, @floatFromInt(value) } },
+            .position = Vec3{ .data = .{ 0, 0, @floatFromInt(value * 2) } },
             .scale = Vec3{ .data = .{ 15, 15, 15 } },
         };
         try scene.addEntity(entity0);
@@ -40,8 +40,8 @@ pub fn main() !void {
     for (0..100) |value| {
         const entity1 = Entity{
             .model = .BarramundiFish,
-            .position = Vec3{ .data = .{ 3, 0, @floatFromInt(value) } },
-            .scale = Vec3{ .data = .{ 4, 4, 4 } },
+            .position = Vec3{ .data = .{ 3, 0, @floatFromInt(value * 2) } },
+            .scale = Vec3{ .data = .{ 3, 3, 3 } },
         };
         try scene.addEntity(entity1);
     }
@@ -58,7 +58,9 @@ pub fn main() !void {
     for (0..100) |value| {
         const entity3 = Entity{
             .model = .CesiumMan,
-            .position = Vec3{ .data = .{ 9, 0, @floatFromInt(value) } },
+            .cur_anime_time = @floatFromInt(value + 1),
+            .anime_speed = 1 + @as(f32, @floatFromInt(value)),
+            .position = Vec3{ .data = .{ 9, 0, @floatFromInt(value * 2) } },
         };
         try scene.addEntity(entity3);
     }

@@ -3,6 +3,8 @@ position: Vec3 = Vec3.zero(),
 rotation: Vec3 = Vec3.zero(),
 scale: Vec3 = Vec3.one(),
 model: ?ModelName = null,
+cur_anime_time: f32 = 0,
+anime_speed: f32 = 1.0,
 pub fn getTransform(self: @This()) Mat4 {
     const translation = Mat4.fromTranslate(self.position);
     const rotation = Mat4.fromEulerAngles(self.rotation);

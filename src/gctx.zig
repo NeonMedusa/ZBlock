@@ -73,6 +73,7 @@ pub fn init(
     // 创建设备
     const required_features = &[_]wgpu.WGPUFeatureName{
         wgpu.WGPUFeatureName_IndirectFirstInstance,
+            // wgpu.WGPUFeatureName_TextureCompressionBC,
     };
 
     var device: wgpu.WGPUDevice = undefined;

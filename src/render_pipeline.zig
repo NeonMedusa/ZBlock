@@ -26,9 +26,17 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
         },
         .{ // textures
             .binding = 2,
-            .visibility = wgpu.WGPUShaderStage_Fragment,
+            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
             .texture = .{
                 .sampleType = wgpu.WGPUTextureSampleType_Float,
+                .viewDimension = wgpu.WGPUTextureViewDimension_2DArray,
+            },
+        },
+        .{ // anime_textures
+            .binding = 3,
+            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .texture = .{
+                .sampleType = wgpu.WGPUTextureSampleType_UnfilterableFloat,
                 .viewDimension = wgpu.WGPUTextureViewDimension_2DArray,
             },
         },
@@ -59,6 +67,10 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
             .{ // textures
                 .binding = 2,
                 .textureView = grm.texture_altas_view,
+            },
+            .{ // textures
+                .binding = 3,
+                .textureView = grm.anime_texture_altas_view,
             },
         },
     });
