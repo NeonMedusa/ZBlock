@@ -57,6 +57,16 @@ pub fn main() !void {
 
     for (0..100) |value| {
         const entity3 = Entity{
+            .model = .Wolf,
+            .cur_anime_time = @floatFromInt(value + 1),
+            .anime_speed = 1 + @as(f32, @floatFromInt(value)),
+            .position = Vec3{ .data = .{ 6, 0, @floatFromInt(value * 2) } },
+        };
+        try scene.addEntity(entity3);
+    }
+
+    for (0..100) |value| {
+        const entity3 = Entity{
             .model = .CesiumMan,
             .cur_anime_time = @floatFromInt(value + 1),
             .anime_speed = 1 + @as(f32, @floatFromInt(value)),

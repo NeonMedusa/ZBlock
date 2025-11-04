@@ -3,4 +3,5 @@ pub const ModelName = enum {
     BarramundiFish,
     Buggy,
     CesiumMan,
+    Wolf,
 };

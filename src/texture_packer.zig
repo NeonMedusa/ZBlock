@@ -8,7 +8,7 @@ const TextureRect = struct {
     width: f32,
     height: f32,
     model_name: ModelName,
-    texture_type: TextureType, // 新增字段，标识纹理类型
+    texture_type: TextureType,
     ispacked: bool = false,
     x: i32 = 0,
     y: i32 = 0,
@@ -21,7 +21,7 @@ const TextureType = enum {
     anime,
 };
 
-// 用于装箱算法的节点
+// 简化的装箱节点
 const PackNode = struct {
     x: i32,
     y: i32,
@@ -32,13 +32,19 @@ const PackNode = struct {
     down: ?*PackNode = null,
 };
 
+// 装箱结果
+pub const PackResult = struct {
+    color_atlas_count: u32,
+    anime_atlas_count: u32,
+};
+
 pub fn packTextures(
     allocator: std.mem.Allocator,
     models_info: *std.EnumArray(ModelName, ModelInfo),
     atlas_width: i32,
-    altas_heigth: i32,
-) !u32 {
-    // 步骤1: 收集所有需要打包的纹理（包括color_texture和anime_texture）
+    atlas_height: i32,
+) !PackResult {
+    // 收集所有纹理
     var texture_rects = std.ArrayList(TextureRect){};
     defer texture_rects.deinit(allocator);
 
@@ -67,162 +73,238 @@ pub fn packTextures(
         }
     }
 
-    // 步骤2: 按面积排序（从大到小），提高装箱效率
-    std.sort.heap(TextureRect, texture_rects.items, {}, struct {
+    // 按纹理类型分组并分别打包
+    const color_atlas_count = try packTextureGroup(allocator, models_info, texture_rects.items, atlas_width, atlas_height, .color);
+    const anime_atlas_count = try packTextureGroup(allocator, models_info, texture_rects.items, atlas_width, atlas_height, .anime);
+
+    return PackResult{
+        .color_atlas_count = color_atlas_count,
+        .anime_atlas_count = anime_atlas_count,
+    };
+}
+
+fn packTextureGroup(
+    allocator: std.mem.Allocator,
+    models_info: *std.EnumArray(ModelName, ModelInfo),
+    all_texture_rects: []TextureRect,
+    atlas_width: i32,
+    atlas_height: i32,
+    texture_type: TextureType,
+) !u32 {
+    // 过滤出指定类型的纹理
+    var filtered_rects = std.ArrayList(TextureRect){};
+    defer filtered_rects.deinit(allocator);
+
+    for (all_texture_rects) |rect| {
+        if (rect.texture_type == texture_type) {
+            try filtered_rects.append(allocator, rect);
+        }
+    }
+
+    if (filtered_rects.items.len == 0) {
+        return 0;
+    }
+
+    // 按面积从大到小排序
+    std.sort.heap(TextureRect, filtered_rects.items, {}, struct {
         fn compare(_: void, a: TextureRect, b: TextureRect) bool {
-            const area_a = a.width * a.height;
-            const area_b = b.width * b.height;
-            return area_a > area_b;
+            return (a.width * a.height) > (b.width * b.height);
         }
     }.compare);
 
-    // 步骤3: 执行装箱算法
+    return try performPacking(allocator, models_info, filtered_rects.items, atlas_width, atlas_height, texture_type);
+}
+
+fn performPacking(
+    allocator: std.mem.Allocator,
+    models_info: *std.EnumArray(ModelName, ModelInfo),
+    texture_rects: []TextureRect,
+    atlas_width: i32,
+    atlas_height: i32,
+    texture_type: TextureType,
+) !u32 {
     var atlas_count: u32 = 0;
-    var remaining_textures = texture_rects.items;
+    var remaining_textures = try allocator.dupe(TextureRect, texture_rects);
+    defer allocator.free(remaining_textures);
 
     while (remaining_textures.len > 0) {
-        // 为当前图集创建根节点
+        // 创建新的图集
+        var nodes = std.ArrayList(*PackNode){};
+        defer {
+            for (nodes.items) |node| {
+                freePackNode(node, allocator);
+                allocator.destroy(node);
+            }
+        }
+
         const root = try allocator.create(PackNode);
+        try nodes.append(allocator, root);
         root.* = PackNode{
             .x = 0,
             .y = 0,
             .width = atlas_width,
-            .height = altas_heigth,
+            .height = atlas_height,
         };
 
-        // 尝试将纹理打包到当前图集
         var ispacked_count: usize = 0;
+
+        // 尝试打包每个纹理
         for (remaining_textures) |*rect| {
-            if (!rect.ispacked) {
-                if (try packTexture(root, rect, allocator)) {
+            if (!rect.ispacked and rect.texture_type == texture_type) {
+                const rect_width = @as(i32, @intFromFloat(rect.width));
+                const rect_height = @as(i32, @intFromFloat(rect.height));
+
+                // 检查纹理是否过大
+                if (rect_width > atlas_width or rect_height > atlas_height) {
+                    std.log.warn("Texture {}x{} is too large for atlas {}x{}, skipping", .{ rect_width, rect_height, atlas_width, atlas_height });
+                    continue;
+                }
+
+                // 在所有节点中寻找合适的位置
+                var found_node: ?*PackNode = null;
+                for (nodes.items) |node| {
+                    if (try findNode(node, rect_width, rect_height, allocator)) |target_node| {
+                        found_node = target_node;
+                        break;
+                    }
+                }
+
+                if (found_node) |node| {
+                    // 放置纹理
+                    rect.x = node.x;
+                    rect.y = node.y;
                     rect.atlas_index = atlas_count;
                     rect.ispacked = true;
                     ispacked_count += 1;
 
-                    // 根据纹理类型更新对应的模型纹理信息
-                    const model_info = models_info.getPtr(rect.model_name);
-                    switch (rect.texture_type) {
-                        .color => {
-                            model_info.color_texture.coords_offset = .{ rect.x, rect.y };
-                            model_info.color_texture.index = atlas_count;
-                        },
-                        .anime => {
-                            model_info.anime_texture.coords_offset = .{ rect.x, rect.y };
-                            model_info.anime_texture.index = atlas_count;
-                        },
+                    // 分割节点
+                    const remaining_width = node.width - rect_width;
+                    const remaining_height = node.height - rect_height;
+
+                    if (remaining_height > 0) {
+                        const down_node = try allocator.create(PackNode);
+                        try nodes.append(allocator, down_node);
+                        down_node.* = PackNode{
+                            .x = node.x,
+                            .y = node.y + rect_height,
+                            .width = node.width,
+                            .height = remaining_height,
+                        };
                     }
+
+                    if (remaining_width > 0) {
+                        const right_node = try allocator.create(PackNode);
+                        try nodes.append(allocator, right_node);
+                        right_node.* = PackNode{
+                            .x = node.x + rect_width,
+                            .y = node.y,
+                            .width = remaining_width,
+                            .height = rect_height,
+                        };
+                    }
+
+                    node.used = true;
+                    updateModelTextureInfo(models_info, rect);
                 }
             }
         }
 
-        // 清理当前图集的节点内存
-        freePackNode(root, allocator);
-        allocator.destroy(root);
-
-        // 如果没有纹理能放入当前图集，但还有剩余纹理，说明有纹理太大
+        // 如果没有纹理被打包且还有剩余纹理，强制打包最大的一个
         if (ispacked_count == 0 and remaining_textures.len > 0) {
-            // 处理过大的纹理：强制放入新图集
-            const rect = &remaining_textures[0];
-            rect.x = 0;
-            rect.y = 0;
-            rect.atlas_index = atlas_count;
-            rect.ispacked = true;
+            var largest_index: usize = 0;
+            var largest_area: f32 = 0;
 
-            // 根据纹理类型更新对应的模型纹理信息
-            const model_info = models_info.getPtr(rect.model_name);
-            switch (rect.texture_type) {
-                .color => {
-                    model_info.color_texture.coords_offset = .{ 0, 0 };
-                    model_info.color_texture.index = atlas_count;
-                },
-                .anime => {
-                    model_info.anime_texture.coords_offset = .{ 0, 0 };
-                    model_info.anime_texture.index = atlas_count;
-                },
+            for (remaining_textures, 0..) |rect, i| {
+                if (!rect.ispacked and rect.texture_type == texture_type) {
+                    const area = rect.width * rect.height;
+                    if (area > largest_area) {
+                        largest_area = area;
+                        largest_index = i;
+                    }
+                }
             }
 
-            ispacked_count = 1;
+            const rect = &remaining_textures[largest_index];
+            const rect_width = @as(i32, @intFromFloat(rect.width));
+            const rect_height = @as(i32, @intFromFloat(rect.height));
 
-            std.log.warn("Texture too large for atlas: {}x{}, forcing into atlas {}", .{ rect.width, rect.height, atlas_count });
+            // 检查是否可以放入
+            if (rect_width <= atlas_width and rect_height <= atlas_height) {
+                rect.x = 0;
+                rect.y = 0;
+                rect.atlas_index = atlas_count;
+                rect.ispacked = true;
+                updateModelTextureInfo(models_info, rect);
+                ispacked_count = 1;
+                std.log.warn("Forced large texture {}x{} into atlas {}", .{ rect.width, rect.height, atlas_count });
+            }
         }
 
-        // 移动到下一个图集
         atlas_count += 1;
 
         // 更新剩余纹理列表
         var new_remaining = std.ArrayList(TextureRect){};
+        defer new_remaining.deinit(allocator);
+
         for (remaining_textures) |rect| {
             if (!rect.ispacked) {
                 try new_remaining.append(allocator, rect);
             }
         }
+
+        allocator.free(remaining_textures);
         remaining_textures = try new_remaining.toOwnedSlice(allocator);
-        new_remaining.deinit(allocator);
     }
+
     return atlas_count;
 }
 
-// 递归打包纹理（保持不变）
-fn packTexture(node: *PackNode, rect: *TextureRect, allocator: std.mem.Allocator) !bool {
-    // 如果节点已被使用，尝试右子节点或下子节点
+fn findNode(node: *PackNode, width: i32, height: i32, allocator: std.mem.Allocator) !?*PackNode {
     if (node.used) {
         if (node.right) |right| {
-            if (try packTexture(right, rect, allocator)) return true;
+            if (try findNode(right, width, height, allocator)) |found| {
+                return found;
+            }
         }
         if (node.down) |down| {
-            if (try packTexture(down, rect, allocator)) return true;
+            if (try findNode(down, width, height, allocator)) |found| {
+                return found;
+            }
         }
-        return false;
+        return null;
     }
 
-    const rect_width = @as(i32, @intFromFloat(rect.width));
-    const rect_height = @as(i32, @intFromFloat(rect.height));
-
-    // 检查当前节点是否能容纳纹理
-    if (rect_width <= node.width and rect_height <= node.height) {
-        // 标记节点为已使用
-        node.used = true;
-
-        // 设置纹理坐标
-        rect.x = node.x;
-        rect.y = node.y;
-
-        // 创建右子节点（剩余的水平空间）
-        if (node.width > rect_width) {
-            node.right = try allocator.create(PackNode);
-            node.right.?.* = PackNode{
-                .x = node.x + rect_width,
-                .y = node.y,
-                .width = node.width - rect_width,
-                .height = rect_height,
-            };
+    // 检查节点是否足够大
+    if (width <= node.width and height <= node.height) {
+        // 检查边界
+        if (node.x + width <= node.width and node.y + height <= node.height) {
+            return node;
         }
-
-        // 创建下子节点（剩余的垂直空间）
-        if (node.height > rect_height) {
-            node.down = try allocator.create(PackNode);
-            node.down.?.* = PackNode{
-                .x = node.x,
-                .y = node.y + rect_height,
-                .width = node.width,
-                .height = node.height - rect_height,
-            };
-        }
-
-        return true;
     }
 
-    return false;
+    return null;
 }
 
-// 释放打包节点的内存（保持不变）
+fn updateModelTextureInfo(models_info: *std.EnumArray(ModelName, ModelInfo), rect: *const TextureRect) void {
+    const model_info = models_info.getPtr(rect.model_name);
+    const texture_info = switch (rect.texture_type) {
+        .color => &model_info.color_texture,
+        .anime => &model_info.anime_texture,
+    };
+
+    texture_info.coords_offset = .{ rect.x, rect.y };
+    texture_info.index = rect.atlas_index;
+}
+
 fn freePackNode(node: *PackNode, allocator: std.mem.Allocator) void {
     if (node.right) |right| {
         freePackNode(right, allocator);
         allocator.destroy(right);
+        node.right = null;
     }
     if (node.down) |down| {
         freePackNode(down, allocator);
         allocator.destroy(down);
+        node.down = null;
     }
 }

@@ -17,8 +17,8 @@ anime_texture_altas_view: wgpu.WGPUTextureView,
 models_info: std.EnumArray(ModelName, ModelInfo),
 // 渲染相关设置
 const MAX_ENTITIES = 500; // 限制最大实体数
-const ATLAS_WIDTH = 8192; // 每张纹理图集的宽度
-const ATLAS_HEIGHT = 8192; // 每张纹理图集的高度
+const ATLAS_WIDTH = 4096; // 每张纹理图集的宽度
+const ATLAS_HEIGHT = 4096; // 每张纹理图集的高度
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     wgpu.wgpuBufferRelease(self.vertex_buffer);
     wgpu.wgpuBufferRelease(self.index_buffer);
@@ -107,6 +107,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             // 我打算将所有的joint矩阵全都合并存到同一个数组中，所以需要计算该skin的joint在数组中的偏移量
             var total_joints_count: u32 = 0; // 总关节数
             var skins_joint_start_idx = std.ArrayList(u32){}; // skin的joint索引偏移
+            defer skins_joint_start_idx.deinit(allocator);
             for (gltf.data.skins) |skin| {
                 try skins_joint_start_idx.append(allocator, total_joints_count);
                 total_joints_count += @intCast(skin.joints.len);
@@ -273,12 +274,14 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
     );
 
     // 第二遍，获取了所有的贴图大小后，将贴图进行二维装箱、写入纹理
-    const atlas_count = try TexturePacker.packTextures(
+    const pr = try TexturePacker.packTextures(
         allocator,
         &models_info,
         ATLAS_WIDTH,
         ATLAS_HEIGHT,
     );
+
+    const color_atlas_count = pr.color_atlas_count;
     const texture_desc = wgpu.WGPUTextureDescriptor{
         .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = wgpu.WGPUTextureDimension_2D,
@@ -287,7 +290,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             .height = ATLAS_HEIGHT,
             // 大于1表明这是一个纹理数组，填入多少就有多少张纹理
             // 写入纹理时通过修改origin的z轴来指定写入哪一张纹理
-            .depthOrArrayLayers = atlas_count,
+            .depthOrArrayLayers = color_atlas_count,
         },
         .format = wgpu.WGPUTextureFormat_RGBA8Unorm,
         .mipLevelCount = 1,
@@ -308,12 +311,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
     );
 
     // 创建动画纹理图集
-    const anime_atlas_count = try TexturePacker.packTextures(
-        allocator,
-        &models_info,
-        ATLAS_WIDTH,
-        ATLAS_HEIGHT,
-    );
+    const anime_atlas_count = pr.anime_atlas_count;
     const anime_texture_desc = wgpu.WGPUTextureDescriptor{
         .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = wgpu.WGPUTextureDimension_2D,
@@ -413,7 +411,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             }
             model.value.anime_duration = anime_duration;
             // 为每个关键帧创建动画矩阵数组
-            var keyframe_matrices = std.ArrayList([]Mat4){};
+            var keyframe_matrices = std.ArrayList([]?Mat4){};
             defer {
                 for (keyframe_matrices.items) |matrices|
                     allocator.free(matrices);
@@ -423,13 +421,12 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             // 初始化所有关键帧的矩阵为单位矩阵
             var keyframe_idx: u32 = 0;
             while (keyframe_idx < num_keyframes) : (keyframe_idx += 1) {
-                const frame_matrices = try allocator.alloc(Mat4, gltf.data.nodes.len);
-                @memset(frame_matrices, Mat4.identity());
+                const frame_matrices = try allocator.alloc(?Mat4, gltf.data.nodes.len);
+                @memset(frame_matrices, null);
                 try keyframe_matrices.append(allocator, frame_matrices);
             }
 
             // 应用每个channel的动画数据到对应的关键帧
-            std.debug.print("channel count{d}\n", .{anime.channels.len});
             for (anime.channels) |channel| {
                 const sampler = anime.samplers[channel.sampler];
                 const output_accessor = gltf.data.accessors[sampler.output];
@@ -444,7 +441,11 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                         .translation => {
                             const trans_vec = Vec3.fromSlice(output_data);
                             const trans_mat = Mat4.fromTranslate(trans_vec);
-                            frame_matrices[target_node_idx] = frame_matrices[target_node_idx].mul(trans_mat);
+                            if (frame_matrices[target_node_idx] != null) {
+                                frame_matrices[target_node_idx] = frame_matrices[target_node_idx].?.mul(trans_mat);
+                            } else {
+                                frame_matrices[target_node_idx] = trans_mat;
+                            }
                         },
                         .rotation => {
                             const rot_quat = Quat.new(
@@ -454,16 +455,34 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                                 output_data[2],
                             );
                             const rot_mat = rot_quat.toMat4();
-                            frame_matrices[target_node_idx] = frame_matrices[target_node_idx].mul(rot_mat);
+                            if (frame_matrices[target_node_idx] != null) {
+                                frame_matrices[target_node_idx] = frame_matrices[target_node_idx].?.mul(rot_mat);
+                            } else {
+                                frame_matrices[target_node_idx] = rot_mat;
+                            }
                         },
                         .scale => {
                             const scale_vec = Vec3.fromSlice(output_data);
                             const scale_mat = Mat4.fromScale(scale_vec);
-                            frame_matrices[target_node_idx] = frame_matrices[target_node_idx].mul(scale_mat);
+                            if (frame_matrices[target_node_idx] != null) {
+                                frame_matrices[target_node_idx] = frame_matrices[target_node_idx].?.mul(scale_mat);
+                            } else {
+                                frame_matrices[target_node_idx] = scale_mat;
+                            }
                         },
                         .weights => {
                             // 处理 morph target 权重
                         },
+                    }
+                }
+            }
+            // 没有被动画影响的节点矩阵用gltf原始节点矩阵填充
+            for (keyframe_matrices.items) |frame_matrices| {
+                for (0..frame_matrices.len) |mat_idx| {
+                    if (frame_matrices[mat_idx] == null) {
+                        frame_matrices[mat_idx] = Mat4.identity();
+                        if (gltf.data.nodes[mat_idx].matrix) |gltf_mat|
+                            frame_matrices[mat_idx] = Mat4.fromSlice(&gltf_mat);
                     }
                 }
             }
@@ -479,11 +498,11 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                 const world_matrices = try allocator.alloc(Mat4, gltf.data.nodes.len);
                 // 计算每个节点的世界矩阵（考虑父子关系）
                 for (gltf.data.nodes, 0..) |node, node_idx| {
-                    var world_matrix = frame_matrices[node_idx];
+                    var world_matrix = frame_matrices[node_idx].?;
                     // 如果有父节点，累积父节点的变换
                     var current_parent = node.parent;
                     while (current_parent) |parent_idx| {
-                        world_matrix = frame_matrices[parent_idx].mul(world_matrix);
+                        world_matrix = frame_matrices[parent_idx].?.mul(world_matrix);
                         current_parent = gltf.data.nodes[parent_idx].parent;
                     }
                     world_matrices[node_idx] = world_matrix;
@@ -542,7 +561,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             const anime_texture_height: u32 = @intFromFloat(model.value.anime_texture.size[1]);
 
             std.debug.print("anime_texture_width:{}\n", .{anime_texture_width});
-            std.debug.print("anime_texture_height:{}", .{anime_texture_height});
+            std.debug.print("anime_texture_height:{}\n", .{anime_texture_height});
 
             wgpu.wgpuQueueWriteTexture(
                 gctx.queue,
