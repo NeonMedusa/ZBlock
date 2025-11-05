@@ -131,10 +131,13 @@ fn performPacking(
         // 创建新的图集
         var nodes = std.ArrayList(*PackNode){};
         defer {
+            // 先对每个节点断链并销毁一次（每个节点仅被 destroy 一次）
             for (nodes.items) |node| {
-                freePackNode(node, allocator);
-                allocator.destroy(node);
+                freePackNode(node, allocator); // 断开 child 引用（不 destroy）
+                allocator.destroy(node); // 统一 destroy
             }
+            // 再释放 ArrayList 自身的缓冲
+            nodes.deinit(allocator);
         }
 
         const root = try allocator.create(PackNode);
@@ -163,7 +166,7 @@ fn performPacking(
                 // 在所有节点中寻找合适的位置
                 var found_node: ?*PackNode = null;
                 for (nodes.items) |node| {
-                    if (try findNode(node, rect_width, rect_height, allocator)) |target_node| {
+                    if (try findNode(node, rect_width, rect_height)) |target_node| {
                         found_node = target_node;
                         break;
                     }
@@ -257,14 +260,14 @@ fn performPacking(
     return atlas_count;
 }
 
-fn findNode(node: *PackNode, width: i32, height: i32, allocator: std.mem.Allocator) !?*PackNode {
+fn findNode(node: *PackNode, width: i32, height: i32) !?*PackNode {
     if (node.used) {
         if (node.right) |right| {
-            if (try findNode(right, width, height, allocator)) |found|
+            if (try findNode(right, width, height)) |found|
                 return found;
         }
         if (node.down) |down| {
-            if (try findNode(down, width, height, allocator)) |found|
+            if (try findNode(down, width, height)) |found|
                 return found;
         }
         return null;
@@ -292,14 +295,29 @@ fn updateModelTextureInfo(models_info: *std.EnumArray(ModelName, ModelInfo), rec
 }
 
 fn freePackNode(node: *PackNode, allocator: std.mem.Allocator) void {
+    // 递归断开引用，但不要 destroy（外层会统一 destroy nodes.items 中的每一个 node）
     if (node.right) |right| {
         freePackNode(right, allocator);
-        allocator.destroy(right);
         node.right = null;
     }
     if (node.down) |down| {
         freePackNode(down, allocator);
-        allocator.destroy(down);
         node.down = null;
     }
+}
+
+test "test_packTextures" {
+    var models_info = std.EnumArray(ModelName, ModelInfo).initUndefined();
+    var model_it = models_info.iterator();
+    var i: f32 = 0;
+    while (model_it.next()) |model| : (i += 1) {
+        model.value.*.anime_texture.size = .{ i, i };
+        model.value.*.color_texture.size = .{ i, i };
+    }
+    _ = try packTextures(
+        std.testing.allocator,
+        &models_info,
+        4096,
+        4096,
+    );
 }

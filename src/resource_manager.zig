@@ -6,13 +6,13 @@ entities_data: []EntityData,
 entities_data_buffer: wgpu.WGPUBuffer, // 渲染实例的世界矩阵缓冲区
 indexed_indirect_cmds: []IndexedIndirectCmd,
 indexed_indirect_cmds_buffer: wgpu.WGPUBuffer, // 间接绘制index命令缓冲区
+models_info: std.EnumArray(ModelName, ModelInfo),
 // 纹理图集数组，ALL_IN_BOOM！包含所有的颜色、法线、高光贴图
 texture_altas_array: wgpu.WGPUTexture,
 texture_altas_view: wgpu.WGPUTextureView,
 // 好吧，虽然我也想ALL_IN_BOOM，但其实为了最终的性能考量，还是为动画单独创建一个纹理图集数组比较好
 anime_texture_array: wgpu.WGPUTexture,
 anime_texture_altas_view: wgpu.WGPUTextureView,
-models_info: std.EnumArray(ModelName, ModelInfo),
 // 渲染相关设置
 const MAX_ENTITIES = 500; // 限制最大实体数
 const ATLAS_WIDTH = 4096; // 每张纹理图集的宽度
