@@ -247,11 +247,9 @@ fn performPacking(
         defer new_remaining.deinit(allocator);
 
         for (remaining_textures) |rect| {
-            if (!rect.ispacked) {
+            if (!rect.ispacked)
                 try new_remaining.append(allocator, rect);
-            }
         }
-
         allocator.free(remaining_textures);
         remaining_textures = try new_remaining.toOwnedSlice(allocator);
     }
@@ -262,14 +260,12 @@ fn performPacking(
 fn findNode(node: *PackNode, width: i32, height: i32, allocator: std.mem.Allocator) !?*PackNode {
     if (node.used) {
         if (node.right) |right| {
-            if (try findNode(right, width, height, allocator)) |found| {
+            if (try findNode(right, width, height, allocator)) |found|
                 return found;
-            }
         }
         if (node.down) |down| {
-            if (try findNode(down, width, height, allocator)) |found| {
+            if (try findNode(down, width, height, allocator)) |found|
                 return found;
-            }
         }
         return null;
     }
@@ -277,9 +273,8 @@ fn findNode(node: *PackNode, width: i32, height: i32, allocator: std.mem.Allocat
     // 检查节点是否足够大
     if (width <= node.width and height <= node.height) {
         // 检查边界
-        if (node.x + width <= node.width and node.y + height <= node.height) {
+        if (node.x + width <= node.width and node.y + height <= node.height)
             return node;
-        }
     }
 
     return null;

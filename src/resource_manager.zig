@@ -9,11 +9,9 @@ indexed_indirect_cmds_buffer: wgpu.WGPUBuffer, // 间接绘制index命令缓冲�
 // 纹理图集数组，ALL_IN_BOOM！包含所有的颜色、法线、高光贴图
 texture_altas_array: wgpu.WGPUTexture,
 texture_altas_view: wgpu.WGPUTextureView,
-
 // 好吧，虽然我也想ALL_IN_BOOM，但其实为了最终的性能考量，还是为动画单独创建一个纹理图集数组比较好
 anime_texture_array: wgpu.WGPUTexture,
 anime_texture_altas_view: wgpu.WGPUTextureView,
-
 models_info: std.EnumArray(ModelName, ModelInfo),
 // 渲染相关设置
 const MAX_ENTITIES = 500; // 限制最大实体数
@@ -55,8 +53,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
 
     // 加载模型填充缓冲区
     var vertex_data = std.ArrayList(VertexAttribute){};
-    var index_data = std.ArrayList(u32){};
     defer vertex_data.deinit(allocator);
+    var index_data = std.ArrayList(u32){};
     defer index_data.deinit(allocator);
 
     { // 第一遍加载模型的顶点数据，并获取模型的贴图大小
@@ -117,8 +115,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
 
             // 提取有mesh的节点的vertex和index数据
             var model_vertex_data = std.ArrayList(VertexAttribute){};
-            var model_index_data = std.ArrayList(u32){};
             defer model_vertex_data.deinit(allocator);
+            var model_index_data = std.ArrayList(u32){};
             defer model_index_data.deinit(allocator);
 
             for (gltf.data.nodes, 0..) |node, node_idx| {
@@ -131,13 +129,13 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                     const world_matrix = calWorldMatrix(node_idx, &gltf);
                     const mesh = gltf.data.meshes[mesh_idx];
                     var mesh_vertex_data = std.ArrayList(VertexAttribute){};
-                    var mesh_index_data = std.ArrayList(u32){};
                     defer mesh_vertex_data.deinit(allocator);
+                    var mesh_index_data = std.ArrayList(u32){};
                     defer mesh_index_data.deinit(allocator);
                     for (mesh.primitives) |primitive| {
                         var primitive_vertex_data = std.ArrayList(VertexAttribute){};
-                        var primitive_index_data = std.ArrayList(u32){};
                         defer primitive_vertex_data.deinit(allocator);
+                        var primitive_index_data = std.ArrayList(u32){};
                         defer primitive_index_data.deinit(allocator);
                         // 处理索引，记录当前model的顶点数量作为偏移
                         const vertex_offset: u32 = @intCast(model_vertex_data.items.len);
@@ -407,7 +405,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             var it = gltf.data.accessors[anime.samplers[0].input].iterator(f32, &gltf, gltf.glb_binary.?);
             while (it.next()) |keyframe_time| {
                 try keyframe_times.append(allocator, keyframe_time[0]);
-                anime_duration = @max(anime_duration, keyframe_time[0]);
+                anime_duration = keyframe_time[0];
             }
             model.value.anime_duration = anime_duration;
             // 为每个关键帧创建动画矩阵数组
@@ -417,15 +415,13 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                     allocator.free(matrices);
                 keyframe_matrices.deinit(allocator);
             }
-
-            // 初始化所有关键帧的矩阵为单位矩阵
+            // 初始化所有关键帧的矩阵为null
             var keyframe_idx: u32 = 0;
             while (keyframe_idx < num_keyframes) : (keyframe_idx += 1) {
                 const frame_matrices = try allocator.alloc(?Mat4, gltf.data.nodes.len);
                 @memset(frame_matrices, null);
                 try keyframe_matrices.append(allocator, frame_matrices);
             }
-
             // 应用每个channel的动画数据到对应的关键帧
             for (anime.channels) |channel| {
                 const sampler = anime.samplers[channel.sampler];
@@ -437,46 +433,18 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                 var frame_idx: usize = 0;
                 while (output_it.next()) |output_data| : (frame_idx += 1) {
                     const frame_matrices = keyframe_matrices.items[frame_idx];
-                    switch (channel.target.property) {
-                        .translation => {
-                            const trans_vec = Vec3.fromSlice(output_data);
-                            const trans_mat = Mat4.fromTranslate(trans_vec);
-                            if (frame_matrices[target_node_idx] != null) {
-                                frame_matrices[target_node_idx] = frame_matrices[target_node_idx].?.mul(trans_mat);
-                            } else {
-                                frame_matrices[target_node_idx] = trans_mat;
-                            }
-                        },
-                        .rotation => {
-                            const rot_quat = Quat.new(
-                                output_data[3],
-                                output_data[0],
-                                output_data[1],
-                                output_data[2],
-                            );
-                            const rot_mat = rot_quat.toMat4();
-                            if (frame_matrices[target_node_idx] != null) {
-                                frame_matrices[target_node_idx] = frame_matrices[target_node_idx].?.mul(rot_mat);
-                            } else {
-                                frame_matrices[target_node_idx] = rot_mat;
-                            }
-                        },
-                        .scale => {
-                            const scale_vec = Vec3.fromSlice(output_data);
-                            const scale_mat = Mat4.fromScale(scale_vec);
-                            if (frame_matrices[target_node_idx] != null) {
-                                frame_matrices[target_node_idx] = frame_matrices[target_node_idx].?.mul(scale_mat);
-                            } else {
-                                frame_matrices[target_node_idx] = scale_mat;
-                            }
-                        },
-                        .weights => {
-                            // 处理 morph target 权重
-                        },
-                    }
+                    const base_mat = frame_matrices[target_node_idx] orelse Mat4.identity();
+                    frame_matrices[target_node_idx] = switch (channel.target.property) {
+                        .translation => base_mat.mul(Mat4.fromTranslate(Vec3.fromSlice(output_data))),
+                        .rotation => base_mat.mul(Quat.new(output_data[3], output_data[0], output_data[1], output_data[2]).toMat4()),
+                        .scale => base_mat.mul(Mat4.fromScale(Vec3.fromSlice(output_data))),
+                        .weights => base_mat, // 处理 morph target 权重
+                    };
                 }
             }
             // 没有被动画影响的节点矩阵用gltf原始节点矩阵填充
+            // 如果gltf的node的matrix为null，则应该用RTS向量组合，懒得写，暂时用单位矩阵填充
+            // 目前看下来好像也没什么问题，出问题了再说
             for (keyframe_matrices.items) |frame_matrices| {
                 for (0..frame_matrices.len) |mat_idx| {
                     if (frame_matrices[mat_idx] == null) {
@@ -509,11 +477,9 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                 }
                 try keyframe_world_matrices.append(allocator, world_matrices);
             }
-
             // 获取骨骼矩阵
             var bone_matrices = std.ArrayList(Mat4){};
             defer bone_matrices.deinit(allocator);
-
             for (keyframe_world_matrices.items) |keyframe_world_matrice| {
                 for (gltf.data.skins) |skin| {
                     // 预加载所有逆绑定矩阵
@@ -547,7 +513,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             for (gltf.data.skins) |skin|
                 total_joints_count += skin.joints.len;
 
-            const anime_texture_data = try create_animation_texture_data_specific(
+            const anime_texture_data = try create_anime_texture_data(
                 allocator,
                 keyframe_times.items,
                 bone_matrices.items, // 计算出的骨骼矩阵数组
@@ -623,7 +589,7 @@ fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
     return world_matrix;
 }
 
-fn create_animation_texture_data_specific(
+fn create_anime_texture_data(
     allocator: std.mem.Allocator,
     keyframe_times: []const f32,
     bone_matrices: []const Mat4,
@@ -631,8 +597,8 @@ fn create_animation_texture_data_specific(
     num_bones: u32,
 ) ![]u8 {
     // 1. 计算纹理尺寸
-    const texture_width = 1 + num_bones * 4; // 1个时间戳 + 每个骨骼4列
-    const texture_height = num_keyframes;
+    const texture_width = 1 + num_bones * 4; // 宽度 = 1个时间戳 + 每个骨骼矩阵4列
+    const texture_height = num_keyframes; // 高度 = 关键帧数量
     // 3. 计算内存布局（不使用字节对齐，简化处理）
     const bytes_per_pixel = 16; // RGBA32Float = 4 floats × 4 bytes
     const bytes_per_row = texture_width * bytes_per_pixel;

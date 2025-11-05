@@ -36,7 +36,6 @@ struct VertexOutput {
     @location(2) color_texture_start : vec2i,
     @location(3) color_texture_index : u32,
 };
-
 //从指定关键帧读取时间戳
 fn read_keyframe_time(entity : EntityData, keyframe_index : u32) -> f32 {
     let texel_coord = vec2i(
@@ -59,7 +58,6 @@ fn read_bone_matrix_at_keyframe(entity : EntityData, bone_index : u32, keyframe_
     }
     return bone_matrix;
 }
-
 //查找当前时间对应的关键帧索引
 fn find_keyframe_indices(entity : EntityData, current_time : f32) -> vec2u {
     var prev_index : u32 = 0u;
@@ -78,29 +76,23 @@ fn find_keyframe_indices(entity : EntityData, current_time : f32) -> vec2u {
     }
     return vec2u(prev_index, next_index);
 }
-
 //预计算关键帧信息，避免重复采样
 fn get_interpolated_bone_matrix(entity : EntityData, bone_index : u32) -> mat4x4f {
     let normalized_time = entity.cur_anime_time % entity.anime_duration;
     let keyframes = find_keyframe_indices(entity, normalized_time);
-
     //一次性读取两个关键帧的时间
     let time_prev = read_keyframe_time(entity, keyframes.x);
     let time_next = read_keyframe_time(entity, keyframes.y);
-
     let t = (normalized_time - time_prev) / (time_next - time_prev);
-
     //读取骨骼矩阵
     let matrix_prev = read_bone_matrix_at_keyframe(entity, bone_index, keyframes.x);
     let matrix_next = read_bone_matrix_at_keyframe(entity, bone_index, keyframes.y);
-
     return matrix_prev * (1.0 - t) + matrix_next * t;
 }
-
+//顶点着色
 @vertex
 fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexOutput {
     let entity = entities_data[ins_idx];
-
     //应用骨骼动画
     var animated_position = vec3f(0.0);
     var total_weight = 0.0;
@@ -134,7 +126,7 @@ fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexO
     out.color_texture_start = entity.color_texture_start;
     return out;
 }
-
+//片元着色
 @fragment
 fn fs_main(in : VertexOutput) -> @location(0) vec4f {
     //计算纹素坐标
