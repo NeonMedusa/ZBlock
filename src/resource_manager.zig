@@ -111,7 +111,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                 total_joints_count += @intCast(skin.joints.len);
             }
             //动画纹理的宽度=1(关键帧的时间戳)+4x骨骼数量
-            anime_texture_info.size[0] = @floatFromInt(1 + total_joints_count * 4);
+            anime_texture_info.size[0] = @floatFromInt(1 + total_joints_count * 3);
 
             // 提取有mesh的节点的vertex和index数据
             var model_vertex_data = std.ArrayList(VertexAttribute){};
@@ -596,45 +596,46 @@ fn create_anime_texture_data(
     num_keyframes: u32,
     num_bones: u32,
 ) ![]u8 {
-    // 1. 计算纹理尺寸
-    const texture_width = 1 + num_bones * 4; // 宽度 = 1个时间戳 + 每个骨骼矩阵4列
+    // 1. 计算纹理尺寸 - 改为每个骨骼存储3行
+    const texture_width = 1 + num_bones * 3; // 宽度 = 1个时间戳 + 每个骨骼矩阵3行
     const texture_height = num_keyframes; // 高度 = 关键帧数量
-    // 3. 计算内存布局（不使用字节对齐，简化处理）
+    // 2. 计算内存布局
     const bytes_per_pixel = 16; // RGBA32Float = 4 floats × 4 bytes
     const bytes_per_row = texture_width * bytes_per_pixel;
     const total_size = bytes_per_row * texture_height;
-    // 4. 分配内存
+    // 3. 分配内存
     const texture_data = try allocator.alloc(u8, total_size);
     errdefer allocator.free(texture_data);
     @memset(texture_data, 0);
-    // 5. 将数据视为f32数组进行操作
+    // 4. 将数据视为f32数组进行操作
     var data_as_f32 = std.mem.bytesAsSlice(f32, texture_data);
-    // 6. 填充纹理数据
+    // 5. 填充纹理数据
     for (0..num_keyframes) |frame_idx| {
         // 计算当前行的起始位置（每行有 texture_width × 4 个f32）
         const row_start = frame_idx * texture_width * 4;
-        // 6.1 写入时间戳（第一个像素）
+        // 5.1 写入时间戳（第一个像素）
         data_as_f32[row_start + 0] = keyframe_times[frame_idx]; // R通道
         data_as_f32[row_start + 1] = 0.0; // G通道
         data_as_f32[row_start + 2] = 0.0; // B通道
         data_as_f32[row_start + 3] = 0.0; // A通道
-        // 6.2 写入所有骨骼的矩阵
+        // 5.2 写入所有骨骼的矩阵（只存储前3行）
         for (0..num_bones) |bone_idx| {
             // 计算当前骨骼在bone_matrices中的索引
             const matrix_index = frame_idx * num_bones + bone_idx;
             const matrix = bone_matrices[matrix_index];
             // 计算当前骨骼在纹理中的起始位置
-            // 跳过时间戳(1像素=4f32) + 前面所有骨骼(每个骨骼4像素=16f32)
-            const bone_start = row_start + 4 + bone_idx * 16;
-            // 写入矩阵的4列，每列占1个像素（4个f32）
-            for (0..4) |col| {
-                const pixel_start = bone_start + col * 4;
-                // 写入矩阵列数据（列主序）
-                data_as_f32[pixel_start + 0] = matrix.data[col][0]; // 列向量的x
-                data_as_f32[pixel_start + 1] = matrix.data[col][1]; // 列向量的y
-                data_as_f32[pixel_start + 2] = matrix.data[col][2]; // 列向量的z
-                data_as_f32[pixel_start + 3] = matrix.data[col][3]; // 列向量的w
+            // 跳过时间戳(1像素=4f32) + 前面所有骨骼(每个骨骼3像素=12f32)
+            const bone_start = row_start + 4 + bone_idx * 12;
+            // 写入矩阵的前3行，每行占1个像素（4个f32）
+            for (0..3) |row| {
+                const pixel_start = bone_start + row * 4;
+                // 写入矩阵行数据
+                data_as_f32[pixel_start + 0] = matrix.data[0][row]; // 第0列的第row个分量
+                data_as_f32[pixel_start + 1] = matrix.data[1][row]; // 第1列的第row个分量
+                data_as_f32[pixel_start + 2] = matrix.data[2][row]; // 第2列的第row个分量
+                data_as_f32[pixel_start + 3] = matrix.data[3][row]; // 第3列的第row个分量
             }
+            // 第4行 [0,0,0,1] 被省略，在shader中重建
         }
     }
     return texture_data;

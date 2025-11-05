@@ -46,16 +46,25 @@ fn read_keyframe_time(entity : EntityData, keyframe_index : u32) -> f32 {
 }
 //从指定关键帧读取指定骨骼的矩阵
 fn read_bone_matrix_at_keyframe(entity : EntityData, bone_index : u32, keyframe_index : u32) -> mat4x4f {
-    let matrix_start_x = entity.anime_texture_start.x + 1 + i32(bone_index * 4u);
+    let matrix_start_x = entity.anime_texture_start.x + 1 + i32(bone_index * 3u);
     let y_coord = entity.anime_texture_start.y + i32(keyframe_index);
-
     var bone_matrix : mat4x4f;
-    for (var col : u32 = 0u; col < 4u; col++)
+    //读取前3行数据，但需要转置到列
+    for (var i : u32 = 0u; i < 3u; i++)
     {
-        let texel_coord = vec2i(matrix_start_x + i32(col), y_coord);
-        let column_data = textureLoad(anime_texture_atlas, texel_coord, i32(entity.anime_texture_index), 0);
-        bone_matrix[col] = vec4f(column_data);
+        let texel_coord = vec2i(matrix_start_x + i32(i), y_coord);
+        let row_data = textureLoad(anime_texture_atlas, texel_coord, i32(entity.anime_texture_index), 0);
+        //手动设置矩阵的每一列
+        bone_matrix[0][i] = row_data[0];//第0列的第i个分量
+        bone_matrix[1][i] = row_data[1];//第1列的第i个分量
+        bone_matrix[2][i] = row_data[2];//第2列的第i个分量
+        bone_matrix[3][i] = row_data[3];//第3列的第i个分量
     }
+    //设置第4行的固定值
+    bone_matrix[0][3] = 0.0;
+    bone_matrix[1][3] = 0.0;
+    bone_matrix[2][3] = 0.0;
+    bone_matrix[3][3] = 1.0;
     return bone_matrix;
 }
 //查找当前时间对应的关键帧索引
