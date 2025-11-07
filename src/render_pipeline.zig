@@ -40,6 +40,14 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
                 .viewDimension = wgpu.WGPUTextureViewDimension_2DArray,
             },
         },
+        .{ // texture_info_buffer
+            .binding = 4,
+            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .buffer = .{
+                .type = wgpu.WGPUBufferBindingType_ReadOnlyStorage,
+                .hasDynamicOffset = 0,
+            },
+        },
     };
     const bind_group_layout = wgpu.wgpuDeviceCreateBindGroupLayout(
         gctx.device,
@@ -71,6 +79,12 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
             .{ // textures
                 .binding = 3,
                 .textureView = grm.anime_texture_altas_view,
+            },
+            .{ // textures
+                .binding = 4,
+                .buffer = grm.texture_info_buffer,
+                .offset = 0,
+                .size = wgpu.wgpuBufferGetSize(grm.texture_info_buffer),
             },
         },
     });

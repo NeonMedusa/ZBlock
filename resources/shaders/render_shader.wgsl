@@ -3,6 +3,7 @@
 @group(0) @binding(1) var<storage, read> entities_data : array<EntityData>; //游戏实例数据
 @group(0) @binding(2) var texture_atlas : texture_2d_array<f32>;            //纹理图集数组
 @group(0) @binding(3) var anime_texture_atlas : texture_2d_array<f32>;      //动画纹理图集数组
+@group(0) @binding(4) var<storage, read> textures_info : array<TextureInfo>;    //动画纹理图集数组
 struct SceneUniform {
     proj_matrix : mat4x4f,  //投影矩阵
     view_matrix : mat4x4f,  //视图矩阵
@@ -11,8 +12,8 @@ struct SceneUniform {
 struct EntityData {
     transform : mat4x4f,            //实例的世界变换
 
-    color_texture_size : vec2f,     //色彩纹理在纹理图集中的实际大小
-    color_texture_start : vec2i,    //色彩纹理在纹理图集中的起始坐标
+    //color_texture_size : vec2f, //色彩纹理在纹理图集中的实际大小
+    //color_texture_start : vec2i,//色彩纹理在纹理图集中的起始坐标
 
     anime_texture_size : vec2f,     //动画纹理在纹理图集中的实际大小
     anime_texture_start : vec2i,    //动画纹理在纹理图集中的起始坐标
@@ -22,6 +23,11 @@ struct EntityData {
 
     color_texture_index : u32,      //色彩纹理在纹理图集数组中的索引
     anime_texture_index : u32,      //动画纹理在纹理图集数组中的索引
+};
+struct TextureInfo {
+    size : vec2f,           //纹理的实际大小
+    coords_offset : vec2i,  //纹理在纹理图集中的坐标偏移量
+    index : u32,        //纹理在纹理数组中的索引
 };
 struct VertexInput {
     @location(0) position : vec3f,      //顶点位置
@@ -130,9 +136,11 @@ fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexO
     vec4f(animated_position, 1.0);  //顶点位置
 
     out.color_uv = in.color_uv;             //基础颜色UV
-    out.color_texture_index = entity.color_texture_index;
-    out.color_texture_size = entity.color_texture_size;
-    out.color_texture_start = entity.color_texture_start;
+
+    let color_texture_info = textures_info[entity.color_texture_index];
+    out.color_texture_index = color_texture_info.index;
+    out.color_texture_size = color_texture_info.size;
+    out.color_texture_start = color_texture_info.coords_offset;
     return out;
 }
 //片元着色

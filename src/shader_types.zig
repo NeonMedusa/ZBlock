@@ -24,8 +24,8 @@ pub const VertexAttribute = struct {
 pub const EntityData = struct {
     transform: Mat4, //实例的世界变换
 
-    color_texture_size: [2]f32, //色彩纹理在纹理图集中的实际大小
-    color_texture_start: [2]i32, //色彩纹理在纹理图集中的起始坐标
+    //    color_texture_size: [2]f32, //色彩纹理在纹理图集中的实际大小
+    //    color_texture_start: [2]i32, //色彩纹理在纹理图集中的起始坐标
 
     anime_texture_size: [2]f32 = .{ 0, 0 }, //动画纹理在纹理图集中的实际大小
     anime_texture_start: [2]i32 = .{ 0, 0 }, //动画纹理在纹理图集中的起始坐标
@@ -44,6 +44,9 @@ pub const ModelInfo = struct {
     vertex_count: u32, //model的顶点数量
     index_count: u32, //model的索引数量
     color_texture: TextureInfo, //基础颜色材质
+
+    color_texture_idx: u32 = 0, //基础颜色材质信息在纹理图集数组信息中的索引
+
     anime_texture: TextureInfo = undefined, //动画纹理
     anime_duration: f32, //动画持续时间
 };
@@ -64,6 +67,7 @@ pub const TextureInfo = struct {
     size: [2]f32 = .{ 0, 0 }, // 纹理的实际大小
     coords_offset: [2]i32 = .{ 0, 0 }, // 纹理在纹理图集中的坐标偏移量
     index: u32 = 0, // 纹理在纹理数组中的索引
+    _padding: [1]f32 = undefined, // 需要对齐到16字节
 };
 const Algebra = @import("zalgebra");
 const Vec2 = Algebra.Vec2;

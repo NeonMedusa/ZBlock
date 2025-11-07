@@ -39,9 +39,9 @@ pub fn draw(
 
             grm.entities_data[entity_counter] = EntityData{
                 .transform = entity.getTransform(),
-                .color_texture_index = model.color_texture.index,
-                .color_texture_size = model.color_texture.size,
-                .color_texture_start = model.color_texture.coords_offset,
+                .color_texture_index = model.color_texture_idx,
+                // .color_texture_size = model.color_texture.size,
+                // .color_texture_start = model.color_texture.coords_offset,
                 .anime_texture_index = model.anime_texture.index,
                 .anime_texture_size = model.anime_texture.size,
                 .anime_texture_start = model.anime_texture.coords_offset,
