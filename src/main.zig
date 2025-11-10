@@ -13,15 +13,15 @@ pub fn main() !void {
     var gctx = try Gctx.init(&window);
     defer gctx.deinit();
 
-    // 测试GPU资源管理器
-    var grm = try ResourceManager.init(allocator, &gctx);
-    defer grm.deinit(allocator);
+    // 初始化资源管理器
+    var rm = try ResourceManager.init(allocator, &gctx);
+    defer rm.deinit(allocator);
 
     // 创建渲染管线
     const render_pipeline = try RenderPipeline.init(
         &gctx,
         "resources/shaders/render_shader.wgsl",
-        &grm,
+        &rm,
     );
     defer render_pipeline.deinit();
 
@@ -84,7 +84,7 @@ pub fn main() !void {
         // 更新场景
         try scene.update();
         // 渲染
-        try Render.draw(&gctx, &render_pipeline, &scene, &grm);
+        try Render.draw(&gctx, &render_pipeline, &scene, &rm);
     }
 }
 
@@ -105,6 +105,5 @@ const Input = @import("input.zig");
 const Entity = @import("entity.zig");
 const Scene = @import("scene.zig");
 const ResourceManager = @import("resource_manager.zig");
-const ComputePipeline = @import("compute_pipeline.zig");
 const RenderPipeline = @import("render_pipeline.zig");
 const ModelName = @import("model.zig").ModelName;

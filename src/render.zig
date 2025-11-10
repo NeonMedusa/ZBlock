@@ -129,7 +129,6 @@ const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 
 const ResourceManager = @import("resource_manager.zig");
-const ComputePipeline = @import("compute_pipeline.zig");
 const RenderPipeline = @import("render_pipeline.zig");
 const Scene = @import("scene.zig");
 const Entity = @import("entity.zig");

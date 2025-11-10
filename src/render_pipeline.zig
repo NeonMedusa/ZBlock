@@ -72,19 +72,19 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
                 .offset = 0,
                 .size = wgpu.wgpuBufferGetSize(grm.entities_data_buffer),
             },
-            .{ // textures
+            .{ // color_altas
                 .binding = 2,
-                .textureView = grm.texture_altas_view,
+                .textureView = grm.color_altas_view,
             },
-            .{ // textures
+            .{ // anime_altas
                 .binding = 3,
-                .textureView = grm.anime_texture_altas_view,
+                .textureView = grm.anime_altas_view,
             },
-            .{ // textures
+            .{ // textures_info
                 .binding = 4,
-                .buffer = grm.texture_info_buffer,
+                .buffer = grm.textures_info_buffer,
                 .offset = 0,
-                .size = wgpu.wgpuBufferGetSize(grm.texture_info_buffer),
+                .size = wgpu.wgpuBufferGetSize(grm.textures_info_buffer),
             },
         },
     });

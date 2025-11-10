@@ -8,13 +8,13 @@ indexed_indirect_cmds: []IndexedIndirectCmd,
 indexed_indirect_cmds_buffer: wgpu.WGPUBuffer, // 间接绘制index命令缓冲区
 models_info: std.EnumArray(ModelName, ModelInfo),
 // 纹理图集数组，ALL_IN_BOOM！包含所有的颜色、法线、高光贴图
-texture_altas_array: wgpu.WGPUTexture,
-texture_altas_view: wgpu.WGPUTextureView,
-// 好吧，虽然我也想ALL_IN_BOOM，但其实为了最终的性能考量，还是为动画单独创建一个纹理图集数组比较好
-anime_texture_array: wgpu.WGPUTexture,
-anime_texture_altas_view: wgpu.WGPUTextureView,
+color_altas: wgpu.WGPUTexture,
+color_altas_view: wgpu.WGPUTextureView,
+// 好吧，虽然我也想ALL_IN_BOOM，但为了让色彩纹理将来能支持BC（块压缩），还是为动画单独创建一个纹理图集数组比较好
+anime_altas: wgpu.WGPUTexture,
+anime_altas_view: wgpu.WGPUTextureView,
 // 为了能支持多个动画纹理，我们需要一个buffer存储纹理信息
-texture_info_buffer: wgpu.WGPUBuffer,
+textures_info_buffer: wgpu.WGPUBuffer,
 // 渲染相关设置
 const MAX_ENTITIES = 500; // 限制最大实体数
 const ATLAS_WIDTH = 4096; // 每张纹理图集的宽度
@@ -27,14 +27,15 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     wgpu.wgpuBufferRelease(self.entities_data_buffer);
     allocator.free(self.indexed_indirect_cmds);
     wgpu.wgpuBufferRelease(self.indexed_indirect_cmds_buffer);
-    wgpu.wgpuTextureRelease(self.texture_altas_array);
-    wgpu.wgpuTextureViewRelease(self.texture_altas_view);
+    wgpu.wgpuTextureRelease(self.color_altas);
+    wgpu.wgpuTextureViewRelease(self.color_altas_view);
 
-    wgpu.wgpuTextureRelease(self.anime_texture_array);
-    wgpu.wgpuTextureViewRelease(self.anime_texture_altas_view);
-    wgpu.wgpuBufferRelease(self.texture_info_buffer);
+    wgpu.wgpuTextureRelease(self.anime_altas);
+    wgpu.wgpuTextureViewRelease(self.anime_altas_view);
+    wgpu.wgpuBufferRelease(self.textures_info_buffer);
 }
 pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
+    const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, MAX_ENTITIES);
     const indexed_indirect_cmds_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
         .size = @sizeOf(IndexedIndirectCmd) * MAX_ENTITIES,
         .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst | wgpu.WGPUBufferUsage_Indirect,
@@ -45,13 +46,13 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         .usage = wgpu.WGPUBufferUsage_Uniform | wgpu.WGPUBufferUsage_CopyDst,
         .mappedAtCreation = 0,
     });
+    const entities_data = try allocator.alloc(EntityData, MAX_ENTITIES);
     const entities_data_buffer = wgpu.wgpuDeviceCreateBuffer(gctx.device, &wgpu.WGPUBufferDescriptor{
         .size = @sizeOf(EntityData) * MAX_ENTITIES,
         .usage = wgpu.WGPUBufferUsage_Storage | wgpu.WGPUBufferUsage_CopyDst,
         .mappedAtCreation = 0,
     });
-    const entities_data = try allocator.alloc(EntityData, MAX_ENTITIES);
-    const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, MAX_ENTITIES);
+
     var models_info = std.EnumArray(ModelName, ModelInfo).initUndefined();
 
     // 加载模型填充缓冲区
@@ -282,7 +283,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         ATLAS_HEIGHT,
     );
     const color_atlas_count = pr.color_atlas_count;
-    const texture_desc = wgpu.WGPUTextureDescriptor{
+    const color_altas_desc = wgpu.WGPUTextureDescriptor{
         .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = wgpu.WGPUTextureDimension_2D,
         .size = .{
@@ -296,23 +297,22 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         .mipLevelCount = 1,
         .sampleCount = 1,
     };
-    const texture_altas_array = wgpu.wgpuDeviceCreateTexture(gctx.device, &texture_desc);
-    const texture_altas_view = wgpu.wgpuTextureCreateView(
-        texture_altas_array,
+    const color_altas = wgpu.wgpuDeviceCreateTexture(gctx.device, &color_altas_desc);
+    const color_altas_view = wgpu.wgpuTextureCreateView(
+        color_altas,
         &wgpu.struct_WGPUTextureViewDescriptor{
             .aspect = wgpu.WGPUTextureAspect_All,
             .baseArrayLayer = 0,
-            .arrayLayerCount = texture_desc.size.depthOrArrayLayers,
+            .arrayLayerCount = color_altas_desc.size.depthOrArrayLayers,
             .baseMipLevel = 0,
             .mipLevelCount = 1,
             .dimension = wgpu.WGPUTextureViewDimension_2DArray,
-            .format = texture_desc.format,
+            .format = color_altas_desc.format,
         },
     );
-
     // 创建动画纹理图集
     const anime_atlas_count = pr.anime_atlas_count;
-    const anime_texture_desc = wgpu.WGPUTextureDescriptor{
+    const anime_altas_desc = wgpu.WGPUTextureDescriptor{
         .usage = wgpu.WGPUTextureUsage_CopyDst | wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = wgpu.WGPUTextureDimension_2D,
         .size = .{
@@ -326,20 +326,20 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         .mipLevelCount = 1,
         .sampleCount = 1,
     };
-    const anime_texture_array = wgpu.wgpuDeviceCreateTexture(gctx.device, &anime_texture_desc);
-    const anime_texture_altas_view = wgpu.wgpuTextureCreateView(
-        anime_texture_array,
+    const anime_altas = wgpu.wgpuDeviceCreateTexture(gctx.device, &anime_altas_desc);
+    const anime_altas_view = wgpu.wgpuTextureCreateView(
+        anime_altas,
         &wgpu.struct_WGPUTextureViewDescriptor{
             .aspect = wgpu.WGPUTextureAspect_All,
             .baseArrayLayer = 0,
-            .arrayLayerCount = anime_texture_desc.size.depthOrArrayLayers,
+            .arrayLayerCount = anime_altas_desc.size.depthOrArrayLayers,
             .baseMipLevel = 0,
             .mipLevelCount = 1,
             .dimension = wgpu.WGPUTextureViewDimension_2DArray,
-            .format = anime_texture_desc.format,
+            .format = anime_altas_desc.format,
         },
     );
-
+    // 提取并写入纹理数据
     var model_it = models_info.iterator();
     while (model_it.next()) |model| {
         const file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{@tagName(model.key)});
@@ -358,7 +358,6 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         var gltf = Gltf.init(allocator);
         defer gltf.deinit();
         try gltf.parse(file_buf);
-
         // 提取并写入色彩纹理数据
         for (gltf.data.materials) |material| {
             if (material.metallic_roughness.base_color_texture) |color_texture_info| {
@@ -371,7 +370,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                 wgpu.wgpuQueueWriteTexture(
                     gctx.queue,
                     &wgpu.WGPUTexelCopyTextureInfo{
-                        .texture = texture_altas_array,
+                        .texture = color_altas,
                         .mipLevel = 0,
                         // xy为写入时的像素偏移，我们可以利用这个特性实现纹理图集，z轴用于指定写入到哪张纹理中
                         .origin = .{
@@ -395,8 +394,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                 );
             }
         }
-
-        // 提取动画纹理数据
+        // 提取并写入动画纹理数据
         if (gltf.data.animations.len > 0) {
             const anime = gltf.data.animations[0];
             // 关键帧数量，先假设同一动画中所有sampler的关键帧数量和时间戳都是一样的，如果最后证明不行再另想办法
@@ -532,7 +530,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
             wgpu.wgpuQueueWriteTexture(
                 gctx.queue,
                 &wgpu.WGPUTexelCopyTextureInfo{
-                    .texture = anime_texture_array,
+                    .texture = anime_altas,
                     .mipLevel = 0,
                     // xy为写入时的像素偏移，我们可以利用这个特性实现纹理图集，z轴用于指定写入到哪张纹理中
                     .origin = .{
@@ -579,7 +577,6 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         textures_info.items.ptr,
         @sizeOf(TextureInfo) * textures_info.items.len,
     );
-
     // 返回实例
     return @This(){
         .vertex_buffer = vertex_buffer,
@@ -589,14 +586,14 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
         .indexed_indirect_cmds_buffer = indexed_indirect_cmds_buffer,
         .entities_data = entities_data,
         .entities_data_buffer = entities_data_buffer,
-        .texture_altas_array = texture_altas_array,
-        .texture_altas_view = texture_altas_view,
+        .color_altas = color_altas,
+        .color_altas_view = color_altas_view,
 
-        .anime_texture_array = anime_texture_array,
-        .anime_texture_altas_view = anime_texture_altas_view,
+        .anime_altas = anime_altas,
+        .anime_altas_view = anime_altas_view,
 
         .models_info = models_info,
-        .texture_info_buffer = texture_info_buffer,
+        .textures_info_buffer = texture_info_buffer,
     };
 }
 

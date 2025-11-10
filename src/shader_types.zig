@@ -24,9 +24,6 @@ pub const VertexAttribute = struct {
 pub const EntityData = struct {
     transform: Mat4, //实例的世界变换
 
-    //    color_texture_size: [2]f32, //色彩纹理在纹理图集中的实际大小
-    //    color_texture_start: [2]i32, //色彩纹理在纹理图集中的起始坐标
-
     anime_texture_size: [2]f32 = .{ 0, 0 }, //动画纹理在纹理图集中的实际大小
     anime_texture_start: [2]i32 = .{ 0, 0 }, //动画纹理在纹理图集中的起始坐标
 
@@ -50,6 +47,12 @@ pub const ModelInfo = struct {
     anime_texture: TextureInfo = undefined, //动画纹理
     anime_duration: f32, //动画持续时间
 };
+pub const TextureInfo = struct {
+    size: [2]f32 = .{ 0, 0 }, // 纹理的实际大小
+    coords_offset: [2]i32 = .{ 0, 0 }, // 纹理在纹理图集中的坐标偏移量
+    index: u32 = 0, // 纹理在纹理数组中的索引
+    _padding: [1]f32 = undefined, // 需要对齐到16字节
+};
 pub const IndexedIndirectCmd = struct {
     indexCount: u32,
     instanceCount: u32,
@@ -62,12 +65,6 @@ pub const VertexIndirectCmd = struct {
     instanceCount: u32,
     firstVertex: u32,
     firstInstance: u32,
-};
-pub const TextureInfo = struct {
-    size: [2]f32 = .{ 0, 0 }, // 纹理的实际大小
-    coords_offset: [2]i32 = .{ 0, 0 }, // 纹理在纹理图集中的坐标偏移量
-    index: u32 = 0, // 纹理在纹理数组中的索引
-    _padding: [1]f32 = undefined, // 需要对齐到16字节
 };
 const Algebra = @import("zalgebra");
 const Vec2 = Algebra.Vec2;
