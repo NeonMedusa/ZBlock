@@ -30,7 +30,7 @@ pub fn addEntity(self: *@This(), entity: Entity) !void {
 }
 pub fn update(self: *@This()) !void {
     // 获取帧间延迟
-    self.current_frame_time = glfw.glfwGetTime();
+    self.current_frame_time = Glfw.glfwGetTime();
     self.delta_time_f64 = self.current_frame_time - self.last_frame_time;
     self.delta_time_f32 = @floatCast(self.delta_time_f64);
     self.last_frame_time = self.current_frame_time;
@@ -51,8 +51,8 @@ pub fn update(self: *@This()) !void {
 }
 
 const std = @import("std");
-const wgpu = @import("cimports.zig").wgpu;
-const glfw = @import("cimports.zig").glfw;
+const Wgpu = @import("cimports.zig").Wgpu;
+const Glfw = @import("cimports.zig").Glfw;
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;

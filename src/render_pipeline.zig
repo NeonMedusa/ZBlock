@@ -1,76 +1,76 @@
 //render_pipeline.zig:
-handle: wgpu.WGPURenderPipeline,
-bind_group_layout: wgpu.WGPUBindGroupLayout,
-bind_group: wgpu.WGPUBindGroup,
-pipeline_layout: wgpu.WGPUPipelineLayout,
-shader_module: wgpu.WGPUShaderModule,
+handle: Wgpu.WGPURenderPipeline,
+bind_group_layout: Wgpu.WGPUBindGroupLayout,
+bind_group: Wgpu.WGPUBindGroup,
+pipeline_layout: Wgpu.WGPUPipelineLayout,
+shader_module: Wgpu.WGPUShaderModule,
 pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManager) !@This() {
     const shader_module = try gctx.createShaderModule(shader_file_path);
     // 创建 binding group
-    const bgl_entries = [_]wgpu.WGPUBindGroupLayoutEntry{
+    const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
         .{ // scene_uniform
             .binding = 0,
-            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
             .buffer = .{
-                .type = wgpu.WGPUBufferBindingType_Uniform,
+                .type = Wgpu.WGPUBufferBindingType_Uniform,
                 .hasDynamicOffset = 0,
             },
         },
         .{ // entities_data
             .binding = 1,
-            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
             .buffer = .{
-                .type = wgpu.WGPUBufferBindingType_ReadOnlyStorage,
+                .type = Wgpu.WGPUBufferBindingType_ReadOnlyStorage,
                 .hasDynamicOffset = 0,
             },
         },
         .{ // textures
             .binding = 2,
-            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
             .texture = .{
-                .sampleType = wgpu.WGPUTextureSampleType_Float,
-                .viewDimension = wgpu.WGPUTextureViewDimension_2DArray,
+                .sampleType = Wgpu.WGPUTextureSampleType_Float,
+                .viewDimension = Wgpu.WGPUTextureViewDimension_2DArray,
             },
         },
         .{ // anime_textures
             .binding = 3,
-            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
             .texture = .{
-                .sampleType = wgpu.WGPUTextureSampleType_UnfilterableFloat,
-                .viewDimension = wgpu.WGPUTextureViewDimension_2DArray,
+                .sampleType = Wgpu.WGPUTextureSampleType_UnfilterableFloat,
+                .viewDimension = Wgpu.WGPUTextureViewDimension_2DArray,
             },
         },
         .{ // texture_info_buffer
             .binding = 4,
-            .visibility = wgpu.WGPUShaderStage_Vertex | wgpu.WGPUShaderStage_Fragment,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
             .buffer = .{
-                .type = wgpu.WGPUBufferBindingType_ReadOnlyStorage,
+                .type = Wgpu.WGPUBufferBindingType_ReadOnlyStorage,
                 .hasDynamicOffset = 0,
             },
         },
     };
-    const bind_group_layout = wgpu.wgpuDeviceCreateBindGroupLayout(
+    const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(
         gctx.device,
-        &wgpu.WGPUBindGroupLayoutDescriptor{
+        &Wgpu.WGPUBindGroupLayoutDescriptor{
             .entryCount = bgl_entries.len,
             .entries = &bgl_entries,
         },
     );
-    const bind_group = wgpu.wgpuDeviceCreateBindGroup(gctx.device, &wgpu.WGPUBindGroupDescriptor{
+    const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
         .layout = bind_group_layout,
         .entryCount = bgl_entries.len,
-        .entries = &[_]wgpu.WGPUBindGroupEntry{
+        .entries = &[_]Wgpu.WGPUBindGroupEntry{
             .{ // scene_uniform
                 .binding = 0,
                 .buffer = grm.scene_uniform_buffer,
                 .offset = 0,
-                .size = wgpu.wgpuBufferGetSize(grm.scene_uniform_buffer),
+                .size = Wgpu.wgpuBufferGetSize(grm.scene_uniform_buffer),
             },
             .{ // entities_data
                 .binding = 1,
                 .buffer = grm.entities_data_buffer,
                 .offset = 0,
-                .size = wgpu.wgpuBufferGetSize(grm.entities_data_buffer),
+                .size = Wgpu.wgpuBufferGetSize(grm.entities_data_buffer),
             },
             .{ // color_altas
                 .binding = 2,
@@ -84,23 +84,23 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
                 .binding = 4,
                 .buffer = grm.textures_info_buffer,
                 .offset = 0,
-                .size = wgpu.wgpuBufferGetSize(grm.textures_info_buffer),
+                .size = Wgpu.wgpuBufferGetSize(grm.textures_info_buffer),
             },
         },
     });
     // 创建渲染管线
-    const pipeline_layout = wgpu.wgpuDeviceCreatePipelineLayout(gctx.device, &wgpu.WGPUPipelineLayoutDescriptor{
+    const pipeline_layout = Wgpu.wgpuDeviceCreatePipelineLayout(gctx.device, &Wgpu.WGPUPipelineLayoutDescriptor{
         .bindGroupLayoutCount = 1,
         .bindGroupLayouts = &bind_group_layout,
     });
     const attributes = Gctx.generateVertexAttributes(VertexAttribute);
-    const pipeline_desc = wgpu.WGPURenderPipelineDescriptor{
+    const pipeline_desc = Wgpu.WGPURenderPipelineDescriptor{
         .layout = pipeline_layout, // 添加管线布局
         .vertex = .{
             .bufferCount = 1,
-            .buffers = &wgpu.WGPUVertexBufferLayout{
+            .buffers = &Wgpu.WGPUVertexBufferLayout{
                 .arrayStride = @sizeOf(VertexAttribute),
-                .stepMode = wgpu.WGPUVertexStepMode_Vertex,
+                .stepMode = Wgpu.WGPUVertexStepMode_Vertex,
                 .attributeCount = attributes.len,
                 .attributes = &attributes,
             },
@@ -111,28 +111,28 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
             },
         },
         .primitive = .{
-            .topology = wgpu.WGPUPrimitiveTopology_TriangleList,
+            .topology = Wgpu.WGPUPrimitiveTopology_TriangleList,
         },
-        .fragment = &wgpu.WGPUFragmentState{
+        .fragment = &Wgpu.WGPUFragmentState{
             .module = shader_module,
             .entryPoint = .{
                 .data = "fs_main",
                 .length = 7,
             },
             .targetCount = 1,
-            .targets = &wgpu.WGPUColorTargetState{
-                .format = wgpu.WGPUTextureFormat_BGRA8UnormSrgb,
-                .writeMask = wgpu.WGPUColorWriteMask_All,
+            .targets = &Wgpu.WGPUColorTargetState{
+                .format = Wgpu.WGPUTextureFormat_BGRA8UnormSrgb,
+                .writeMask = Wgpu.WGPUColorWriteMask_All,
             },
         },
         .multisample = .{
             .count = 1,
-            .mask = wgpu.WGPUColorWriteMask_All,
+            .mask = Wgpu.WGPUColorWriteMask_All,
         },
-        .depthStencil = &wgpu.WGPUDepthStencilState{
-            .format = wgpu.WGPUTextureFormat_Depth24Plus,
+        .depthStencil = &Wgpu.WGPUDepthStencilState{
+            .format = Wgpu.WGPUTextureFormat_Depth24Plus,
             .depthWriteEnabled = 1,
-            .depthCompare = wgpu.WGPUCompareFunction_Less,
+            .depthCompare = Wgpu.WGPUCompareFunction_Less,
             .stencilFront = .{},
             .stencilBack = .{},
             .stencilReadMask = 0,
@@ -142,7 +142,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
             .depthBiasClamp = 0.0,
         },
     };
-    const pipeline = wgpu.wgpuDeviceCreateRenderPipeline(gctx.device, &pipeline_desc);
+    const pipeline = Wgpu.wgpuDeviceCreateRenderPipeline(gctx.device, &pipeline_desc);
     return @This(){
         .handle = pipeline,
         .bind_group_layout = bind_group_layout,
@@ -152,11 +152,11 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
     };
 }
 pub fn deinit(self: @This()) void {
-    wgpu.wgpuRenderPipelineRelease(self.handle);
-    wgpu.wgpuBindGroupLayoutRelease(self.bind_group_layout);
-    wgpu.wgpuBindGroupRelease(self.bind_group);
-    wgpu.wgpuPipelineLayoutRelease(self.pipeline_layout);
-    wgpu.wgpuShaderModuleRelease(self.shader_module);
+    Wgpu.wgpuRenderPipelineRelease(self.handle);
+    Wgpu.wgpuBindGroupLayoutRelease(self.bind_group_layout);
+    Wgpu.wgpuBindGroupRelease(self.bind_group);
+    Wgpu.wgpuPipelineLayoutRelease(self.pipeline_layout);
+    Wgpu.wgpuShaderModuleRelease(self.shader_module);
 }
 
 const std = @import("std");
@@ -166,7 +166,7 @@ const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
 const Gltf = @import("zgltf");
-const wgpu = @import("cimports.zig").wgpu;
+const Wgpu = @import("cimports.zig").Wgpu;
 const ResourceManager = @import("resource_manager.zig");
 
 const ShaderType = @import("shader_types.zig");

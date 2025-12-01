@@ -1,3 +1,4 @@
+// camera3d.zig:
 position: Vec3 = Vec3.zero(),
 front: Vec3 = Vec3.forward(),
 up: Vec3 = Vec3.up(),
@@ -40,32 +41,31 @@ pub fn updateFromMouse(self: *@This(), window: Window) void {
 // 键盘控制移动
 pub fn updateFromKeyboard(self: *@This(), window: Window, delta_time: f32) void {
     const velocity = self.movement_speed * delta_time;
-    const input = window.input;
     const right = self.front.cross(self.up).norm();
 
-    if (input.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
-    if (input.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));
-    if (input.isKeyPressed(.a)) self.position = self.position.sub(right.scale(velocity));
-    if (input.isKeyPressed(.d)) self.position = self.position.add(right.scale(velocity));
-    if (input.isKeyPressed(.space)) self.position = self.position.add(self.up.scale(velocity));
-    if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control)) {
+    if (window.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
+    if (window.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));
+    if (window.isKeyPressed(.a)) self.position = self.position.sub(right.scale(velocity));
+    if (window.isKeyPressed(.d)) self.position = self.position.add(right.scale(velocity));
+    if (window.isKeyPressed(.space)) self.position = self.position.add(self.up.scale(velocity));
+    if (window.isKeyPressed(.left_control) or window.isKeyPressed(.right_control)) {
         self.position = self.position.sub(self.up.scale(velocity));
     }
 }
 
 fn updateVectors(self: *@This()) void {
-    const yawRad = algebra.toRadians(self.yaw);
-    const pitchRad = algebra.toRadians(self.pitch);
+    const yawRad = Algebra.toRadians(self.yaw);
+    const pitchRad = Algebra.toRadians(self.pitch);
     self.front = Vec3.new(@cos(yawRad) * @cos(pitchRad), @sin(pitchRad), @sin(yawRad) * @cos(pitchRad)).norm();
     self.up = self.front.cross(self.world_up).norm().cross(self.front).norm();
 }
 
 pub fn getViewMatrix(self: @This()) Mat4 {
-    return algebra.lookAt(self.position, self.position.add(self.front), self.up);
+    return Algebra.lookAt(self.position, self.position.add(self.front), self.up);
 }
 
-const algebra = @import("zalgebra");
-const Vec3 = algebra.Vec3;
-const Mat4 = algebra.Mat4;
+const Algebra = @import("zalgebra");
+const Vec3 = Algebra.Vec3;
+const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
-const glfw = @import("cimports.zig").glfw;
+const Glfw = @import("cimports.zig").Glfw;

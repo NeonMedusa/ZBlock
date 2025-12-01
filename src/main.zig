@@ -28,6 +28,10 @@ pub fn main() !void {
     var scene = Scene.init(allocator, &window);
     defer scene.deinit();
 
+    // 初始化UI系统
+    var ui_system = try UiSystem.init(allocator, &gctx, &window);
+    defer ui_system.deinit();
+
     for (0..100) |value| {
         const entity0 = Entity{
             .model = .Avocado,
@@ -78,19 +82,31 @@ pub fn main() !void {
     // 主循环
     while (window.shouldClose()) {
         // ESC键关闭窗口
-        if (window.input.isKeyPressed(.escape))
+        if (window.isKeyPressed(.escape))
             window.setWindowShouldClose();
         Window.pollEvents();
+
         // 更新场景
         try scene.update();
+
+        // UI开始新帧
+        ui_system.beginFrame();
+        // 绘制UI
+        if (ui_system.button(20, 20)) {
+            std.debug.print("button_is_pressed\n", .{});
+        }
+        // UI帧结束
+        try ui_system.endFrame(&gctx);
+
         // 渲染
-        try Render.draw(&gctx, &render_pipeline, &scene, &rm);
+        try Render.draw(&gctx, &render_pipeline, &scene, &rm, &ui_system);
     }
 }
-
 const std = @import("std");
-const wgpu = @import("cimports.zig").wgpu;
-const glfw = @import("cimports.zig").glfw;
+
+const World = @import("world.zig").World;
+const Wgpu = @import("cimports.zig").Wgpu;
+const Glfw = @import("cimports.zig").Glfw;
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
@@ -107,3 +123,5 @@ const Scene = @import("scene.zig");
 const ResourceManager = @import("resource_manager.zig");
 const RenderPipeline = @import("render_pipeline.zig");
 const ModelName = @import("model.zig").ModelName;
+
+const UiSystem = @import("ui_system.zig");

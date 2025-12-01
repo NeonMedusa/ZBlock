@@ -4,29 +4,29 @@ pub fn draw(
     render_pipeline: *const RenderPipeline,
     scene: *const Scene,
     grm: *ResourceManager,
+    ui_systemd: *UiSystem,
 ) !void {
     // 获取当前帧的纹理
-    var surface_texture: wgpu.WGPUSurfaceTexture = undefined;
-    wgpu.wgpuSurfaceGetCurrentTexture(gctx.surface, &surface_texture);
+    var surface_texture: Wgpu.WGPUSurfaceTexture = undefined;
+    Wgpu.wgpuSurfaceGetCurrentTexture(gctx.surface, &surface_texture);
     if (surface_texture.status == 0) return error.TextureAcquisitionFailed;
     // 创建纹理视图
-    const texture_view = wgpu.wgpuTextureCreateView(surface_texture.texture, null);
-    defer wgpu.wgpuTextureViewRelease(texture_view);
+    const texture_view = Wgpu.wgpuTextureCreateView(surface_texture.texture, null);
+    defer Wgpu.wgpuTextureViewRelease(texture_view);
     // 创建命令编码器
-    const encoder_desc = wgpu.WGPUCommandEncoderDescriptor{};
-    const encoder = wgpu.wgpuDeviceCreateCommandEncoder(gctx.device, &encoder_desc);
+    const encoder_desc = Wgpu.WGPUCommandEncoderDescriptor{};
+    const encoder = Wgpu.wgpuDeviceCreateCommandEncoder(gctx.device, &encoder_desc);
     // 更新scene_uniform_buffer
-    wgpu.wgpuQueueWriteBuffer(
+    Wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         grm.scene_uniform_buffer,
         0,
         &scene.ubo,
-        wgpu.wgpuBufferGetSize(grm.scene_uniform_buffer),
+        Wgpu.wgpuBufferGetSize(grm.scene_uniform_buffer),
     );
 
     // 重置渲染实例计数器
     var entity_counter: u32 = 0;
-
     // 不分类间接绘制
     for (scene.entities.items) |entity| {
         if (entity.model) |model_name| {
@@ -54,7 +54,7 @@ pub fn draw(
     }
 
     // 更新entities_data_buffer
-    wgpu.wgpuQueueWriteBuffer(
+    Wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         grm.entities_data_buffer,
         0,
@@ -63,7 +63,7 @@ pub fn draw(
     );
 
     // 更新indexed_indirect_cmds_buffer
-    wgpu.wgpuQueueWriteBuffer(
+    Wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         grm.indexed_indirect_cmds_buffer,
         0,
@@ -71,57 +71,69 @@ pub fn draw(
         @sizeOf(IndexedIndirectCmd) * entity_counter,
     );
     // 执行渲染
-    const color_attachment = wgpu.WGPURenderPassColorAttachment{
+    const color_attachment = Wgpu.WGPURenderPassColorAttachment{
         .view = texture_view,
-        .loadOp = wgpu.WGPULoadOp_Clear,
-        .storeOp = wgpu.WGPUStoreOp_Store,
-        .depthSlice = wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
-        .clearValue = wgpu.WGPUColor{
+        .loadOp = Wgpu.WGPULoadOp_Clear,
+        .storeOp = Wgpu.WGPUStoreOp_Store,
+        .depthSlice = Wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
+        .clearValue = Wgpu.WGPUColor{
             .r = 0.1,
             .g = 0.1,
             .b = 0.1,
             .a = 1.0,
         },
     };
-    const render_pass_desc = wgpu.WGPURenderPassDescriptor{
+    const render_pass_desc = Wgpu.WGPURenderPassDescriptor{
         .colorAttachmentCount = 1,
         .colorAttachments = &color_attachment,
-        .depthStencilAttachment = &wgpu.WGPURenderPassDepthStencilAttachment{
+        .depthStencilAttachment = &Wgpu.WGPURenderPassDepthStencilAttachment{
             .view = gctx.depth_texture_view,
-            .depthLoadOp = wgpu.WGPULoadOp_Clear,
-            .depthStoreOp = wgpu.WGPUStoreOp_Store,
+            .depthLoadOp = Wgpu.WGPULoadOp_Clear,
+            .depthStoreOp = Wgpu.WGPUStoreOp_Store,
             .depthClearValue = 1.0,
             .depthReadOnly = 0,
-            .stencilLoadOp = wgpu.WGPULoadOp_Undefined,
-            .stencilStoreOp = wgpu.WGPUStoreOp_Undefined,
+            .stencilLoadOp = Wgpu.WGPULoadOp_Undefined,
+            .stencilStoreOp = Wgpu.WGPUStoreOp_Undefined,
             .stencilClearValue = 0,
             .stencilReadOnly = 1,
         },
     };
-    const pass = wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
+    const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
     // 设置渲染管线和绑定组
-    wgpu.wgpuRenderPassEncoderSetPipeline(pass, render_pipeline.handle);
-    wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, render_pipeline.bind_group, 0, null);
+    Wgpu.wgpuRenderPassEncoderSetPipeline(pass, render_pipeline.handle);
+    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, render_pipeline.bind_group, 0, null);
     // 设置顶点和索引缓冲区
-    wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, grm.vertex_buffer, 0, wgpu.wgpuBufferGetSize(grm.vertex_buffer));
-    wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, grm.index_buffer, wgpu.WGPUIndexFormat_Uint32, 0, wgpu.wgpuBufferGetSize(grm.index_buffer));
+    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, grm.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(grm.vertex_buffer));
+    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, grm.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(grm.index_buffer));
     // 间接绘制所有可见实例
-    wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, grm.indexed_indirect_cmds_buffer, 0, entity_counter);
+    Wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, grm.indexed_indirect_cmds_buffer, 0, entity_counter);
+
+    //UI渲染!
+    // 设置UI渲染管线和绑定组
+    Wgpu.wgpuRenderPassEncoderSetPipeline(pass, ui_systemd.render_pipeline.handle);
+    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, ui_systemd.render_pipeline.bind_group, 0, null);
+    // 设置顶点和索引缓冲区
+    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, ui_systemd.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(ui_systemd.vertex_buffer));
+    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, ui_systemd.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(ui_systemd.index_buffer));
+    // 绘制UI
+    Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @as(u32, @intCast(ui_systemd.frame_indices.items.len)), 1, 0, 0, 0);
+
     // 结束并释放渲染通道
-    wgpu.wgpuRenderPassEncoderEnd(pass);
-    wgpu.wgpuRenderPassEncoderRelease(pass);
+    Wgpu.wgpuRenderPassEncoderEnd(pass);
+    Wgpu.wgpuRenderPassEncoderRelease(pass);
     // 提交命令
-    const command_buffer = wgpu.wgpuCommandEncoderFinish(encoder, null);
-    wgpu.wgpuCommandEncoderRelease(encoder);
-    wgpu.wgpuQueueSubmit(gctx.queue, 1, &command_buffer);
-    wgpu.wgpuCommandBufferRelease(command_buffer);
+    const command_buffer = Wgpu.wgpuCommandEncoderFinish(encoder, null);
+    Wgpu.wgpuCommandEncoderRelease(encoder);
+    Wgpu.wgpuQueueSubmit(gctx.queue, 1, &command_buffer);
+    Wgpu.wgpuCommandBufferRelease(command_buffer);
     // 呈现表面后释放纹理
-    _ = wgpu.wgpuSurfacePresent(gctx.surface);
-    wgpu.wgpuTextureRelease(surface_texture.texture);
+    _ = Wgpu.wgpuSurfacePresent(gctx.surface);
+    Wgpu.wgpuTextureRelease(surface_texture.texture);
 }
 
 const std = @import("std");
-const wgpu = @import("cimports.zig").wgpu;
+
+const Wgpu = @import("cimports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
 
 const Algebra = @import("zalgebra");
@@ -139,3 +151,5 @@ const VertexAttribute = ShaderType.VertexAttribute;
 const EntityData = ShaderType.EntityData;
 const IndexedIndirectCmd = ShaderType.IndexedIndirectCmd;
 const VertexIndirectCmd = ShaderType.VertexIndirectCmd;
+
+const UiSystem = @import("ui_system.zig");
