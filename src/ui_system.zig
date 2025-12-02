@@ -12,6 +12,30 @@ frame_indices: std.ArrayList(u32),
 // 顶点/索引缓冲区，每帧更新
 vertex_buffer: Wgpu.WGPUBuffer,
 index_buffer: Wgpu.WGPUBuffer,
+// 最基本的按钮
+pub fn button(self: *UiSystem, x: f32, y: f32) bool {
+    const width: f32 = 100;
+    const height: f32 = 30;
+    // 根据鼠标位置调整状态
+    const mouse_pos = self.window.getCursorPos();
+    const is_hovered = (mouse_pos.x >= x and mouse_pos.x <= x + width and
+        mouse_pos.y >= y and mouse_pos.y <= y + height);
+    const is_clicked = is_hovered and self.window.isMousePressed(.mouse_left);
+    // 根据状态选择颜色
+    const color = if (is_clicked) [4]f32{ 0.2, 0.2, 0.8, 1.0 } else if (is_hovered) [4]f32{ 0.8, 0.8, 0.2, 1.0 } else [4]f32{ 0.5, 0.5, 0.5, 1.0 };
+    // 绘制按钮背景
+    self.drawRect(x, y, width, height, color);
+    // 绘制边框
+    const border_color = [4]f32{ 0.1, 0.1, 0.1, 1.0 };
+    self.drawRect(x, y, width, 1, border_color); // 上边框
+    self.drawRect(x, y + height - 1, width, 1, border_color); // 下边框
+    self.drawRect(x, y, 1, height, border_color); // 左边框
+    self.drawRect(x + width - 1, y, 1, height, border_color); // 右边框
+    // TODO: 添加文本渲染
+    // self.drawText(x + 5, y + 5, text, [4]f32{ 1, 1, 1, 1 });
+    return is_clicked;
+}
+
 // 析构函数
 pub fn deinit(self: *@This()) void {
     self.frame_vertices.deinit(self.allocator);
@@ -45,31 +69,22 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, window: *Window) !UiSyste
     };
 }
 
-// 每帧开始时的重置
+// 每帧开始时重置数据
 pub fn beginFrame(self: *@This()) void {
     self.frame_vertices.clearRetainingCapacity();
     self.frame_indices.clearRetainingCapacity();
 }
 
-// 修改 endFrame，只更新缓冲区，不渲染
+// 每帧结束时更新GPU缓冲区
 pub fn endFrame(self: *@This(), gctx: *Gctx) !void {
     if (self.frame_vertices.items.len == 0) return;
-    // 只更新GPU缓冲区，不执行渲染
-    try self.updateGpuBuffers(gctx);
-}
-
-fn updateGpuBuffers(self: *@This(), gctx: *const Gctx) !void {
-    // 更新顶点缓冲区
-    if (self.frame_vertices.items.len > 0) {
-        Wgpu.wgpuQueueWriteBuffer(
-            gctx.queue,
-            self.vertex_buffer,
-            0,
-            self.frame_vertices.items.ptr,
-            @as(usize, @intCast(self.frame_vertices.items.len)) * @sizeOf(UiVertex),
-        );
-    }
-    // 更新索引缓冲区
+    Wgpu.wgpuQueueWriteBuffer(
+        gctx.queue,
+        self.vertex_buffer,
+        0,
+        self.frame_vertices.items.ptr,
+        @as(usize, @intCast(self.frame_vertices.items.len)) * @sizeOf(UiVertex),
+    );
     Wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         self.index_buffer,
@@ -77,29 +92,6 @@ fn updateGpuBuffers(self: *@This(), gctx: *const Gctx) !void {
         self.frame_indices.items.ptr,
         @as(usize, @intCast(self.frame_indices.items.len)) * @sizeOf(u32),
     );
-}
-
-pub fn button(self: *UiSystem, x: f32, y: f32) bool {
-    const width: f32 = 100;
-    const height: f32 = 30;
-
-    const mouse_pos = self.window.getCursorPos();
-    const is_hovered = (mouse_pos.x >= x and mouse_pos.x <= x + width and
-        mouse_pos.y >= y and mouse_pos.y <= y + height);
-    const is_clicked = is_hovered and self.window.isMousePressed(.mouse_left);
-    // 根据状态选择颜色
-    const color = if (is_clicked) [4]f32{ 0.2, 0.2, 0.8, 1.0 } else if (is_hovered) [4]f32{ 0.8, 0.8, 0.2, 1.0 } else [4]f32{ 0.5, 0.5, 0.5, 1.0 };
-    // 绘制按钮背景
-    self.drawRect(x, y, width, height, color);
-    // 绘制边框
-    const border_color = [4]f32{ 0.1, 0.1, 0.1, 1.0 };
-    self.drawRect(x, y, width, 1, border_color); // 上边框
-    self.drawRect(x, y + height - 1, width, 1, border_color); // 下边框
-    self.drawRect(x, y, 1, height, border_color); // 左边框
-    self.drawRect(x + width - 1, y, 1, height, border_color); // 右边框
-    // TODO: 添加文本渲染
-    // self.drawText(x + 5, y + 5, text, [4]f32{ 1, 1, 1, 1 });
-    return is_clicked;
 }
 
 // 矩形绘制
@@ -121,13 +113,12 @@ pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color:
     self.frame_vertices.appendSlice(self.allocator, &vertices) catch return;
     self.frame_indices.appendSlice(self.allocator, &indices) catch return;
 }
-
 // UI顶点属性
 pub const UiVertex = struct {
     pos: [3]f32, //顶点位置
     color: [4]f32, //背景颜色
 };
-
+// 渲染管线
 const UiRenderPipeline = struct {
     handle: Wgpu.WGPURenderPipeline,
     bind_group_layout: Wgpu.WGPUBindGroupLayout,
@@ -228,9 +219,6 @@ const UiRenderPipeline = struct {
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");
-const Algebra = @import("zalgebra");
-const Vec3 = Algebra.Vec3;
-const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
 const Gltf = @import("zgltf");
 const Wgpu = @import("cimports.zig").Wgpu;

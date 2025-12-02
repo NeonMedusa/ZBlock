@@ -25,13 +25,39 @@ pub fn main() !void {
     );
     defer render_pipeline.deinit();
 
+    // 初始化场景
     var scene = Scene.init(allocator, &window);
     defer scene.deinit();
+
+    // 为场景添加一些实例（仅用于调试）
+    try initScene(&scene);
 
     // 初始化UI系统
     var ui_system = try UiSystem.init(allocator, &gctx, &window);
     defer ui_system.deinit();
 
+    // 初始化主菜单
+    var main_menu = @import("ui/main_menu.zig"){};
+
+    // 主循环
+    while (window.shouldClose()) {
+        Window.pollEvents();
+        // 如果主菜单不可见，则更新场景
+        if (!main_menu.visible)
+            try scene.update();
+        // UI开始新帧
+        ui_system.beginFrame();
+        // 如果主菜单可见，则渲染主菜单
+        main_menu.update(&ui_system);
+        // UI帧结束
+        try ui_system.endFrame(&gctx);
+        // 渲染
+        try Render.draw(&gctx, &render_pipeline, &scene, &rm, &ui_system);
+    }
+}
+
+// 为场景添加一些实例（仅用于调试）
+pub fn initScene(scene: *Scene) !void {
     for (0..100) |value| {
         const entity0 = Entity{
             .model = .Avocado,
@@ -78,30 +104,8 @@ pub fn main() !void {
         };
         try scene.addEntity(entity3);
     }
-
-    // 主循环
-    while (window.shouldClose()) {
-        // ESC键关闭窗口
-        if (window.isKeyPressed(.escape))
-            window.setWindowShouldClose();
-        Window.pollEvents();
-
-        // 更新场景
-        try scene.update();
-
-        // UI开始新帧
-        ui_system.beginFrame();
-        // 绘制UI
-        if (ui_system.button(20, 20)) {
-            std.debug.print("button_is_pressed\n", .{});
-        }
-        // UI帧结束
-        try ui_system.endFrame(&gctx);
-
-        // 渲染
-        try Render.draw(&gctx, &render_pipeline, &scene, &rm, &ui_system);
-    }
 }
+
 const std = @import("std");
 
 const World = @import("world.zig").World;
@@ -117,7 +121,6 @@ const Gctx = @import("gctx.zig");
 const Window = @import("window.zig");
 const Render = @import("render.zig");
 const Camera3D = @import("camera3d.zig");
-const Input = @import("input.zig");
 const Entity = @import("entity.zig");
 const Scene = @import("scene.zig");
 const ResourceManager = @import("resource_manager.zig");
