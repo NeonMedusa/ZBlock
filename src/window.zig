@@ -1,13 +1,23 @@
 //window.zig
+const Window = @This();
 handle: *Glfw.GLFWwindow,
-width: u32,
-height: u32,
-widthF: f32,
-heightF: f32,
-pub fn init(title: [:0]const u8, width: u32, height: u32) !@This() {
+width_u: u32,
+height_u: u32,
+width: f32,
+height: f32,
+center_x: f32,
+center_y: f32,
+time: f32 = 0,
+prev_frame_time: f32 = 0,
+delta_time: f32 = 0,
+input: Input,
+// 或许将来我们可以通过添加引用的方式订阅事件，但现在暂时就这样吧 X_X
+// ui_system: ?*UiSystem = null,
+pub fn init(allocator: std.mem.Allocator, title: [:0]const u8, width: u32, height: u32) !*@This() {
+    // 如果Glfw初始化失败则返回错误并释放资源
     if (Glfw.glfwInit() == 0) return error.GLFWInitFailed;
     errdefer Glfw.glfwTerminate();
-
+    // 创建窗口（设置NO_API模式以适配WGPU）
     Glfw.glfwWindowHint(Glfw.GLFW_CLIENT_API, Glfw.GLFW_NO_API);
     const window = Glfw.glfwCreateWindow(
         @intCast(width),
@@ -17,159 +27,138 @@ pub fn init(title: [:0]const u8, width: u32, height: u32) !@This() {
         null,
     ) orelse return error.WindowCreateFailed;
     errdefer Glfw.glfwDestroyWindow(window);
-
     // 启用原生鼠标输入（如果支持）
     if (Glfw.glfwRawMouseMotionSupported() == Glfw.GLFW_TRUE)
         Glfw.glfwSetInputMode(window, Glfw.GLFW_RAW_MOUSE_MOTION, Glfw.GLFW_TRUE);
-
-    return @This(){
+    // 在堆上创建window自身
+    const self = try allocator.create(@This());
+    self.* = .{
         .handle = window,
-        .width = width,
-        .height = height,
-        .widthF = @floatFromInt(width),
-        .heightF = @floatFromInt(height),
+        .width_u = width,
+        .height_u = height,
+        .width = @floatFromInt(width),
+        .height = @floatFromInt(height),
+        .input = Input.init(self),
+        .center_x = @as(f32, @floatFromInt(width)) / 2,
+        .center_y = @as(f32, @floatFromInt(height)) / 2,
     };
+    // 将用户数据设置为自身的引用，在回调时解引用便可传递数据
+    Glfw.glfwSetWindowUserPointer(window, self);
+    // 设置回调
+    self.setupCallbacks();
+    return self;
 }
 
-pub fn isKeyPressed(self: @This(), key: Key) bool {
-    return Glfw.glfwGetKey(self.handle, @intFromEnum(key)) == Glfw.GLFW_PRESS;
-}
-
-pub fn isMousePressed(self: @This(), mouse_button: MouseButton) bool {
-    return Glfw.glfwGetMouseButton(self.handle, @intFromEnum(mouse_button)) == Glfw.GLFW_PRESS;
-}
-
-pub fn deinit(self: @This()) void {
+pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+    // 销毁窗口
     Glfw.glfwDestroyWindow(self.handle);
+    // 释放资源
     Glfw.glfwTerminate();
+    // 销毁包装
+    allocator.destroy(self);
 }
 
+fn setupCallbacks(window: *@This()) void {
+    _ = Glfw.glfwSetKeyCallback(window.handle, keyCallback);
+    _ = Glfw.glfwSetMouseButtonCallback(window.handle, mouseButtonCallback);
+    _ = Glfw.glfwSetCursorPosCallback(window.handle, cursorPosCallback);
+    _ = Glfw.glfwSetScrollCallback(window.handle, scrollCallback);
+    _ = Glfw.glfwSetWindowCloseCallback(window.handle, windowCloseCallback);
+    _ = Glfw.glfwSetWindowSizeCallback(window.handle, windowSizeCallback);
+}
+
+// 回调函数
+fn keyCallback(glfw_window: ?*Glfw.GLFWwindow, key: i32, scancode: i32, action: i32, mods: i32) callconv(.c) void {
+    if (glfw_window) |glfw_win| {
+        if (Glfw.glfwGetWindowUserPointer(glfw_win)) |ptr| {
+            // 解引用得到window自身
+            const window: *Window = @ptrCast(@alignCast(ptr));
+            const input = &window.input;
+            // 更新window.input的按键状态
+            input.updateKeyState(key, action);
+        }
+    }
+    _ = scancode;
+    _ = mods;
+}
+fn mouseButtonCallback(glfw_window: ?*Glfw.GLFWwindow, button: i32, action: i32, mods: i32) callconv(.c) void {
+    if (glfw_window) |glfw_win| {
+        // 解引用得到window自身
+        if (Glfw.glfwGetWindowUserPointer(glfw_win)) |ptr| {
+            const window: *Window = @ptrCast(@alignCast(ptr));
+            const input = &window.input;
+            // 更新window.input的鼠标状态
+            input.updateMouseButtonState(button, action);
+        }
+    }
+    _ = mods;
+}
+fn cursorPosCallback(glfw_window: ?*Glfw.GLFWwindow, xpos: f64, ypos: f64) callconv(.c) void {
+    if (glfw_window) |glfw_win| {
+        // 解引用得到window自身
+        if (Glfw.glfwGetWindowUserPointer(glfw_win)) |ptr| {
+            const window: *Window = @ptrCast(@alignCast(ptr));
+            const input = &window.input;
+            // 更新window.input的鼠标状态
+            input.updateMousePos(xpos, ypos);
+        }
+    }
+}
+fn scrollCallback(glfw_window: ?*Glfw.GLFWwindow, xoffset: f64, yoffset: f64) callconv(.c) void {
+    if (glfw_window) |glfw_win| {
+        // 解引用得到window自身
+        if (Glfw.glfwGetWindowUserPointer(glfw_win)) |ptr| {
+            const window: *Window = @ptrCast(@alignCast(ptr));
+            const input = &window.input;
+            // 更新window.input的鼠标滚轮状态
+            input.updateScroll(xoffset, yoffset);
+        }
+    }
+}
+fn windowSizeCallback(glfw_window: ?*Glfw.GLFWwindow, width: i32, height: i32) callconv(.c) void {
+    if (glfw_window) |glfw_win| {
+        // 解引用得到window自身
+        if (Glfw.glfwGetWindowUserPointer(glfw_win)) |ptr| {
+            const window: *Window = @ptrCast(@alignCast(ptr));
+            // 更新window的尺寸
+            window.width_u = @intCast(width);
+            window.height_u = @intCast(height);
+            window.width = @floatFromInt(width);
+            window.height = @floatFromInt(height);
+            // TODO:在此处重建交换链
+        }
+    }
+}
+fn windowCloseCallback(glfw_window: ?*Glfw.GLFWwindow) callconv(.c) void {
+    if (glfw_window) |glfw_win| {
+        // 解引用得到window自身
+        if (Glfw.glfwGetWindowUserPointer(glfw_win)) |ptr| {
+            const window: *Window = @ptrCast(@alignCast(ptr));
+            // 暂时不做任何事情
+            _ = window;
+        }
+    }
+}
+// 常用函数
+pub fn pollEvents(self: *@This()) void {
+    // 先重置输入状态再更新事件
+    self.input.beginFrame();
+    Glfw.glfwPollEvents();
+    // 更新时间
+    self.time = @floatCast(Glfw.glfwGetTime());
+    self.delta_time = self.time - self.prev_frame_time;
+    self.prev_frame_time = self.time;
+}
 pub fn shouldClose(self: @This()) bool {
-    return Glfw.glfwWindowShouldClose(self.handle) == 0;
+    return Glfw.glfwWindowShouldClose(self.handle) != 0;
 }
-
-pub fn getCursorPos(self: @This()) struct { x: f64, y: f64 } {
-    var x: f64 = undefined;
-    var y: f64 = undefined;
-    Glfw.glfwGetCursorPos(self.handle, &x, &y);
-    return .{ .x = x, .y = y };
-}
-
-pub fn setCursorPos(self: @This(), xpos: f64, ypos: f64) void {
-    Glfw.glfwSetCursorPos(self.handle, xpos, ypos);
-}
-
 pub fn setWindowShouldClose(self: @This()) void {
     Glfw.glfwSetWindowShouldClose(self.handle, 1);
 }
-
-pub fn pollEvents() void {
-    Glfw.glfwPollEvents();
-}
-
-pub const MouseButton = enum(i32) {
-    mouse_left = Glfw.GLFW_MOUSE_BUTTON_LEFT,
-    mouse_right = Glfw.GLFW_MOUSE_BUTTON_RIGHT,
-};
-pub const Key = enum(i32) {
-    // 字母键
-    a = Glfw.GLFW_KEY_A,
-    b = Glfw.GLFW_KEY_B,
-    c = Glfw.GLFW_KEY_C,
-    d = Glfw.GLFW_KEY_D,
-    e = Glfw.GLFW_KEY_E,
-    f = Glfw.GLFW_KEY_F,
-    g = Glfw.GLFW_KEY_G,
-    h = Glfw.GLFW_KEY_H,
-    i = Glfw.GLFW_KEY_I,
-    j = Glfw.GLFW_KEY_J,
-    k = Glfw.GLFW_KEY_K,
-    l = Glfw.GLFW_KEY_L,
-    m = Glfw.GLFW_KEY_M,
-    n = Glfw.GLFW_KEY_N,
-    o = Glfw.GLFW_KEY_O,
-    p = Glfw.GLFW_KEY_P,
-    q = Glfw.GLFW_KEY_Q,
-    r = Glfw.GLFW_KEY_R,
-    s = Glfw.GLFW_KEY_S,
-    t = Glfw.GLFW_KEY_T,
-    u = Glfw.GLFW_KEY_U,
-    v = Glfw.GLFW_KEY_V,
-    w = Glfw.GLFW_KEY_W,
-    x = Glfw.GLFW_KEY_X,
-    y = Glfw.GLFW_KEY_Y,
-    z = Glfw.GLFW_KEY_Z,
-    // 数字键
-    num0 = Glfw.GLFW_KEY_0,
-    num1 = Glfw.GLFW_KEY_1,
-    num2 = Glfw.GLFW_KEY_2,
-    num3 = Glfw.GLFW_KEY_3,
-    num4 = Glfw.GLFW_KEY_4,
-    num5 = Glfw.GLFW_KEY_5,
-    num6 = Glfw.GLFW_KEY_6,
-    num7 = Glfw.GLFW_KEY_7,
-    num8 = Glfw.GLFW_KEY_8,
-    num9 = Glfw.GLFW_KEY_9,
-    // 功能键
-    space = Glfw.GLFW_KEY_SPACE,
-    escape = Glfw.GLFW_KEY_ESCAPE,
-    enter = Glfw.GLFW_KEY_ENTER,
-    tab = Glfw.GLFW_KEY_TAB,
-    backspace = Glfw.GLFW_KEY_BACKSPACE,
-    insert = Glfw.GLFW_KEY_INSERT,
-    delete = Glfw.GLFW_KEY_DELETE,
-    right = Glfw.GLFW_KEY_RIGHT,
-    left = Glfw.GLFW_KEY_LEFT,
-    down = Glfw.GLFW_KEY_DOWN,
-    up = Glfw.GLFW_KEY_UP,
-    page_up = Glfw.GLFW_KEY_PAGE_UP,
-    page_down = Glfw.GLFW_KEY_PAGE_DOWN,
-    home = Glfw.GLFW_KEY_HOME,
-    end = Glfw.GLFW_KEY_END,
-    caps_lock = Glfw.GLFW_KEY_CAPS_LOCK,
-    scroll_lock = Glfw.GLFW_KEY_SCROLL_LOCK,
-    num_lock = Glfw.GLFW_KEY_NUM_LOCK,
-    print_screen = Glfw.GLFW_KEY_PRINT_SCREEN,
-    pause = Glfw.GLFW_KEY_PAUSE,
-    // 修饰键
-    left_shift = Glfw.GLFW_KEY_LEFT_SHIFT,
-    left_control = Glfw.GLFW_KEY_LEFT_CONTROL,
-    left_alt = Glfw.GLFW_KEY_LEFT_ALT,
-    left_super = Glfw.GLFW_KEY_LEFT_SUPER,
-    right_shift = Glfw.GLFW_KEY_RIGHT_SHIFT,
-    right_control = Glfw.GLFW_KEY_RIGHT_CONTROL,
-    right_alt = Glfw.GLFW_KEY_RIGHT_ALT,
-    right_super = Glfw.GLFW_KEY_RIGHT_SUPER,
-    // F 键
-    f1 = Glfw.GLFW_KEY_F1,
-    f2 = Glfw.GLFW_KEY_F2,
-    f3 = Glfw.GLFW_KEY_F3,
-    f4 = Glfw.GLFW_KEY_F4,
-    f5 = Glfw.GLFW_KEY_F5,
-    f6 = Glfw.GLFW_KEY_F6,
-    f7 = Glfw.GLFW_KEY_F7,
-    f8 = Glfw.GLFW_KEY_F8,
-    f9 = Glfw.GLFW_KEY_F9,
-    f10 = Glfw.GLFW_KEY_F10,
-    f11 = Glfw.GLFW_KEY_F11,
-    f12 = Glfw.GLFW_KEY_F12,
-    // 其他键
-    grave_accent = Glfw.GLFW_KEY_GRAVE_ACCENT,
-    minus = Glfw.GLFW_KEY_MINUS,
-    equal = Glfw.GLFW_KEY_EQUAL,
-    left_bracket = Glfw.GLFW_KEY_LEFT_BRACKET,
-    right_bracket = Glfw.GLFW_KEY_RIGHT_BRACKET,
-    backslash = Glfw.GLFW_KEY_BACKSLASH,
-    semicolon = Glfw.GLFW_KEY_SEMICOLON,
-    apostrophe = Glfw.GLFW_KEY_APOSTROPHE,
-    comma = Glfw.GLFW_KEY_COMMA,
-    period = Glfw.GLFW_KEY_PERIOD,
-    slash = Glfw.GLFW_KEY_SLASH,
-    world_1 = Glfw.GLFW_KEY_WORLD_1,
-    world_2 = Glfw.GLFW_KEY_WORLD_2,
-};
 
 const Glfw = @import("cimports.zig").Glfw;
 const Gctx = @import("gctx.zig");
 const Algebra = @import("zalgebra");
 const Vec2_f64 = Algebra.Vec2_f64;
+const Input = @import("input.zig");
+const std = @import("std");

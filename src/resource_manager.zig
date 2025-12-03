@@ -159,7 +159,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
                                         var pos = [3]f32{ v[0], v[1], v[2] };
                                         //对于没有动画的静态模型，直接为其计算世界变换
                                         if (gltf.data.animations.len == 0) {
-                                            const world_pos = world_matrix.mulByVec4(.{ .data = .{ v[0], v[1], v[2], 1.0 } });
+                                            const world_pos = world_matrix.mulByVec3(.{ .data = .{ v[0], v[1], v[2] } });
                                             pos = .{ world_pos.data[0], world_pos.data[1], world_pos.data[2] };
                                         }
                                         try primitive_vertex_data.append(allocator, .{

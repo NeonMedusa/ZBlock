@@ -21,16 +21,15 @@ pub fn init() @This() {
     };
 }
 
-pub fn updateFromMouse(self: *@This(), window: Window) void {
+pub fn updateFromMouse(self: *@This(), window: *Window) void {
+    const input = window.input;
     // 获取鼠标位置
-    const mousePos = window.getCursorPos();
+    const mousePos = input.getCursorPos();
     // 重置鼠标位置到窗口中心
-    const centerX = window.widthF / 2.0;
-    const centerY = window.heightF / 2.0;
-    window.setCursorPos(centerX, centerY);
+    input.setCursorToCenter();
     // 更新相机角度
-    self.yaw += @as(f32, @floatCast(mousePos.x - centerX)) * self.sensitivity;
-    self.pitch -= @as(f32, @floatCast(mousePos.y - centerY)) * self.sensitivity;
+    self.yaw += @as(f32, @floatCast(mousePos.x - window.center_x)) * self.sensitivity;
+    self.pitch -= @as(f32, @floatCast(mousePos.y - window.center_y)) * self.sensitivity;
     // 限制俯仰角
     if (self.pitch > 89.0) self.pitch = 89.0;
     if (self.pitch < -89.0) self.pitch = -89.0;
@@ -40,15 +39,17 @@ pub fn updateFromMouse(self: *@This(), window: Window) void {
 
 // 键盘控制移动
 pub fn updateFromKeyboard(self: *@This(), window: Window, delta_time: f32) void {
+    const input = window.input;
+
     const velocity = self.movement_speed * delta_time;
     const right = self.front.cross(self.up).norm();
 
-    if (window.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
-    if (window.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));
-    if (window.isKeyPressed(.a)) self.position = self.position.sub(right.scale(velocity));
-    if (window.isKeyPressed(.d)) self.position = self.position.add(right.scale(velocity));
-    if (window.isKeyPressed(.space)) self.position = self.position.add(self.up.scale(velocity));
-    if (window.isKeyPressed(.left_control) or window.isKeyPressed(.right_control)) {
+    if (input.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
+    if (input.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));
+    if (input.isKeyPressed(.a)) self.position = self.position.sub(right.scale(velocity));
+    if (input.isKeyPressed(.d)) self.position = self.position.add(right.scale(velocity));
+    if (input.isKeyPressed(.space)) self.position = self.position.add(self.up.scale(velocity));
+    if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control)) {
         self.position = self.position.sub(self.up.scale(velocity));
     }
 }

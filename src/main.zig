@@ -5,12 +5,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // 创建窗口（NO_API模式）
-    var window = try Window.init("ZigGame", 640, 480);
-    defer window.deinit();
+    // 创建窗口
+    var window = try Window.init(allocator, "ZigGame", 640, 480);
+    defer window.deinit(allocator);
 
     // 初始化wgpu
-    var gctx = try Gctx.init(&window);
+    var gctx = try Gctx.init(window);
     defer gctx.deinit();
 
     // 初始化资源管理器
@@ -26,22 +26,23 @@ pub fn main() !void {
     defer render_pipeline.deinit();
 
     // 初始化场景
-    var scene = Scene.init(allocator, &window);
+    var scene = Scene.init(allocator, window);
     defer scene.deinit();
 
     // 为场景添加一些实例（仅用于调试）
     try initScene(&scene);
 
     // 初始化UI系统
-    var ui_system = try UiSystem.init(allocator, &gctx, &window);
+    var ui_system = try UiSystem.init(allocator, &gctx, window);
     defer ui_system.deinit();
 
     // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
 
     // 主循环
-    while (window.shouldClose()) {
-        Window.pollEvents();
+    while (!window.shouldClose()) {
+        // 先更新窗口的输入和事件
+        window.pollEvents();
         // 如果主菜单不可见，则更新场景
         if (!main_menu.visible)
             try scene.update();

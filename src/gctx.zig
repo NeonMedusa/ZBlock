@@ -93,8 +93,8 @@ pub fn init(
         .format = Wgpu.WGPUTextureFormat_BGRA8UnormSrgb,
         .usage = Wgpu.WGPUTextureUsage_RenderAttachment,
         .alphaMode = Wgpu.WGPUCompositeAlphaMode_Auto,
-        .width = window.width,
-        .height = window.height,
+        .width = window.width_u,
+        .height = window.height_u,
         .presentMode = Wgpu.WGPUPresentMode_Immediate,
     };
     Wgpu.wgpuSurfaceConfigure(surface, &surface_config);

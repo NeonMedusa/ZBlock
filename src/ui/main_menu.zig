@@ -1,8 +1,9 @@
 //main_menu.zig
 visible: bool = true,
 pub fn update(self: *@This(), ui_system: *UiSystem) void {
+    const input = ui_system.window.input;
     // ESC键切换主菜单是否可见
-    if (ui_system.window.isKeyPressed(.escape))
+    if (input.isKeyDown(.escape))
         self.visible = !self.visible;
     // 如果自身为不可见状态，则直接返回不做渲染
     if (!self.visible) return;
