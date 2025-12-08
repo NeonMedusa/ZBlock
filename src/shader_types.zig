@@ -6,15 +6,33 @@ pub const SceneUniform = struct {
     _padding: [3]f32 = undefined, // 需要对齐到16字节
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
-        const proj_matrix = Algebra.perspective(70, aspect_ratio, 0.001, 100);
-        const view_matrix = Algebra.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero(), Vec3.up());
+        const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 100);
+        const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero(), Vec3.up());
         return .{
             .proj_matrix = proj_matrix,
             .view_matrix = view_matrix,
-            .time = 0,
+            .time = window.time,
         };
     }
 };
+
+pub const UiUniform = struct {
+    ortho_matrix: Mat4,
+    pub fn init(window: Window) @This() {
+        const ortho_matrix = Mat4.orthographic(
+            0,
+            window.width,
+            window.height,
+            0,
+            -1.0,
+            1.0,
+        );
+        return @This(){
+            .ortho_matrix = ortho_matrix,
+        };
+    }
+};
+
 pub const VertexAttribute = struct {
     position: [3]f32, //顶点位置
     color_uv: [2]f32 = .{ 0, 0 }, //纹理UV

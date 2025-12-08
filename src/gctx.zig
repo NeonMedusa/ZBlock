@@ -1,3 +1,4 @@
+// gctx.zig:
 instance: Wgpu.WGPUInstance,
 surface: Wgpu.WGPUSurface,
 adapter: Wgpu.WGPUAdapter,
@@ -20,24 +21,21 @@ pub fn deinit(self: @This()) void {
 }
 
 // 初始化WGPU上下文
-pub fn init(
-    window: *Window,
-) !@This() {
+pub fn init(window: *Window) !@This() {
     // 创建WGPU实例
     const instance_extras = Wgpu.WGPUInstanceExtras{
         .chain = Wgpu.WGPUChainedStruct{
             .sType = Wgpu.WGPUSType_InstanceExtras,
         },
-        .backends = Wgpu.WGPUInstanceBackend_DX12, // 或者使用具体的后端组合
+        .backends = Wgpu.WGPUInstanceBackend_DX12,
     };
-    // 2. 创建主描述符，并将扩展结构体链入
+    // 创建主描述符，并将扩展结构体链入
     const instance_descriptor = Wgpu.WGPUInstanceDescriptor{
         .nextInChain = @ptrCast(&instance_extras.chain), // 通过链式结构连接
     };
-    // 3. 创建实例
+    // 创建实例
     const instance = Wgpu.wgpuCreateInstance(&instance_descriptor);
     if (instance == null) return error.InstanceCreationFailed;
-
     // 创建Surface
     const hwnd = Glfw.glfwGetWin32Window(window.handle);
     const hinstance = Glfw.GetModuleHandleW(null); // 获取实例句柄
@@ -53,7 +51,6 @@ pub fn init(
     };
     const surface = Wgpu.wgpuInstanceCreateSurface(instance, &surface_desc);
     if (surface == null) return error.SurfaceCreationFailed;
-
     // 创建适配器
     const adapter_options = Wgpu.WGPURequestAdapterOptions{
         .compatibleSurface = surface,
@@ -69,13 +66,11 @@ pub fn init(
         callback_info,
     );
     if (adapter == null) return error.AdapterRequestFailed;
-
     // 创建设备
     const required_features = &[_]Wgpu.WGPUFeatureName{
         Wgpu.WGPUFeatureName_IndirectFirstInstance,
             // wgpu.WGPUFeatureName_TextureCompressionBC,
     };
-
     var device: Wgpu.WGPUDevice = undefined;
     const device_desc = Wgpu.WGPUDeviceDescriptor{
         .requiredFeatures = required_features,
@@ -134,6 +129,52 @@ pub fn init(
     };
 }
 
+// 重建交换链和深度纹理
+pub fn resizeSwapChain(self: *Gctx, new_width: u32, new_height: u32) void {
+    // 确保最小尺寸
+    const width = @max(new_width, 1);
+    const height = @max(new_height, 1);
+    std.debug.print("resizing swapchain...: {}x{}\n", .{ width, height });
+    // 更新surface配置
+    self.surface_config.width = width;
+    self.surface_config.height = height;
+    // 重新配置surface
+    Wgpu.wgpuSurfaceConfigure(self.surface, &self.surface_config);
+    // 重建深度纹理
+    self.recreateDepthTexture(width, height);
+    std.debug.print("resize swapchain complate\n", .{});
+}
+
+// 重建深度纹理
+fn recreateDepthTexture(self: *Gctx, width: u32, height: u32) void {
+    // 释放旧的深度纹理资源
+    if (self.depth_texture_view != null)
+        Wgpu.wgpuTextureViewRelease(self.depth_texture_view);
+    if (self.depth_texture != null)
+        Wgpu.wgpuTextureRelease(self.depth_texture);
+    // 创建新的深度纹理
+    self.depth_texture = Wgpu.wgpuDeviceCreateTexture(self.device, &.{
+        .usage = Wgpu.WGPUTextureUsage_RenderAttachment,
+        .dimension = Wgpu.WGPUTextureDimension_2D,
+        .size = .{
+            .width = width,
+            .height = height,
+            .depthOrArrayLayers = 1,
+        },
+        .format = Wgpu.WGPUTextureFormat_Depth24Plus,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+        .viewFormatCount = 0,
+        .viewFormats = null,
+    });
+    if (self.depth_texture == null)
+        std.debug.print("recreateDepthTexture Failed", .{});
+    // 创建深度纹理视图
+    self.depth_texture_view = Wgpu.wgpuTextureCreateView(self.depth_texture, null);
+    if (self.depth_texture_view == null)
+        std.debug.print("recreateDepthTexture Failed", .{});
+}
+
 // 请求适配器回调函数
 fn requestAdapterCallback(
     status: Wgpu.WGPURequestAdapterStatus,
@@ -166,6 +207,7 @@ fn requestDeviceCallback(
     }
 }
 
+// 创建shader模块
 pub fn createShaderModule(gctx: *Gctx, shader_file_path: []const u8) !Wgpu.WGPUShaderModule {
     const code_file = try std.fs.cwd().openFile(shader_file_path, .{});
     defer code_file.close();
@@ -189,6 +231,7 @@ pub fn createShaderModule(gctx: *Gctx, shader_file_path: []const u8) !Wgpu.WGPUS
     return Wgpu.wgpuDeviceCreateShaderModule(gctx.device, &shader_desc);
 }
 
+// 编译期自动生成WGPUVertexAttribute
 pub fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(VertexType).len]Wgpu.WGPUVertexAttribute {
     const fields = std.meta.fields(VertexType);
     var attributes: [fields.len]Wgpu.WGPUVertexAttribute = undefined;
@@ -216,6 +259,5 @@ pub fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(Vert
 const std = @import("std");
 const Window = @import("window.zig");
 const Gctx = @import("gctx.zig");
-
 const Wgpu = @import("cimports.zig").Wgpu;
 const Glfw = @import("cimports.zig").Glfw;

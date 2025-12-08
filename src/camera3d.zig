@@ -7,7 +7,7 @@ yaw: f32 = -90.0,
 pitch: f32 = 0.0,
 sensitivity: f32 = 0.1,
 movement_speed: f32 = 5.0,
-
+// 初始化
 pub fn init() @This() {
     return .{
         .position = Vec3.zero(),
@@ -20,9 +20,10 @@ pub fn init() @This() {
         .movement_speed = 5.0,
     };
 }
-
-pub fn updateFromMouse(self: *@This(), window: *Window) void {
-    const input = window.input;
+// 鼠标控制方向
+pub fn updateFromMouse(self: *@This(), game: *Game) void {
+    const input = game.input;
+    const window = game.window;
     // 获取鼠标位置
     const mousePos = input.getCursorPos();
     // 重置鼠标位置到窗口中心
@@ -36,37 +37,33 @@ pub fn updateFromMouse(self: *@This(), window: *Window) void {
     // 更新相机方向向量
     self.updateVectors();
 }
-
 // 键盘控制移动
-pub fn updateFromKeyboard(self: *@This(), window: Window, delta_time: f32) void {
-    const input = window.input;
-
+pub fn updateFromKeyboard(self: *@This(), game: *Game, delta_time: f32) void {
+    const input = game.input;
     const velocity = self.movement_speed * delta_time;
     const right = self.front.cross(self.up).norm();
-
     if (input.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
     if (input.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));
     if (input.isKeyPressed(.a)) self.position = self.position.sub(right.scale(velocity));
     if (input.isKeyPressed(.d)) self.position = self.position.add(right.scale(velocity));
     if (input.isKeyPressed(.space)) self.position = self.position.add(self.up.scale(velocity));
-    if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control)) {
+    if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control))
         self.position = self.position.sub(self.up.scale(velocity));
-    }
 }
-
+// 更新相机方向向量
 fn updateVectors(self: *@This()) void {
     const yawRad = Algebra.toRadians(self.yaw);
     const pitchRad = Algebra.toRadians(self.pitch);
     self.front = Vec3.new(@cos(yawRad) * @cos(pitchRad), @sin(pitchRad), @sin(yawRad) * @cos(pitchRad)).norm();
     self.up = self.front.cross(self.world_up).norm().cross(self.front).norm();
 }
-
+// 获取视图矩阵
 pub fn getViewMatrix(self: @This()) Mat4 {
     return Algebra.lookAt(self.position, self.position.add(self.front), self.up);
 }
-
+// 引用
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
-const Window = @import("window.zig");
 const Glfw = @import("cimports.zig").Glfw;
+const Game = @import("game.zig");

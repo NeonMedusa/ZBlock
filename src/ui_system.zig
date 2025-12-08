@@ -1,20 +1,26 @@
-//ui_system.zig
+// ui_system.zig
 const UiSystem = @This();
 allocator: std.mem.Allocator,
 render_pipeline: UiRenderPipeline,
-window: *Window,
+game_ptr: *Game,
+// ui通用缓冲区
+ubo: UiUniform,
+uniform_buffer: Wgpu.WGPUBuffer,
 // 顶点/索引缓冲区限制
 max_vertices: usize,
 max_indices: usize,
 // 顶点/索引数据，每帧更新
-frame_vertices: std.ArrayList(UiVertex),
-frame_indices: std.ArrayList(u32),
+frame_vertices: []UiVertex,
+frame_indices: []u32,
+// 追踪实际使用的数量
+vertex_count: usize,
+index_count: usize,
 // 顶点/索引缓冲区，每帧更新
 vertex_buffer: Wgpu.WGPUBuffer,
 index_buffer: Wgpu.WGPUBuffer,
 // 最基本的按钮
 pub fn button(self: *UiSystem, x: f32, y: f32) bool {
-    const input = self.window.input;
+    const input = self.game_ptr.input;
     const width: f32 = 100;
     const height: f32 = 30;
     // 根据鼠标位置调整状态
@@ -36,17 +42,25 @@ pub fn button(self: *UiSystem, x: f32, y: f32) bool {
     // self.drawText(x + 5, y + 5, text, [4]f32{ 1, 1, 1, 1 });
     return is_clicked;
 }
-
 // 析构函数
 pub fn deinit(self: *@This()) void {
-    self.frame_vertices.deinit(self.allocator);
-    self.frame_indices.deinit(self.allocator);
+    // 释放CPU端内存
+    self.allocator.free(self.frame_vertices);
+    self.allocator.free(self.frame_indices);
+
     Wgpu.wgpuBufferRelease(self.vertex_buffer);
     Wgpu.wgpuBufferRelease(self.index_buffer);
+    Wgpu.wgpuBufferRelease(self.uniform_buffer);
 }
-pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, window: *Window) !UiSystem {
+pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game) !UiSystem {
+    var self: UiSystem = undefined;
+
     const max_vertices = 65536;
     const max_indices = 131072;
+
+    const frame_vertices = try allocator.alloc(UiVertex, max_vertices);
+    const frame_indices = try allocator.alloc(u32, max_indices);
+
     const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
         .size = max_vertices * @sizeOf(UiVertex),
         .usage = Wgpu.WGPUBufferUsage_CopyDst | Wgpu.WGPUBufferUsage_Vertex,
@@ -57,62 +71,91 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, window: *Window) !UiSyste
         .usage = Wgpu.WGPUBufferUsage_CopyDst | Wgpu.WGPUBufferUsage_Index,
         .mappedAtCreation = 0,
     });
-    return UiSystem{
-        .allocator = allocator,
-        .vertex_buffer = vertex_buffer,
-        .index_buffer = index_buffer,
-        .render_pipeline = try UiRenderPipeline.init(gctx, "resources/shaders/ui_render_shader.wgsl"),
-        .window = window,
-        .frame_vertices = std.ArrayList(UiVertex){},
-        .frame_indices = std.ArrayList(u32){},
-        .max_vertices = max_vertices,
-        .max_indices = max_indices,
-    };
+    const uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+        .size = @sizeOf(UiUniform),
+        .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
+        .mappedAtCreation = 0,
+    });
+    const ubo = UiUniform.init(game.window);
+
+    self.allocator = allocator;
+    self.vertex_buffer = vertex_buffer;
+    self.index_buffer = index_buffer;
+    self.game_ptr = game;
+    self.frame_vertices = frame_vertices;
+    self.frame_indices = frame_indices;
+    self.max_vertices = max_vertices;
+    self.max_indices = max_indices;
+    self.ubo = ubo;
+    self.uniform_buffer = uniform_buffer;
+
+    self.frame_vertices = frame_vertices;
+    self.frame_indices = frame_indices;
+    self.vertex_count = 0;
+    self.index_count = 0;
+
+    //注：先创建好所有buffer，再创建渲染管线
+    self.render_pipeline = try UiRenderPipeline.init(gctx, "resources/shaders/ui_render_shader.wgsl", &self);
+    return self;
 }
 
 // 每帧开始时重置数据
 pub fn beginFrame(self: *@This()) void {
-    self.frame_vertices.clearRetainingCapacity();
-    self.frame_indices.clearRetainingCapacity();
+    // 重置计数器，复用内存
+    self.vertex_count = 0;
+    self.index_count = 0;
 }
 
 // 每帧结束时更新GPU缓冲区
 pub fn endFrame(self: *@This(), gctx: *Gctx) !void {
-    if (self.frame_vertices.items.len == 0) return;
+    if (self.index_count == 0) return;
+    // 只上传实际使用的数据
     Wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         self.vertex_buffer,
         0,
-        self.frame_vertices.items.ptr,
-        @as(usize, @intCast(self.frame_vertices.items.len)) * @sizeOf(UiVertex),
+        self.frame_vertices.ptr,
+        self.vertex_count * @sizeOf(UiVertex),
     );
     Wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
         self.index_buffer,
         0,
-        self.frame_indices.items.ptr,
-        @as(usize, @intCast(self.frame_indices.items.len)) * @sizeOf(u32),
+        self.frame_indices.ptr,
+        self.index_count * @sizeOf(u32),
+    );
+    Wgpu.wgpuQueueWriteBuffer(
+        gctx.queue,
+        self.uniform_buffer,
+        0,
+        &self.ubo,
+        Wgpu.wgpuBufferGetSize(self.uniform_buffer),
     );
 }
 
 // 矩形绘制
 pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color: [4]f32) void {
-    const base_vertex = @as(u16, @intCast(self.frame_vertices.items.len));
-    // 定义矩形的4个顶点（Z坐标可以用于深度排序）
-    const vertices = [_]UiVertex{
-        .{ .pos = [3]f32{ x, y, 0 }, .color = color }, // 左下
-        .{ .pos = [3]f32{ x + width, y, 0 }, .color = color }, // 右下
-        .{ .pos = [3]f32{ x + width, y + height, 0 }, .color = color }, // 右上
-        .{ .pos = [3]f32{ x, y + height, 0 }, .color = color }, // 左上
-    };
-    // 定义三角形的索引（两个三角形组成矩形）
-    const indices = [_]u32{
-        base_vertex + 0, base_vertex + 1, base_vertex + 2, // 第一个三角形
-        base_vertex + 0, base_vertex + 2, base_vertex + 3, // 第二个三角形
-    };
-    // 添加到帧数据中
-    self.frame_vertices.appendSlice(self.allocator, &vertices) catch return;
-    self.frame_indices.appendSlice(self.allocator, &indices) catch return;
+    // 检查是否有足够空间
+    if (self.vertex_count + 4 > self.max_vertices or self.index_count + 6 > self.max_indices) {
+        std.debug.print("UI缓冲区溢出！\n", .{});
+        return;
+    }
+    const base_vertex = @as(u32, @intCast(self.vertex_count));
+    // 直接写入预分配的内存
+    self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ x, y, 0 }, .color = color };
+    self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ x + width, y, 0 }, .color = color };
+    self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ x + width, y + height, 0 }, .color = color };
+    self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ x, y + height, 0 }, .color = color };
+
+    self.frame_indices[self.index_count] = base_vertex + 0;
+    self.frame_indices[self.index_count + 1] = base_vertex + 1;
+    self.frame_indices[self.index_count + 2] = base_vertex + 2;
+    self.frame_indices[self.index_count + 3] = base_vertex + 0;
+    self.frame_indices[self.index_count + 4] = base_vertex + 2;
+    self.frame_indices[self.index_count + 5] = base_vertex + 3;
+
+    self.vertex_count += 4;
+    self.index_count += 6;
 }
 // UI顶点属性
 pub const UiVertex = struct {
@@ -126,11 +169,18 @@ const UiRenderPipeline = struct {
     bind_group: Wgpu.WGPUBindGroup,
     pipeline_layout: Wgpu.WGPUPipelineLayout,
     shader_module: Wgpu.WGPUShaderModule,
-    pub fn init(gctx: *Gctx, shader_file_path: []const u8) !@This() {
+    pub fn init(gctx: *Gctx, shader_file_path: []const u8, ui_system: *UiSystem) !@This() {
         const shader_module = try gctx.createShaderModule(shader_file_path);
         // 创建 binding group
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
-            // entries
+            .{ // uniform
+                .binding = 0,
+                .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
+                .buffer = .{
+                    .type = Wgpu.WGPUBufferBindingType_Uniform,
+                    .hasDynamicOffset = 0,
+                },
+            },
         };
         const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(
             gctx.device,
@@ -143,7 +193,12 @@ const UiRenderPipeline = struct {
             .layout = bind_group_layout,
             .entryCount = bgl_entries.len,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
-                //entries
+                .{ // uniform
+                    .binding = 0,
+                    .buffer = ui_system.uniform_buffer,
+                    .offset = 0,
+                    .size = Wgpu.wgpuBufferGetSize(ui_system.uniform_buffer),
+                },
             },
         });
         // 创建渲染管线
@@ -220,7 +275,9 @@ const UiRenderPipeline = struct {
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");
-const Window = @import("window.zig");
+const Game = @import("game.zig");
 const Gltf = @import("zgltf");
 const Wgpu = @import("cimports.zig").Wgpu;
 const ResourceManager = @import("resource_manager.zig");
+const ShaderTypes = @import("shader_types.zig");
+const UiUniform = ShaderTypes.UiUniform;

@@ -1,0 +1,10 @@
+下一步：
+完善UI系统，然后为UI系统添加文字渲染功能；
+实现完整的UI系统后，尝试开发地图编辑功能；
+有地图编辑功能后，尝试ECS架构和群体寻路、避障算法；
+
+已知问题：
+wgpuCommandEncoderFinish函数会导致内存泄漏，待wgpu-native库修复，
+详见：https://github.com/gfx-rs/wgpu-native/issues/527；
+纹理装箱装不下时似乎不会创建新的纹理图集；
+每个模型只支持单个动画和单个色彩纹理；

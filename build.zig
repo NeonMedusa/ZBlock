@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
     // 创建主程序
     const exe = b.addExecutable(.{
         .name = "ZigGame",
@@ -71,6 +72,6 @@ pub fn build(b: *std.Build) void {
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args|
         run_cmd.addArgs(args);
-    const run_step = b.step("run", "运行程序");
+    const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 }
