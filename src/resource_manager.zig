@@ -34,7 +34,7 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
     Wgpu.wgpuTextureViewRelease(self.anime_altas_view);
     Wgpu.wgpuBufferRelease(self.textures_info_buffer);
 }
-pub fn init(allocator: std.mem.Allocator, gctx: *Gctx) !@This() {
+pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
     const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, MAX_ENTITIES);
     const indexed_indirect_cmds_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &Wgpu.WGPUBufferDescriptor{
         .size = @sizeOf(IndexedIndirectCmd) * MAX_ENTITIES,

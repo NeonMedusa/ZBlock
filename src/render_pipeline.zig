@@ -4,8 +4,8 @@ bind_group_layout: Wgpu.WGPUBindGroupLayout,
 bind_group: Wgpu.WGPUBindGroup,
 pipeline_layout: Wgpu.WGPUPipelineLayout,
 shader_module: Wgpu.WGPUShaderModule,
-pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManager) !@This() {
-    const shader_module = try gctx.createShaderModule(shader_file_path);
+pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
+    const shader_module = try game.gctx.createShaderModule(shader_file_path);
     // 创建 binding group
     const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
         .{ // scene_uniform
@@ -50,46 +50,46 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
         },
     };
     const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(
-        gctx.device,
+        game.gctx.device,
         &Wgpu.WGPUBindGroupLayoutDescriptor{
             .entryCount = bgl_entries.len,
             .entries = &bgl_entries,
         },
     );
-    const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
+    const bind_group = Wgpu.wgpuDeviceCreateBindGroup(game.gctx.device, &Wgpu.WGPUBindGroupDescriptor{
         .layout = bind_group_layout,
         .entryCount = bgl_entries.len,
         .entries = &[_]Wgpu.WGPUBindGroupEntry{
             .{ // scene_uniform
                 .binding = 0,
-                .buffer = grm.scene_uniform_buffer,
+                .buffer = game.res_manager.scene_uniform_buffer,
                 .offset = 0,
-                .size = Wgpu.wgpuBufferGetSize(grm.scene_uniform_buffer),
+                .size = Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
             },
             .{ // entities_data
                 .binding = 1,
-                .buffer = grm.entities_data_buffer,
+                .buffer = game.res_manager.entities_data_buffer,
                 .offset = 0,
-                .size = Wgpu.wgpuBufferGetSize(grm.entities_data_buffer),
+                .size = Wgpu.wgpuBufferGetSize(game.res_manager.entities_data_buffer),
             },
             .{ // color_altas
                 .binding = 2,
-                .textureView = grm.color_altas_view,
+                .textureView = game.res_manager.color_altas_view,
             },
             .{ // anime_altas
                 .binding = 3,
-                .textureView = grm.anime_altas_view,
+                .textureView = game.res_manager.anime_altas_view,
             },
             .{ // textures_info
                 .binding = 4,
-                .buffer = grm.textures_info_buffer,
+                .buffer = game.res_manager.textures_info_buffer,
                 .offset = 0,
-                .size = Wgpu.wgpuBufferGetSize(grm.textures_info_buffer),
+                .size = Wgpu.wgpuBufferGetSize(game.res_manager.textures_info_buffer),
             },
         },
     });
     // 创建渲染管线
-    const pipeline_layout = Wgpu.wgpuDeviceCreatePipelineLayout(gctx.device, &Wgpu.WGPUPipelineLayoutDescriptor{
+    const pipeline_layout = Wgpu.wgpuDeviceCreatePipelineLayout(game.gctx.device, &Wgpu.WGPUPipelineLayoutDescriptor{
         .bindGroupLayoutCount = 1,
         .bindGroupLayouts = &bind_group_layout,
     });
@@ -142,7 +142,7 @@ pub fn init(gctx: *Gctx, shader_file_path: []const u8, grm: *const ResourceManag
             .depthBiasClamp = 0.0,
         },
     };
-    const pipeline = Wgpu.wgpuDeviceCreateRenderPipeline(gctx.device, &pipeline_desc);
+    const pipeline = Wgpu.wgpuDeviceCreateRenderPipeline(game.gctx.device, &pipeline_desc);
     return @This(){
         .handle = pipeline,
         .bind_group_layout = bind_group_layout,
@@ -168,6 +168,7 @@ const Window = @import("window.zig");
 const Gltf = @import("zgltf");
 const Wgpu = @import("cimports.zig").Wgpu;
 const ResourceManager = @import("resource_manager.zig");
+const Game = @import("game.zig");
 
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;

@@ -1,6 +1,6 @@
-// input.zig - 管理所有输入相关
+// input.zig:
 const Input = @This();
-window: *Window,
+game_ptr: *Game,
 // 当前键鼠状态
 key_states: [512]KeyState = [_]KeyState{.up} ** 512,
 mouse_states: [8]KeyState = [_]KeyState{.up} ** 8,
@@ -16,8 +16,8 @@ mouse_dy: f64 = 0,
 scroll_x: f64 = 0,
 scroll_y: f64 = 0,
 //初始化
-pub fn init(window: *Window) @This() {
-    return .{ .window = window };
+pub fn init(game: *Game) @This() {
+    return .{ .game_ptr = game };
 }
 // 帧开始时重置状态
 pub fn beginFrame(self: *Input) void {
@@ -109,7 +109,7 @@ pub fn getCursorPos(self: *const Input) struct { x: f64, y: f64 } {
 pub fn getCursorPosThroughPolling(self: @This()) struct { x: f64, y: f64 } {
     var x: f64 = 0;
     var y: f64 = 0;
-    Glfw.glfwGetCursorPos(self.window.handle, &x, &y);
+    Glfw.glfwGetCursorPos(self.game_ptr.window.handle, &x, &y);
     return .{ .x = x, .y = y };
 }
 ///返回光标上一帧和这一帧之间的位置差距，注意：调用setCursorPos和setCursorToCenter函数会触发cursorPosCallback，从而影响到此函数的返回结果
@@ -121,11 +121,11 @@ pub fn getScroll(self: *const Input) struct { x: f64, y: f64 } {
 }
 ///注意：调用此数会触发cursorPosCallback，从而影响到getMouseDelta函数的返回结果
 pub fn setCursorPos(self: @This(), xpos: f64, ypos: f64) void {
-    Glfw.glfwSetCursorPos(self.window.handle, xpos, ypos);
+    Glfw.glfwSetCursorPos(self.game_ptr.window.handle, xpos, ypos);
 }
 ///注意：调用此数会触发cursorPosCallback，从而影响到getMouseDelta函数的返回结果
 pub fn setCursorToCenter(self: @This()) void {
-    self.setCursorPos(self.window.center_x, self.window.center_y);
+    self.setCursorPos(self.game_ptr.window.center_x, self.game_ptr.window.center_y);
 }
 // 按键状态
 pub const KeyState = enum {
@@ -239,3 +239,4 @@ pub const Key = enum(i32) {
 const std = @import("std");
 const Glfw = @import("cimports.zig").Glfw;
 const Window = @import("window.zig");
+const Game = @import("game.zig");

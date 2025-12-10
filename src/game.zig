@@ -22,19 +22,18 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const window = try Window.init(self, "ZigGame", 640, 480);
     self.window = window;
     // 初始化输入系统
-    const input = Input.init(&self.window);
+    const input = Input.init(self);
     self.input = input;
     // 初始化wgpu
-    var gctx = try Gctx.init(&self.window);
+    const gctx = try Gctx.init(self.window);
     self.gctx = gctx;
     // 初始化资源管理器
-    var grm = try ResourceManager.init(allocator, &self.gctx);
-    self.res_manager = grm;
+    const res_manager = try ResourceManager.init(allocator, self.gctx);
+    self.res_manager = res_manager;
     // 创建渲染管线
     const render_pipeline = try RenderPipeline.init(
-        &gctx,
+        self,
         "resources/shaders/render_shader.wgsl",
-        &grm,
     );
     self.render_pipeline = render_pipeline;
     // 初始化场景

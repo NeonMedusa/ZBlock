@@ -21,7 +21,7 @@ pub fn deinit(self: @This()) void {
 }
 
 // 初始化WGPU上下文
-pub fn init(window: *Window) !@This() {
+pub fn init(window: Window) !@This() {
     // 创建WGPU实例
     const instance_extras = Wgpu.WGPUInstanceExtras{
         .chain = Wgpu.WGPUChainedStruct{
