@@ -149,6 +149,12 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
                             while (it.next()) |indice|
                                 try primitive_index_data.append(allocator, indice[0] + vertex_offset);
                         }
+
+                        // TODO:在这里为primitive绑定不同的纹理
+                        if (primitive.material) |material_idx| {
+                            _ = material_idx;
+                        }
+
                         // 处理顶点
                         for (primitive.attributes) |attribute| {
                             switch (attribute) {

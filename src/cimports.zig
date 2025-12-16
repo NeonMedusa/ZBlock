@@ -8,3 +8,7 @@ pub const Glfw = @cImport({
 pub const Wgpu = @cImport({
     @cInclude("wgpu.h");
 });
+
+pub const Stb = @cImport({
+    @cInclude("stb_truetype.h");
+});

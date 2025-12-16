@@ -1,3 +1,4 @@
+// build.zig:
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -14,8 +15,10 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    // GLFW需要libc
+    exe.linkLibC();
+
     // GLFW
-    exe.linkLibC(); // glfw需要libc
     exe.addIncludePath(b.path("libs/glfw-3.4.bin.WIN64/include/GLFW/"));
     exe.addLibraryPath(b.path("libs/glfw-3.4.bin.WIN64/lib-vc2022"));
     exe.linkSystemLibrary("glfw3");
@@ -34,6 +37,17 @@ pub fn build(b: *std.Build) void {
         "bin/wgpu_native.dll",
     );
     exe.step.dependOn(&copy_wgpu_dll.step);
+
+    // stb
+    const stb_module = b.createModule(.{
+        .root_source_file = b.path("libs/stb-master/stb.zig"),
+    });
+    stb_module.addIncludePath(b.path("libs/stb-master"));
+    exe.addCSourceFile(.{
+        .file = b.path("libs/stb-master/stb_impl.c"),
+        .flags = &[_][]const u8{},
+    });
+    exe.root_module.addImport("stb", stb_module);
 
     // zalgebra
     const zalgebra_dep = b.dependency("zalgebra", .{

@@ -1,19 +1,16 @@
 //ui_render_shader.wgsl
-@group(0) @binding(0) var<uniform> ui_uniform : UiUniform;          //场景常量数据
+@group(0) @binding(0) var<uniform> ui_uniform : UiUniform;  //场景常量数据
 struct UiUniform {
-    ortho_matrix : mat4x4f, //正交投影矩阵
+    ortho_matrix : mat4x4f,         //正交投影矩阵
 };
-
 struct VertexInput {
     @location(0) position : vec3f,  //位置 (像素坐标)
     @location(1) color : vec4f,     //颜色
 };
-
 struct VertexOutput {
     @builtin(position) position : vec4f,
     @location(0) color : vec4f,
 };
-
 @vertex
 fn vs_main(in : VertexInput) -> VertexOutput {
     var out : VertexOutput;
@@ -23,7 +20,6 @@ fn vs_main(in : VertexInput) -> VertexOutput {
     out.color = in.color;
     return out;
 }
-
 //片元着色
 @fragment
 fn fs_main(in : VertexOutput) -> @location(0) vec4f {

@@ -2,12 +2,12 @@ const std = @import("std");
 // 从组件文件导入所有组件类型
 const Components = @import("components.zig");
 // 实体只是一个唯一的标识符
-pub const Entity = u32;
+pub const EntityId = u32;
 // 世界结构体
 pub const World = struct {
     allocator: std.mem.Allocator,
-    entities: std.ArrayList(Entity),
-    next_entity_id: Entity = 0,
+    entities: std.ArrayList(EntityId),
+    next_entity_id: EntityId = 0,
     // 组件存储
     positions: std.ArrayList(?Components.Position3D),
     velocities: std.ArrayList(?Components.Velocity3D),
@@ -16,7 +16,7 @@ pub const World = struct {
     pub fn init(allocator: std.mem.Allocator) !World {
         return .{
             .allocator = allocator,
-            .entities = std.ArrayList(Entity){},
+            .entities = std.ArrayList(EntityId){},
             .positions = std.ArrayList(?Components.Position3D){},
             .velocities = std.ArrayList(?Components.Velocity3D){},
             .healths = std.ArrayList(?Components.Health){},
@@ -30,7 +30,7 @@ pub const World = struct {
         self.healths.deinit(self.allocator);
     }
     // 创建实体
-    pub fn createEntity(self: *World) !Entity {
+    pub fn createEntity(self: *World) !EntityId {
         const id = self.next_entity_id;
         self.next_entity_id += 1;
         try self.entities.append(id);
@@ -40,7 +40,7 @@ pub const World = struct {
         return id;
     }
     // 添加组件
-    pub fn addComponent(self: *World, entity: Entity, component: anytype) !void {
+    pub fn addComponent(self: *World, entity: EntityId, component: anytype) !void {
         const T = @TypeOf(component);
         if (T == Components.Position3D) {
             self.positions.items[entity] = component;
@@ -53,7 +53,7 @@ pub const World = struct {
         }
     }
     // 获取组件
-    pub fn getComponent(self: *World, entity: Entity, comptime T: type) ?*T {
+    pub fn getComponent(self: *World, entity: EntityId, comptime T: type) ?*T {
         return switch (T) {
             Components.Position3D => if (self.positions.items[entity]) |*pos| pos else null,
             Components.Velocity3D => if (self.velocities.items[entity]) |*vel| vel else null,
@@ -62,7 +62,7 @@ pub const World = struct {
         };
     }
     // 检查实体是否拥有某个组件
-    pub fn hasComponent(self: *World, entity: Entity, comptime T: type) bool {
+    pub fn hasComponent(self: *World, entity: EntityId, comptime T: type) bool {
         return self.getComponent(entity, T) != null;
     }
 };

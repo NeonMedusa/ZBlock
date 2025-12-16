@@ -1,8 +1,8 @@
 //render_shader.wgsl:
-@group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;            //场景常量数据
-@group(0) @binding(1) var<storage, read> entities_data : array<EntityData>; //游戏实例数据
-@group(0) @binding(2) var color_atlas : texture_2d_array<f32>;          //纹理图集数组
-@group(0) @binding(3) var anime_atlas : texture_2d_array<f32>;      //动画纹理图集数组
+@group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;                //场景常量数据
+@group(0) @binding(1) var<storage, read> entities_data : array<EntityData>;     //游戏实例数据
+@group(0) @binding(2) var color_atlas : texture_2d_array<f32>;                  //纹理图集数组
+@group(0) @binding(3) var anime_atlas : texture_2d_array<f32>;                  //动画纹理图集数组
 @group(0) @binding(4) var<storage, read> textures_info : array<TextureInfo>;    //动画纹理图集数组
 struct SceneUniform {
     proj_matrix : mat4x4f,  //投影矩阵
@@ -11,13 +11,10 @@ struct SceneUniform {
 };
 struct EntityData {
     transform : mat4x4f,            //实例的世界变换
-
     anime_texture_size : vec2f,     //动画纹理在纹理图集中的实际大小
     anime_texture_start : vec2i,    //动画纹理在纹理图集中的起始坐标
-
     anime_duration : f32,           //动画的持续时间
     cur_anime_time : f32,           //实例的当前动画时间
-
     color_texture_index : u32,      //色彩纹理在纹理图集数组中的索引
     anime_texture_index : u32,      //动画纹理在纹理图集数组中的索引
 };
