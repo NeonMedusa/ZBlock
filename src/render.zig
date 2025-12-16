@@ -14,34 +14,34 @@ pub fn draw(game: *Game) !void {
         game.gctx.queue,
         game.res_manager.scene_uniform_buffer,
         0,
-        &game.scene.ubo,
+        &game.ubo,
         Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
     );
     // 重置渲染实例计数器
     var entity_counter: u32 = 0;
-    // 不分类间接绘制
-    for (game.scene.entities.items) |entity| {
-        if (entity.model) |model_name| {
-            const model = game.res_manager.models_info.get(model_name);
-            game.res_manager.indexed_indirect_cmds[entity_counter].indexCount = model.index_count;
-            game.res_manager.indexed_indirect_cmds[entity_counter].instanceCount = 1;
-            game.res_manager.indexed_indirect_cmds[entity_counter].firstIndex = model.first_index_idx;
-            game.res_manager.indexed_indirect_cmds[entity_counter].baseVertex = model.first_vertex_idx;
-            game.res_manager.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
+    // 准备缓冲区数据
+    var it = game.world.models.constIterator();
+    while (it.next()) |i| {
+        const entity_id = i.@"0";
+        const model_name = i.@"1".*;
+        const model = game.res_manager.models_info.get(model_name);
+        game.res_manager.indexed_indirect_cmds[entity_counter].indexCount = model.index_count;
+        game.res_manager.indexed_indirect_cmds[entity_counter].instanceCount = 1;
+        game.res_manager.indexed_indirect_cmds[entity_counter].firstIndex = model.first_index_idx;
+        game.res_manager.indexed_indirect_cmds[entity_counter].baseVertex = model.first_vertex_idx;
+        game.res_manager.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
 
-            game.res_manager.entities_data[entity_counter] = EntityData{
-                .transform = entity.getTransform(),
-                .color_texture_index = model.color_texture_idx,
-                .anime_texture_index = model.anime_texture.index,
-                .anime_texture_size = model.anime_texture.size,
-                .anime_texture_start = model.anime_texture.coords_offset,
-                .anime_duration = model.anime_duration,
-                .cur_anime_time = entity.cur_anime_time,
-            };
-        }
+        game.res_manager.entities_data[entity_counter] = EntityData{
+            .transform = game.world.getTransformMatrix(entity_id).?,
+            .color_texture_index = model.color_texture_idx,
+            .anime_texture_index = model.anime_texture.index,
+            .anime_texture_size = model.anime_texture.size,
+            .anime_texture_start = model.anime_texture.coords_offset,
+            .anime_duration = model.anime_duration,
+            .cur_anime_time = 0,
+        };
         entity_counter += 1;
     }
-
     // 更新entities_data_buffer
     Wgpu.wgpuQueueWriteBuffer(
         game.gctx.queue,
@@ -131,8 +131,6 @@ const Mat4 = Algebra.Mat4;
 
 const ResourceManager = @import("resource_manager.zig");
 const RenderPipeline = @import("render_pipeline.zig");
-const Scene = @import("scene.zig");
-const Entity = @import("entity.zig");
 
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;

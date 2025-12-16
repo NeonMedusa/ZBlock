@@ -113,7 +113,7 @@ fn windowSizeCallback(glfw_window: ?*Glfw.GLFWwindow, width: i32, height: i32) c
             game.gctx.resizeSwapChain(game.window.width_u, game.window.height_u);
             // 更新SceneUniform
             const aspect_ratio: f32 = game.window.width / game.window.height;
-            game.scene.ubo.proj_matrix = Mat4.perspective(
+            game.ubo.proj_matrix = Mat4.perspective(
                 70,
                 aspect_ratio,
                 0.001,
@@ -163,7 +163,6 @@ const Mat4 = Algebra.Mat4;
 const Vec2_f64 = Algebra.Vec2_f64;
 const Input = @import("input.zig");
 const std = @import("std");
-const Scene = @import("scene.zig");
 const ShaderTypes = @import("shader_types.zig");
 const SceneUniform = ShaderTypes.SceneUniform;
 const Game = @import("game.zig");

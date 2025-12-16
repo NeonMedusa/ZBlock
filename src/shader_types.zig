@@ -84,19 +84,38 @@ pub const VertexIndirectCmd = struct {
     firstInstance: u32,
 };
 
+///////////////////////////////////////////////
+
+//render_shader.wgsl:
+// @group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;                //场景常量数据
+// @group(0) @binding(1) var<storage, read> entities_data : array<EntityData>;     //游戏实例数据
+// @group(0) @binding(2) var color_atlas : texture_2d_array<f32>;                  //纹理图集数组
+// @group(0) @binding(3) var anime_atlas : texture_2d_array<f32>;                  //动画纹理图集数组
+// @group(0) @binding(4) var<storage, read> color_textures_info : array<TextureInfo>;    //色彩纹理信息
+// @group(0) @binding(5) var<storage, read> Anime_textures_info : array<TextureInfo>;    //色彩纹理信息
 pub const EntityDataRemaster = struct {
     transform: Mat4, //实例的世界变换
-    anime_start: u32, //实例动画开始索引
-    anime_count: u32, //实例的动画数量
-
-    anime_texture_size: [2]f32 = .{ 0, 0 }, //动画纹理在纹理图集中的实际大小
-    anime_texture_start: [2]i32 = .{ 0, 0 }, //动画纹理在纹理图集中的起始坐标
-    anime_duration: f32 = 0, //动画的持续时间
-    cur_anime_time: f32 = 0, //实例的当前动画时间
-    color_texture_index: u32 = 0, //色彩纹理在纹理图集数组中的索引
-    anime_texture_index: u32 = 0, //动画纹理在纹理图集数组中的索引
+    anime_texture_start: u32, //实例动画纹理开始索引
+    anime_texture_count: u32, //实例的动画纹理数量
+    color_texture_start: u32, //实例的色彩纹理开始索引
+    color_texture_count: u32, //实例色彩纹理数量
     // _padding: [1]f32 = undefined, // 需要对齐到16字节
 };
+const EntityAnimeState = struct {
+    index: u32, //在动画纹理数组中的索引
+    cur_time: f32, //动画当前时间
+};
+const EntityColorTexture = struct {
+    index: u32, //在色彩纹理数组中的索引
+};
+const Animation = struct {
+    duration: f32, //动画总时长
+};
+test "foo" {
+    const allocator = std.testing.allocator;
+    var animations = std.StringHashMap(Animation).init(allocator);
+    defer animations.deinit();
+}
 
 const Algebra = @import("zalgebra");
 const Vec2 = Algebra.Vec2;

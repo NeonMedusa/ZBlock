@@ -3,7 +3,7 @@
 @group(0) @binding(1) var<storage, read> entities_data : array<EntityData>;     //游戏实例数据
 @group(0) @binding(2) var color_atlas : texture_2d_array<f32>;                  //纹理图集数组
 @group(0) @binding(3) var anime_atlas : texture_2d_array<f32>;                  //动画纹理图集数组
-@group(0) @binding(4) var<storage, read> textures_info : array<TextureInfo>;    //动画纹理图集数组
+@group(0) @binding(4) var<storage, read> color_textures_info : array<TextureInfo>;    //色彩纹理信息
 struct SceneUniform {
     proj_matrix : mat4x4f,  //投影矩阵
     view_matrix : mat4x4f,  //视图矩阵
@@ -135,7 +135,7 @@ fn vs_main(in : VertexInput, @builtin(instance_index) ins_idx : u32,) -> VertexO
 //片元着色
 @fragment
 fn fs_main(in : VertexOutput) -> @location(0) vec4f {
-    let color_texture_info = textures_info[in.color_texture_index];
+    let color_texture_info = color_textures_info[in.color_texture_index];
     //计算纹素坐标
     let texelCoords = vec2i(in.color_uv * color_texture_info.size) + color_texture_info.coords_offset;
     //纹理采样，参数：color_atlas, texelCoords, color_texture_index，mip_level

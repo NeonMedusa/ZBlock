@@ -20,27 +20,21 @@ pub fn init() @This() {
         .movement_speed = 5.0,
     };
 }
-// 鼠标控制方向
-pub fn updateFromMouse(self: *@This(), game: *Game) void {
+pub fn update(self: *@This(), game: *Game) void {
     const input = game.input;
     const window = game.window;
-    // 获取鼠标位置
-    const mousePos = input.getCursorPos();
-    // 重置鼠标位置到窗口中心
-    input.setCursorToCenter();
-    // 更新相机角度
-    self.yaw += @as(f32, @floatCast(mousePos.x - window.center_x)) * self.sensitivity;
+
+    //鼠标控制方向
+    const mousePos = input.getCursorPos(); // 获取鼠标位置
+    input.setCursorToCenter(); // 重置鼠标位置到窗口中心
+    self.yaw += @as(f32, @floatCast(mousePos.x - window.center_x)) * self.sensitivity; // 更新相机角度
     self.pitch -= @as(f32, @floatCast(mousePos.y - window.center_y)) * self.sensitivity;
-    // 限制俯仰角
-    if (self.pitch > 89.0) self.pitch = 89.0;
+    if (self.pitch > 89.0) self.pitch = 89.0; // 限制俯仰角
     if (self.pitch < -89.0) self.pitch = -89.0;
-    // 更新相机方向向量
-    self.updateVectors();
-}
-// 键盘控制移动
-pub fn updateFromKeyboard(self: *@This(), game: *Game, delta_time: f32) void {
-    const input = game.input;
-    const velocity = self.movement_speed * delta_time;
+    self.updateVectors(); // 更新相机方向向量
+
+    // 键盘控制移动
+    const velocity = self.movement_speed * window.delta_time;
     const right = self.front.cross(self.up).norm();
     if (input.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
     if (input.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));

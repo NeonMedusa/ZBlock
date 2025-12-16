@@ -2,16 +2,18 @@ allocator: std.mem.Allocator,
 window: Window,
 gctx: Gctx,
 input: Input,
-scene: Scene,
+world: World,
 ui_system: UiSystem,
 res_manager: ResourceManager,
 render_pipeline: RenderPipeline,
+camera: Camera3D,
+ubo: SceneUniform,
 pub fn deinit(self: *@This()) void {
     self.window.deinit();
     self.gctx.deinit();
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
-    self.scene.deinit();
+    self.world.deinit();
     self.ui_system.deinit();
     self.allocator.destroy(self);
 }
@@ -36,9 +38,13 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
         "resources/shaders/render_shader.wgsl",
     );
     self.render_pipeline = render_pipeline;
-    // 初始化场景
-    const scene = Scene.init(allocator, self);
-    self.scene = scene;
+    // 初始化摄像头
+    self.camera = Camera3D.init();
+    // 初始化ubo
+    self.ubo = SceneUniform.init(self.window);
+    // 初始化世界
+    const world = World.init(allocator);
+    self.world = world;
     // 初始化UI系统
     const ui_system = try UiSystem.init(allocator, &self.gctx, self);
     self.ui_system = ui_system;
@@ -49,17 +55,23 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 pub fn start(self: *@This()) !void {
     // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
-    // // 为场景添加一些实例（仅用于调试）
-    try initScene(&self.scene);
+
+    // 将世界初始化为测试场景
+    try initTestWorld(self);
+
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
         self.input.beginFrame();
         // 再更新窗口事件
         self.window.pollEvents();
-        // 如果主菜单不可见，则更新场景
-        if (!main_menu.visible)
-            try self.scene.update();
+        // 如果主菜单不可见，则更新世界和摄像头
+        if (!main_menu.visible) {
+            self.world.update(self.window.delta_time);
+            self.camera.update(self);
+            self.ubo.view_matrix = self.camera.getViewMatrix();
+        }
+
         // UI开始新帧
         self.ui_system.beginFrame();
         // 如果主菜单可见，则渲染主菜单
@@ -71,56 +83,28 @@ pub fn start(self: *@This()) !void {
     }
 }
 
-// 为场景添加一些实例（仅用于调试）
-fn initScene(scene: *Scene) !void {
-    for (0..100) |value| {
-        const entity0 = Entity{
-            .model = .Avocado,
-            .position = Vec3{ .data = .{ 0, 0, @floatFromInt(value * 2) } },
-            .scale = Vec3{ .data = .{ 15, 15, 15 } },
-        };
-        try scene.addEntity(entity0);
-    }
-    for (0..100) |value| {
-        const entity1 = Entity{
-            .model = .BarramundiFish,
-            .position = Vec3{ .data = .{ 3, 0, @floatFromInt(value * 2) } },
-            .scale = Vec3{ .data = .{ 3, 3, 3 } },
-        };
-        try scene.addEntity(entity1);
-    }
-    // for (0..100) |value| {
-    //     const entity2 = Entity{
-    //         .model = .Buggy,
-    //         .position = Vec3{ .data = .{ 6, 0, @floatFromInt(value) } },
-    //         .scale = Vec3{ .data = .{ 0.025, 0.025, 0.025 } },
-    //     };
-    //     try scene.addEntity(entity2);
-    // }
-    for (0..100) |value| {
-        const entity3 = Entity{
-            .model = .Wolf,
-            .cur_anime_time = @floatFromInt(value + 1),
-            .anime_speed = 1 + @as(f32, @floatFromInt(value)),
-            .position = Vec3{ .data = .{ 6, 0, @floatFromInt(value * 2) } },
-        };
-        try scene.addEntity(entity3);
-    }
-    for (0..100) |value| {
-        const entity3 = Entity{
-            .model = .CesiumMan,
-            .cur_anime_time = @floatFromInt(value + 1),
-            .anime_speed = 1 + @as(f32, @floatFromInt(value)),
-            .position = Vec3{ .data = .{ 9, 0, @floatFromInt(value * 2) } },
-        };
-        try scene.addEntity(entity3);
-    }
+fn initTestWorld(game: *Game) !void {
+    const entity1 = try game.world.createFullEntity(
+        .CesiumMan,
+        Vec3.new(0, 0, 0),
+        Vec3.new(0, 0, -10),
+        2.0, // 基础速度
+        100.0, // 生命值
+    );
+    const entity2 = try game.world.createFullEntity(
+        .BarramundiFish,
+        Vec3.new(0, 0, 0),
+        Vec3.new(0, 0, -10),
+        1.5,
+        80.0,
+    );
+    _ = entity1;
+    _ = entity2;
 }
 
 const Game = @This();
 const std = @import("std");
 
-const World = @import("world.zig").World;
 const Wgpu = @import("cimports.zig").Wgpu;
 const Glfw = @import("cimports.zig").Glfw;
 
@@ -133,11 +117,15 @@ const Gctx = @import("gctx.zig");
 const Window = @import("window.zig");
 const Render = @import("render.zig");
 const Camera3D = @import("camera3d.zig");
-const Entity = @import("entity.zig");
-const Scene = @import("scene.zig");
 const ResourceManager = @import("resource_manager.zig");
 const RenderPipeline = @import("render_pipeline.zig");
 const ModelName = @import("model.zig").ModelName;
 
 const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
+
+const ECS = @import("ecs.zig");
+const World = ECS.World;
+
+const ShaderType = @import("shader_types.zig");
+const SceneUniform = ShaderType.SceneUniform;
