@@ -84,22 +84,31 @@ pub fn start(self: *@This()) !void {
 }
 
 fn initTestWorld(game: *Game) !void {
-    const entity1 = try game.world.createFullEntity(
+    const player1 = try game.world.createPlayer(
         .CesiumMan,
         Vec3.new(0, 0, 0),
-        Vec3.new(0, 0, -10),
+        2.0, // 基础速度
+        100.0, // 生命值
+        1,
+        &game.input,
+    );
+    _ = player1;
+
+    const entity1 = try game.world.createBaseEntity(
+        .Wolf,
+        Vec3.new(0, 0, 0),
         2.0, // 基础速度
         100.0, // 生命值
     );
-    const entity2 = try game.world.createFullEntity(
+    try game.world.moving_targets.set(entity1, Vec3.new(10, 0, 0));
+
+    const entity2 = try game.world.createBaseEntity(
         .BarramundiFish,
         Vec3.new(0, 0, 0),
-        Vec3.new(0, 0, -10),
         1.5,
         80.0,
     );
-    _ = entity1;
-    _ = entity2;
+    try game.world.moving_targets.set(entity2, Vec3.new(-10, 0, 0));
 }
 
 const Game = @This();

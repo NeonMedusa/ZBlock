@@ -15,7 +15,6 @@ pub const SceneUniform = struct {
         };
     }
 };
-
 pub const UiUniform = struct {
     ortho_matrix: Mat4,
     pub fn init(window: Window) @This() {
@@ -32,14 +31,12 @@ pub const UiUniform = struct {
         };
     }
 };
-
 pub const VertexAttribute = struct {
     position: [3]f32, //顶点位置
     color_uv: [2]f32 = .{ 0, 0 }, //纹理UV
     joint_indices: [4]u32 = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
     joint_weights: [4]f32 = .{ 1, 0, 0, 0 }, // 骨骼矩阵权重
 };
-
 pub const EntityData = struct {
     transform: Mat4, //实例的世界变换
     anime_texture_size: [2]f32 = .{ 0, 0 }, //动画纹理在纹理图集中的实际大小
@@ -50,7 +47,6 @@ pub const EntityData = struct {
     anime_texture_index: u32 = 0, //动画纹理在纹理图集数组中的索引
     // _padding: [1]f32 = undefined, // 需要对齐到16字节
 };
-
 pub const ModelInfo = struct {
     first_vertex_idx: u32, //model的第一个顶点索引
     first_index_idx: u32, //model的第一个索引索引
@@ -61,14 +57,12 @@ pub const ModelInfo = struct {
     anime_texture: TextureInfo = undefined, //动画纹理
     anime_duration: f32, //动画持续时间
 };
-
 pub const TextureInfo = struct {
     size: [2]f32 = .{ 0, 0 }, // 纹理的实际大小
     coords_offset: [2]i32 = .{ 0, 0 }, // 纹理在纹理图集中的坐标偏移量
     index: u32 = 0, // 纹理在纹理数组中的索引
     _padding: [1]f32 = undefined, // 需要对齐到16字节
 };
-
 pub const IndexedIndirectCmd = struct {
     indexCount: u32,
     instanceCount: u32,
@@ -76,7 +70,6 @@ pub const IndexedIndirectCmd = struct {
     baseVertex: u32,
     firstInstance: u32,
 };
-
 pub const VertexIndirectCmd = struct {
     vertexCount: u32,
     instanceCount: u32,
