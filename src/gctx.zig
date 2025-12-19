@@ -134,7 +134,6 @@ pub fn resizeSwapChain(self: *Gctx, new_width: u32, new_height: u32) void {
     // 确保最小尺寸
     const width = @max(new_width, 1);
     const height = @max(new_height, 1);
-    std.debug.print("resizing swapchain...: {}x{}\n", .{ width, height });
     // 更新surface配置
     self.surface_config.width = width;
     self.surface_config.height = height;
@@ -142,7 +141,6 @@ pub fn resizeSwapChain(self: *Gctx, new_width: u32, new_height: u32) void {
     Wgpu.wgpuSurfaceConfigure(self.surface, &self.surface_config);
     // 重建深度纹理
     self.recreateDepthTexture(width, height);
-    std.debug.print("resize swapchain complate\n", .{});
 }
 
 // 重建深度纹理

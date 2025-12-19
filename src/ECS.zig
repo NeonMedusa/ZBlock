@@ -4,7 +4,7 @@ const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Input = @import("input.zig");
 const Key = Input.Key;
-// 实体ID
+
 pub const EntityId = u32;
 pub const Player = struct {
     player_id: u32 = 0, // 用于区分不同玩家（联机时有用）
@@ -55,20 +55,7 @@ pub fn ComponentStorage(comptime T: type) type {
                 try self.entity_to_index.put(entity, index);
             }
         }
-        pub fn add(self: *Self, entity: EntityId, component: T) !void {
-            if (self.entity_to_index.contains(entity)) {
-                std.debug.print("Warning: Component already exists for entity {}\n", .{entity});
-                return;
-            }
-            try self.set(entity, component);
-        }
         pub fn get(self: *Self, entity: EntityId) ?*T {
-            if (self.entity_to_index.get(entity)) |index| {
-                return &self.dense.items[index];
-            }
-            return null;
-        }
-        pub fn getConst(self: *const Self, entity: EntityId) ?*const T {
             if (self.entity_to_index.get(entity)) |index| {
                 return &self.dense.items[index];
             }
@@ -81,14 +68,12 @@ pub fn ComponentStorage(comptime T: type) type {
             if (self.entity_to_index.fetchRemove(entity)) |kv| {
                 const index = kv.value;
                 const last_index = self.dense.items.len - 1;
-
                 if (index != last_index) {
                     self.dense.items[index] = self.dense.items[last_index];
                     const last_entity = self.sparse.items[last_index];
                     self.sparse.items[index] = last_entity;
                     self.entity_to_index.put(last_entity, index) catch unreachable;
                 }
-
                 _ = self.dense.pop();
                 _ = self.sparse.pop();
                 return true;
@@ -110,27 +95,13 @@ pub fn ComponentStorage(comptime T: type) type {
         pub fn iterator(self: *Self) Iterator {
             return Iterator{ .storage = self };
         }
-        // 只读迭代器
-        pub const ConstIterator = struct {
-            storage: *const Self,
-            index: usize = 0,
-            pub fn next(self: *@This()) ?struct { EntityId, *const T } {
-                if (self.index >= self.storage.dense.items.len) return null;
-                const entity = self.storage.sparse.items[self.index];
-                const component = &self.storage.dense.items[self.index];
-                self.index += 1;
-                return .{ entity, component };
-            }
-        };
-        pub fn constIterator(self: *const Self) ConstIterator {
-            return ConstIterator{ .storage = self };
-        }
     };
 }
 // 世界
 pub const World = struct {
     allocator: std.mem.Allocator,
     next_entity_id: EntityId = 0,
+    available_ids: std.ArrayList(EntityId), // 可用ID池
     // 基础组件存储
     players: ComponentStorage(Player), // 玩家标记
     models: ComponentStorage(Model), // 模型
@@ -143,6 +114,7 @@ pub const World = struct {
     pub fn init(allocator: std.mem.Allocator) World {
         return .{
             .allocator = allocator,
+            .available_ids = std.ArrayList(EntityId){},
             .players = ComponentStorage(Player).init(allocator),
             .models = ComponentStorage(Model).init(allocator),
             .positions = ComponentStorage(Position).init(allocator),
@@ -154,6 +126,7 @@ pub const World = struct {
     }
     // 析构
     pub fn deinit(self: *World) void {
+        self.available_ids.deinit(self.allocator);
         self.players.deinit(self.allocator);
         self.models.deinit(self.allocator);
         self.positions.deinit(self.allocator);
@@ -163,23 +136,26 @@ pub const World = struct {
         self.action_status.deinit(self.allocator);
     }
     // 移除实体（清理所有组件）
-    fn removeEntity(self: *World, entity: EntityId) void {
+    fn removeEntity(self: *World, entity: EntityId) !void {
+        try self.available_ids.append(self.allocator, entity);
+        _ = self.players.remove(entity);
+        _ = self.models.remove(entity);
         _ = self.positions.remove(entity);
         _ = self.moving_targets.remove(entity);
         _ = self.speeds.remove(entity);
         _ = self.healths.remove(entity);
         _ = self.action_status.remove(entity);
-        _ = self.players.remove(entity);
     }
     // 获取变换矩阵（用于渲染）
     pub fn getTransformMatrix(self: *World, entity: EntityId) ?Mat4 {
-        if (self.positions.getConst(entity)) |position| {
+        if (self.positions.get(entity)) |position|
             return Mat4.fromTranslate(position.*);
-        }
         return null;
     }
     // 创建空实体
-    pub fn createEntity(self: *World) EntityId {
+    pub fn createEntity(self: *World) !EntityId {
+        // 复用已删除的实体ID
+        if (self.available_ids.pop()) |id| return id;
         const id = self.next_entity_id;
         self.next_entity_id += 1;
         return id;
@@ -192,7 +168,7 @@ pub const World = struct {
         base_speed: Speed,
         health_value: f32,
     ) !EntityId {
-        const entity = self.createEntity();
+        const entity = try self.createEntity();
         try self.models.set(entity, model);
         try self.positions.set(entity, start_pos);
         try self.speeds.set(entity, base_speed);
@@ -226,9 +202,9 @@ pub const World = struct {
         return player;
     }
     // 更新所有系统
-    pub fn update(self: *World, delta_time: f32) void {
+    pub fn update(self: *World, delta_time: f32) !void {
         self.updateMovementSystem(delta_time);
-        self.updateHealthSystem(delta_time);
+        try self.updateHealthSystem(delta_time);
     }
     // 系统：更新移动逻辑
     fn updateMovementSystem(self: *World, delta_time: f32) void {
@@ -245,9 +221,9 @@ pub const World = struct {
                     if (player.input.isKeyPressed(.right))
                         position.* = position.add(Vec3.new(velocity, 0, 0));
                     if (player.input.isKeyPressed(.up))
-                        position.* = position.add(Vec3.new(0, 0, velocity));
-                    if (player.input.isKeyPressed(.down))
                         position.* = position.add(Vec3.new(0, 0, -velocity));
+                    if (player.input.isKeyPressed(.down))
+                        position.* = position.add(Vec3.new(0, 0, velocity));
                 }
             }
         }
@@ -284,15 +260,15 @@ pub const World = struct {
         }
     }
     // 系统：更新生命值
-    fn updateHealthSystem(self: *World, delta_time: f32) void {
+    fn updateHealthSystem(self: *World, delta_time: f32) !void {
         _ = delta_time;
-        var health_iter = self.healths.constIterator();
+        var health_iter = self.healths.iterator();
         while (health_iter.next()) |entry| {
             const entity = entry[0];
             const health = entry[1];
             if (health.current <= 0) {
                 // 实体死亡，移除所有组件
-                self.removeEntity(entity);
+                try self.removeEntity(entity);
             }
         }
     }

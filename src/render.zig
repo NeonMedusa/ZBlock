@@ -20,7 +20,7 @@ pub fn draw(game: *Game) !void {
     // 重置渲染实例计数器
     var entity_counter: u32 = 0;
     // 准备缓冲区数据
-    var it = game.world.models.constIterator();
+    var it = game.world.models.iterator();
     while (it.next()) |i| {
         const entity_id = i.@"0";
         const model_name = i.@"1".*;

@@ -59,6 +59,7 @@ pub fn start(self: *@This()) !void {
     // 将世界初始化为测试场景
     try initTestWorld(self);
 
+    var pos_offset: f32 = 0;
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
@@ -67,11 +68,29 @@ pub fn start(self: *@This()) !void {
         self.window.pollEvents();
         // 如果主菜单不可见，则更新世界和摄像头
         if (!main_menu.visible) {
-            self.world.update(self.window.delta_time);
+
+            // 测试实例增删
+            if (self.input.isKeyDown(.minus)) {
+                var it = self.world.healths.iterator();
+                while (it.next()) |entry|
+                    entry.@"1".current -= 1;
+            }
+            if (self.input.isKeyDown(.equal)) {
+                _ = try self.world.createBaseEntity(
+                    .CesiumMan,
+                    Vec3.new(0, 0, -pos_offset),
+                    1,
+                    3,
+                );
+                pos_offset += 1;
+            }
+
+            // 更新世界
+            try self.world.update(self.window.delta_time);
+            // 更新摄像头
             self.camera.update(self);
             self.ubo.view_matrix = self.camera.getViewMatrix();
         }
-
         // UI开始新帧
         self.ui_system.beginFrame();
         // 如果主菜单可见，则渲染主菜单
@@ -88,7 +107,7 @@ fn initTestWorld(game: *Game) !void {
         .CesiumMan,
         Vec3.new(0, 0, 0),
         2.0, // 基础速度
-        100.0, // 生命值
+        3.0, // 生命值
         1,
         &game.input,
     );
