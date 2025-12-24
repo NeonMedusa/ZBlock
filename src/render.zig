@@ -50,7 +50,6 @@ pub fn draw(game: *Game) !void {
         game.res_manager.entities_data.ptr,
         @sizeOf(EntityData) * entity_counter,
     );
-
     // 更新indexed_indirect_cmds_buffer
     Wgpu.wgpuQueueWriteBuffer(
         game.gctx.queue,

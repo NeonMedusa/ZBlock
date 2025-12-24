@@ -29,11 +29,11 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&copy_glfw_dll.step);
 
     // WGPU
-    exe.addIncludePath(b.path("libs/wgpu-windows-x86_64-msvc-release/include/webgpu"));
-    exe.addLibraryPath(b.path("libs/wgpu-windows-x86_64-msvc-release/lib"));
+    exe.addIncludePath(b.path("libs/wgpu-windows-x86_64-gnu-release/include/webgpu"));
+    exe.addLibraryPath(b.path("libs/wgpu-windows-x86_64-gnu-release/lib"));
     exe.linkSystemLibrary("wgpu_native");
     const copy_wgpu_dll = b.addInstallFile(
-        b.path("libs/wgpu-windows-x86_64-msvc-release/lib/wgpu_native.dll"),
+        b.path("libs/wgpu-windows-x86_64-gnu-release/lib/wgpu_native.dll"),
         "bin/wgpu_native.dll",
     );
     exe.step.dependOn(&copy_wgpu_dll.step);

@@ -23,7 +23,6 @@ pub fn init() @This() {
 pub fn update(self: *@This(), game: *Game) void {
     const input = game.input;
     const window = game.window;
-
     //鼠标控制方向
     const mousePos = input.getCursorPos(); // 获取鼠标位置
     input.setCursorToCenter(); // 重置鼠标位置到窗口中心
@@ -32,7 +31,6 @@ pub fn update(self: *@This(), game: *Game) void {
     if (self.pitch > 89.0) self.pitch = 89.0; // 限制俯仰角
     if (self.pitch < -89.0) self.pitch = -89.0;
     self.updateVectors(); // 更新相机方向向量
-
     // 键盘控制移动
     const velocity = self.movement_speed * window.delta_time;
     const right = self.front.cross(self.up).norm();
