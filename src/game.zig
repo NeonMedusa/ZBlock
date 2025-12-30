@@ -78,9 +78,9 @@ pub fn start(self: *@This()) !void {
             if (self.input.isKeyDown(.equal)) {
                 _ = try self.world.createBaseEntity(
                     .CesiumMan,
-                    Vec3.new(0, 0, -pos_offset),
-                    1,
-                    3,
+                    .{ .vec = Vec3.new(0, 0, -pos_offset) },
+                    .{ .value = 1 },
+                    .{ .current = 3, .max = 3 },
                 );
                 pos_offset += 1;
             }
@@ -105,29 +105,28 @@ pub fn start(self: *@This()) !void {
 fn initTestWorld(game: *Game) !void {
     const player1 = try game.world.createPlayer(
         .CesiumMan,
-        Vec3.new(0, 0, 0),
-        2.0, // 基础速度
-        3.0, // 生命值
-        1,
-        &game.input,
+        .{ .vec = Vec3.new(0, 0, 0) },
+        .{ .value = 2.0 }, // 基础速度
+        .{ .current = 3.0, .max = 3.0 }, // 生命值
+        .{ .input = &game.input, .player_id = 1 },
     );
     _ = player1;
 
     const entity1 = try game.world.createBaseEntity(
         .Wolf,
-        Vec3.new(0, 0, 0),
-        2.0, // 基础速度
-        100.0, // 生命值
+        .{ .vec = Vec3.new(0, 0, 0) },
+        .{ .value = 2.0 }, // 基础速度
+        .{ .current = 100.0, .max = 100.0 }, // 生命值
     );
-    try game.world.moving_targets.set(entity1, Vec3.new(10, 0, 0));
+    try game.world.setComponent(entity1, ECS.MovingTarget{ .vec = Vec3.new(10, 0, 0) });
 
     const entity2 = try game.world.createBaseEntity(
         .BarramundiFish,
-        Vec3.new(0, 0, 0),
-        1.5,
-        80.0,
+        .{ .vec = Vec3.new(0, 0, 0) },
+        .{ .value = 1.5 }, // 基础速度
+        .{ .current = 80.0, .max = 80.0 }, // 生命值
     );
-    try game.world.moving_targets.set(entity2, Vec3.new(-10, 0, 0));
+    try game.world.setComponent(entity2, ECS.MovingTarget{ .vec = Vec3.new(-10, 0, 0) });
 }
 
 const Game = @This();
