@@ -20,8 +20,8 @@ pub fn draw(game: *Game) !void {
     // 重置渲染实例计数器
     var entity_counter: u32 = 0;
     // 准备缓冲区数据
-    var it = game.world.models.iterator();
-    while (it.next()) |i| {
+    var model_it = game.world.models.iterator();
+    while (model_it.next()) |i| {
         const entity_id = i.@"0";
         const model_name = i.@"1".*;
         const model = game.res_manager.models_info.get(model_name);
@@ -93,8 +93,9 @@ pub fn draw(game: *Game) !void {
     // 设置顶点和索引缓冲区
     Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.res_manager.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.res_manager.vertex_buffer));
     Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.res_manager.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.res_manager.index_buffer));
-    // 间接绘制所有可见实例
-    Wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, game.res_manager.indexed_indirect_cmds_buffer, 0, entity_counter);
+    // 间接绘制所有可见实体
+    if (entity_counter > 0)
+        Wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, game.res_manager.indexed_indirect_cmds_buffer, 0, entity_counter);
 
     //UI渲染!
     // 设置UI渲染管线和绑定组
