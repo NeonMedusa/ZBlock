@@ -31,14 +31,19 @@ pub fn draw(game: *Game) !void {
         game.res_manager.indexed_indirect_cmds[entity_counter].baseVertex = model.first_vertex_idx;
         game.res_manager.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
 
+        const anim = model.animations.get(.walk) orelse undefined;
+
         game.res_manager.entities_data[entity_counter] = EntityData{
             .transform = game.world.getTransformMatrix(entity_id).?,
             .color_texture_index = model.color_texture_idx,
-            .anime_texture_index = model.anime_texture.index,
-            .anime_texture_size = model.anime_texture.size,
-            .anime_texture_start = model.anime_texture.coords_offset,
-            .anime_duration = model.anime_duration,
-            .cur_anime_time = 0,
+
+            .anime_texture_index = anim.texture.index,
+            .anime_texture_size = anim.texture.size,
+            .anime_texture_start = anim.texture.coord,
+
+            .anime_duration = anim.duration,
+
+            .cur_anime_time = game.window.time,
         };
         entity_counter += 1;
     }
@@ -94,7 +99,8 @@ pub fn draw(game: *Game) !void {
     Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.res_manager.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.res_manager.vertex_buffer));
     Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.res_manager.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.res_manager.index_buffer));
     // 间接绘制所有可见实例
-    Wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, game.res_manager.indexed_indirect_cmds_buffer, 0, entity_counter);
+    if (entity_counter > 0)
+        Wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, game.res_manager.indexed_indirect_cmds_buffer, 0, entity_counter);
 
     //UI渲染!
     // 设置UI渲染管线和绑定组

@@ -82,9 +82,9 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
             },
             .{ // textures_info
                 .binding = 4,
-                .buffer = game.res_manager.textures_info_buffer,
+                .buffer = game.res_manager.color_textures_info_buffer,
                 .offset = 0,
-                .size = Wgpu.wgpuBufferGetSize(game.res_manager.textures_info_buffer),
+                .size = Wgpu.wgpuBufferGetSize(game.res_manager.color_textures_info_buffer),
             },
         },
     });

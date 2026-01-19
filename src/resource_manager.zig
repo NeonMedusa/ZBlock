@@ -13,8 +13,8 @@ color_altas_view: Wgpu.WGPUTextureView,
 // 好吧，虽然我也想ALL_IN_BOOM，但为了让色彩纹理将来能支持BC（块压缩），还是为动画单独创建一个纹理图集数组比较好
 anime_altas: Wgpu.WGPUTexture,
 anime_altas_view: Wgpu.WGPUTextureView,
-// 为了能支持多个动画纹理，我们需要一个buffer存储纹理信息
-textures_info_buffer: Wgpu.WGPUBuffer,
+// 一个模型可能会有多个贴图or动画纹理，我们需要用buffer存储纹理信息
+color_textures_info_buffer: Wgpu.WGPUBuffer,
 // 渲染相关设置
 const MAX_ENTITIES = 500; // 限制最大实体数
 const ATLAS_WIDTH = 4096; // 每张纹理图集的宽度
@@ -32,7 +32,7 @@ pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
 
     Wgpu.wgpuTextureRelease(self.anime_altas);
     Wgpu.wgpuTextureViewRelease(self.anime_altas_view);
-    Wgpu.wgpuBufferRelease(self.textures_info_buffer);
+    Wgpu.wgpuBufferRelease(self.color_textures_info_buffer);
 }
 pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
     const indexed_indirect_cmds = try allocator.alloc(IndexedIndirectCmd, MAX_ENTITIES);
@@ -61,27 +61,30 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
     var index_data = std.ArrayList(u32){};
     defer index_data.deinit(allocator);
 
-    { // 第一遍加载模型的顶点数据，并获取模型的贴图大小
+    // 第一遍加载模型的顶点数据，并获取模型的贴图大小
+    { // 遍历并填充模型信息表
         var model_it = models_info.iterator();
         while (model_it.next()) |model| {
-            const file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{@tagName(model.key)});
-            defer allocator.free(file_name);
-            const file_path = try std.fs.path.join(allocator, &.{ "resources", "models", file_name });
-            defer allocator.free(file_path);
-            const file_buf = try std.fs.cwd().readFileAllocOptions(
+            // 加载GLTF文件
+            const model_file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{@tagName(model.key)});
+            defer allocator.free(model_file_name);
+            const model_file_path = try std.fs.path.join(allocator, &.{ "resources", "models", model_file_name });
+            defer allocator.free(model_file_path);
+            const model_file_buf = try std.fs.cwd().readFileAllocOptions(
                 allocator,
-                file_path,
+                model_file_path,
                 std.math.maxInt(usize),
                 null,
                 .@"16",
                 null,
             );
-            defer allocator.free(file_buf);
+            defer allocator.free(model_file_buf);
+            // 解析GLTF文件
             var gltf = Gltf.init(allocator);
             defer gltf.deinit();
-            try gltf.parse(file_buf);
+            try gltf.parse(model_file_buf);
 
-            // 获取色彩纹理的尺寸信息，暂时只提取一个
+            // 1.获取色彩纹理的尺寸信息，暂时只提取一个
             var color_texture_info = TextureInfo{};
             for (gltf.data.materials) |material| {
                 if (material.metallic_roughness.base_color_texture) |gltf_texture_info| {
@@ -95,27 +98,44 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
                 }
             }
 
-            // 获取动画纹理的尺寸信息，暂时只提取第一个
-            var anime_texture_info = TextureInfo{};
-            if (gltf.data.animations.len != 0) {
-                const anime = gltf.data.animations[0];
-                const sampler = anime.samplers[0];
-                const input_accessors = gltf.data.accessors[sampler.input];
-                const num_keyframes = input_accessors.count;
-                anime_texture_info.size[1] = @floatFromInt(num_keyframes);
-            }
+            // 2.获取动画纹理的尺寸信息
             // 记录每个skin的joints起始索引和joints总数
             // 当一个node同时包含mesh和skin时，mesh顶点属性中的joint_indices就是相对于这个skin的joints数组的索引
             // 我打算将所有的joint矩阵全都合并存到同一个数组中，所以需要计算该skin的joint在数组中的偏移量
             var total_joints_count: u32 = 0; // 总关节数
-            var skins_joint_start_idx = std.ArrayList(u32){}; // skin的joint索引偏移
+            // skin的joint索引偏移
+            var skins_joint_start_idx = std.ArrayList(u32){};
             defer skins_joint_start_idx.deinit(allocator);
             for (gltf.data.skins) |skin| {
                 try skins_joint_start_idx.append(allocator, total_joints_count);
                 total_joints_count += @intCast(skin.joints.len);
             }
-            //动画纹理的宽度=1(关键帧的时间戳)+4x骨骼数量
-            anime_texture_info.size[0] = @floatFromInt(1 + total_joints_count * 3);
+            // 从json配置文件获取模型的动画到逻辑动画的映射
+            const config_file_name = try std.fmt.allocPrint(allocator, "{s}.json", .{@tagName(model.key)});
+            defer allocator.free(config_file_name);
+            const config_file_path = try std.fs.path.join(allocator, &.{ "resources", "models", config_file_name });
+            defer allocator.free(config_file_path);
+            var anims_info: std.EnumMap(AnimType, AnimInfo) = undefined;
+            if (loadAnimConfig(allocator, config_file_path)) |loaded_info| {
+                anims_info = loaded_info;
+            } else |err| {
+                std.debug.print("Warning: Failed to load animation config: {}\n", .{err});
+                anims_info = std.EnumMap(AnimType, AnimInfo){};
+            }
+            var anim_it = anims_info.iterator();
+            while (anim_it.next()) |anim_info| {
+                var anim_texture_info = TextureInfo{};
+                defer anim_info.value.texture = anim_texture_info;
+                const clip_index = anim_info.value.clip_index;
+                const anim_data = gltf.data.animations[clip_index];
+                const sampler = anim_data.samplers[0];
+                const input_accessors = gltf.data.accessors[sampler.input];
+                const num_keyframes = input_accessors.count;
+                //动画纹理的宽度=1(关键帧的时间戳)+4x骨骼数量
+                anim_texture_info.size[0] = @floatFromInt(1 + total_joints_count * 3);
+                // 动画纹理的高度 = 关键帧的数量
+                anim_texture_info.size[1] = @floatFromInt(num_keyframes);
+            }
 
             // 提取有mesh的节点的vertex和index数据
             var model_vertex_data = std.ArrayList(VertexAttribute){};
@@ -250,7 +270,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
             model.value.vertex_count = @intCast(model_vertex_data.items.len);
             model.value.index_count = @intCast(model_index_data.items.len);
             model.value.color_texture = color_texture_info;
-            model.value.anime_texture = anime_texture_info;
+            model.value.animations = anims_info;
             try vertex_data.appendSlice(allocator, model_vertex_data.items);
             try index_data.appendSlice(allocator, model_index_data.items);
         }
@@ -282,13 +302,30 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
     );
 
     // 第二遍，获取了所有的贴图大小后，将贴图进行二维装箱、写入纹理
-    const pr = try TexturePacker.packTextures(
+    var color_texture_info_ptrs = std.ArrayList(*TextureInfo){};
+    defer color_texture_info_ptrs.deinit(allocator);
+    var anim_texture_info_ptrs = std.ArrayList(*TextureInfo){};
+    defer anim_texture_info_ptrs.deinit(allocator);
+    var model_it1 = models_info.iterator();
+    while (model_it1.next()) |model| {
+        try color_texture_info_ptrs.append(allocator, &model.value.color_texture);
+        var anim_it = model.value.animations.iterator();
+        while (anim_it.next()) |anim|
+            try anim_texture_info_ptrs.append(allocator, &anim.value.texture);
+    }
+    const color_atlas_count = try TexturePacker.packTextures(
         allocator,
-        &models_info,
+        color_texture_info_ptrs.items,
         ATLAS_WIDTH,
         ATLAS_HEIGHT,
     );
-    const color_atlas_count = pr.color_atlas_count;
+    const anim_atlas_count = try TexturePacker.packTextures(
+        allocator,
+        anim_texture_info_ptrs.items,
+        ATLAS_WIDTH,
+        ATLAS_HEIGHT,
+    );
+
     const color_altas_desc = Wgpu.WGPUTextureDescriptor{
         .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = Wgpu.WGPUTextureDimension_2D,
@@ -317,7 +354,6 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
         },
     );
     // 创建动画纹理图集
-    const anime_atlas_count = pr.anime_atlas_count;
     const anime_altas_desc = Wgpu.WGPUTextureDescriptor{
         .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
         .dimension = Wgpu.WGPUTextureDimension_2D,
@@ -326,7 +362,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
             .height = ATLAS_HEIGHT,
             // 大于1表明这是一个纹理数组，填入多少就有多少张纹理
             // 写入纹理时通过修改origin的z轴来指定写入哪一张纹理
-            .depthOrArrayLayers = anime_atlas_count,
+            .depthOrArrayLayers = anim_atlas_count,
         },
         .format = Wgpu.WGPUTextureFormat_RGBA32Float,
         .mipLevelCount = 1,
@@ -380,8 +416,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
                         .mipLevel = 0,
                         // xy为写入时的像素偏移，我们可以利用这个特性实现纹理图集，z轴用于指定写入到哪张纹理中
                         .origin = .{
-                            .x = @intCast(model.value.color_texture.coords_offset[0]),
-                            .y = @intCast(model.value.color_texture.coords_offset[1]),
+                            .x = @intCast(model.value.color_texture.coord[0]),
+                            .y = @intCast(model.value.color_texture.coord[1]),
                             .z = model.value.color_texture.index,
                         },
                     },
@@ -400,21 +436,22 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
                 );
             }
         }
-        // 提取并写入动画纹理数据
-        if (gltf.data.animations.len > 0) {
-            const anime = gltf.data.animations[0];
+
+        var anim_it = model.value.animations.iterator();
+        while (anim_it.next()) |anim| {
+            const anim_data = gltf.data.animations[anim.value.clip_index];
             // 关键帧数量，先假设同一动画中所有sampler的关键帧数量和时间戳都是一样的，如果最后证明不行再另想办法
-            const num_keyframes = gltf.data.accessors[anime.samplers[0].input].count;
+            const num_keyframes = gltf.data.accessors[anim_data.samplers[0].input].count;
             // 关键帧时间戳数组，同样假设同一动画中所有sampler的关键帧数量和时间戳都是一样的
             var keyframe_times = std.ArrayList(f32){};
             defer keyframe_times.deinit(allocator);
-            var anime_duration: f32 = 0;
-            var it = gltf.data.accessors[anime.samplers[0].input].iterator(f32, &gltf, gltf.glb_binary.?);
+            var anim_duration: f32 = 0;
+            var it = gltf.data.accessors[anim_data.samplers[0].input].iterator(f32, &gltf, gltf.glb_binary.?);
             while (it.next()) |keyframe_time| {
                 try keyframe_times.append(allocator, keyframe_time[0]);
-                anime_duration = keyframe_time[0];
+                anim_duration = keyframe_time[0];
             }
-            model.value.anime_duration = anime_duration;
+            anim.value.duration = anim_duration;
             // 为每个关键帧创建动画矩阵数组
             var keyframe_matrices = std.ArrayList([]?Mat4){};
             defer {
@@ -430,8 +467,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
                 try keyframe_matrices.append(allocator, frame_matrices);
             }
             // 应用每个channel的动画数据到对应的关键帧
-            for (anime.channels) |channel| {
-                const sampler = anime.samplers[channel.sampler];
+            for (anim_data.channels) |channel| {
+                const sampler = anim_data.samplers[channel.sampler];
                 const output_accessor = gltf.data.accessors[sampler.output];
                 var output_it = output_accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                 //目标节点索引
@@ -530,9 +567,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
             defer allocator.free(anime_texture_data);
 
             // 写入到wgpu纹理
-            const anime_texture_width: u32 = @intFromFloat(model.value.anime_texture.size[0]);
-            const anime_texture_height: u32 = @intFromFloat(model.value.anime_texture.size[1]);
-
+            const anime_texture_width: u32 = @intFromFloat(anim.value.texture.size[0]);
+            const anime_texture_height: u32 = @intFromFloat(anim.value.texture.size[1]);
             Wgpu.wgpuQueueWriteTexture(
                 gctx.queue,
                 &Wgpu.WGPUTexelCopyTextureInfo{
@@ -540,9 +576,9 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
                     .mipLevel = 0,
                     // xy为写入时的像素偏移，我们可以利用这个特性实现纹理图集，z轴用于指定写入到哪张纹理中
                     .origin = .{
-                        .x = @intCast(model.value.anime_texture.coords_offset[0]),
-                        .y = @intCast(model.value.anime_texture.coords_offset[1]),
-                        .z = model.value.anime_texture.index,
+                        .x = @intCast(anim.value.texture.coord[0]),
+                        .y = @intCast(anim.value.texture.coord[1]),
+                        .z = anim.value.texture.index,
                     },
                 },
                 anime_texture_data.ptr,
@@ -599,7 +635,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
         .anime_altas_view = anime_altas_view,
 
         .models_info = models_info,
-        .textures_info_buffer = texture_info_buffer,
+        .color_textures_info_buffer = texture_info_buffer,
     };
 }
 
@@ -667,6 +703,48 @@ fn create_anime_texture_data(
     }
     return texture_data;
 }
+
+fn loadAnimConfig(allocator: std.mem.Allocator, json_path: []u8) !std.EnumMap(AnimType, AnimInfo) {
+    const json_data = try std.fs.cwd().readFileAllocOptions(
+        allocator,
+        json_path,
+        std.math.maxInt(usize),
+        null,
+        .@"16",
+        null,
+    );
+    defer allocator.free(json_data);
+
+    const parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        allocator,
+        json_data,
+        .{ .ignore_unknown_fields = true },
+    );
+    defer parsed.deinit();
+
+    const animations_obj = parsed.value.object.get("animations").?.object;
+    var animations = std.EnumMap(AnimType, AnimInfo){};
+
+    // 遍历枚举字段，假设JSON字段名与枚举字段名相同
+    inline for (std.meta.fields(AnimType)) |field| {
+        // 编译时跳过 _count 字段
+        if (comptime std.mem.eql(u8, field.name, "_count")) continue;
+
+        if (animations_obj.get(field.name)) |index_val| {
+            const clip_index = @as(u32, @intCast(index_val.integer));
+            const anim_type = @field(AnimType, field.name);
+
+            animations.put(anim_type, .{
+                .clip_index = clip_index,
+                .duration = 0.0,
+                .texture = undefined,
+            });
+        }
+    }
+    return animations;
+}
+
 const std = @import("std");
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
@@ -688,3 +766,5 @@ const Wgpu = @import("cimports.zig").Wgpu;
 const zigimg = @import("zigimg");
 const ModelName = @import("model.zig").ModelName;
 const TexturePacker = @import("texture_packer.zig");
+const AnimType = ShaderType.AnimType;
+const AnimInfo = ShaderType.AnimInfo;

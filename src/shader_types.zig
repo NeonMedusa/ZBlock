@@ -47,21 +47,34 @@ pub const EntityData = struct {
     anime_texture_index: u32 = 0, //动画纹理在纹理图集数组中的索引
     // _padding: [1]f32 = undefined, // 需要对齐到16字节
 };
+// 纹理在纹理图集数组
+pub const TextureInfo = struct {
+    size: [2]f32 = .{ 0, 0 }, // 纹理的实际大小
+    coord: [2]i32 = .{ 0, 0 }, // 纹理在纹理图集中的起始坐标
+    index: u32 = 0, // 纹理在纹理数组中的索引
+    _padding: [1]f32 = undefined, // 需要对齐到16字节
+};
+pub const AnimType = enum {
+    idle,
+    walk,
+    run,
+    attack,
+    die,
+    _count,
+};
+pub const AnimInfo = struct {
+    clip_index: u32, // 动画剪辑索引
+    duration: f32, // 动画时长
+    texture: TextureInfo = undefined, //动画纹理信息
+};
 pub const ModelInfo = struct {
     first_vertex_idx: u32, //model的第一个顶点索引
     first_index_idx: u32, //model的第一个索引索引
     vertex_count: u32, //model的顶点数量
     index_count: u32, //model的索引数量
-    color_texture: TextureInfo, //基础颜色材质
     color_texture_idx: u32 = 0, //基础颜色材质信息在纹理图集数组信息中的索引
-    anime_texture: TextureInfo = undefined, //动画纹理
-    anime_duration: f32, //动画持续时间
-};
-pub const TextureInfo = struct {
-    size: [2]f32 = .{ 0, 0 }, // 纹理的实际大小
-    coords_offset: [2]i32 = .{ 0, 0 }, // 纹理在纹理图集中的坐标偏移量
-    index: u32 = 0, // 纹理在纹理数组中的索引
-    _padding: [1]f32 = undefined, // 需要对齐到16字节
+    color_texture: TextureInfo, //基础颜色材质
+    animations: std.EnumMap(AnimType, AnimInfo), //逻辑动画
 };
 pub const IndexedIndirectCmd = struct {
     indexCount: u32,
@@ -76,39 +89,6 @@ pub const VertexIndirectCmd = struct {
     firstVertex: u32,
     firstInstance: u32,
 };
-
-///////////////////////////////////////////////
-
-//render_shader.wgsl:
-// @group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;                //场景常量数据
-// @group(0) @binding(1) var<storage, read> entities_data : array<EntityData>;     //游戏实例数据
-// @group(0) @binding(2) var color_atlas : texture_2d_array<f32>;                  //纹理图集数组
-// @group(0) @binding(3) var anime_atlas : texture_2d_array<f32>;                  //动画纹理图集数组
-// @group(0) @binding(4) var<storage, read> color_textures_info : array<TextureInfo>;    //色彩纹理信息
-// @group(0) @binding(5) var<storage, read> Anime_textures_info : array<TextureInfo>;    //色彩纹理信息
-pub const EntityDataRemaster = struct {
-    transform: Mat4, //实例的世界变换
-    anime_texture_start: u32, //实例动画纹理开始索引
-    anime_texture_count: u32, //实例的动画纹理数量
-    color_texture_start: u32, //实例的色彩纹理开始索引
-    color_texture_count: u32, //实例色彩纹理数量
-    // _padding: [1]f32 = undefined, // 需要对齐到16字节
-};
-const EntityAnimeState = struct {
-    index: u32, //在动画纹理数组中的索引
-    cur_time: f32, //动画当前时间
-};
-const EntityColorTexture = struct {
-    index: u32, //在色彩纹理数组中的索引
-};
-const Animation = struct {
-    duration: f32, //动画总时长
-};
-test "foo" {
-    const allocator = std.testing.allocator;
-    var animations = std.StringHashMap(Animation).init(allocator);
-    defer animations.deinit();
-}
 
 const Algebra = @import("zalgebra");
 const Vec2 = Algebra.Vec2;

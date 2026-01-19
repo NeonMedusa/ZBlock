@@ -5,6 +5,65 @@ const Mat4 = Algebra.Mat4;
 const Input = @import("input.zig");
 const Key = Input.Key;
 
+// // 1. 定义逻辑动画类型（游戏逻辑关心的）
+// pub const LogicAnimType = enum {
+//     idle,
+//     walk,
+//     run,
+//     attack,
+//     die,
+//     _count,
+// };
+// // 2. 每个模型拥有自己的动画映射配置
+// pub const ModelAnimConfig = struct {
+//     model_name: []const u8, // 模型名称
+//     animations: std.AutoHashMap(LogicAnimType, AnimInfo),
+//     pub const AnimInfo = struct {
+//         anim_name: []const u8, // 实际动画文件中的名称
+//         clip_index: u32, // 动画剪辑索引
+//         duration: f32, // 动画时长
+//         looping: bool = true, // 是否循环
+//         default_speed: f32 = 1.0,
+//     };
+// };
+// // 3. 在World中集中管理所有模型的动画配置
+// pub const AnimationManager = struct {
+//     allocator: std.mem.Allocator,
+//     model_configs: std.StringHashMap(ModelAnimConfig), // 模型名 -> 配置
+//     pub fn init(allocator: std.mem.Allocator) AnimationManager {
+//         return .{
+//             .allocator = allocator,
+//             .model_configs = std.StringHashMap(ModelAnimConfig).init(allocator),
+//         };
+//     }
+//     // 加载模型时同时加载动画配置
+//     pub fn loadModelConfig(self: *AnimationManager, model_name: []const u8, config_path: []const u8) !void {
+//         // 从JSON/二进制文件加载配置
+//         const config = try loadConfigFromFile(config_path);
+//         try self.model_configs.put(model_name, config);
+//     }
+//     // 获取特定模型的动画信息
+//     pub fn getAnimInfo(self: *AnimationManager, model_name: []const u8, logic_anim: LogicAnimType) ?ModelAnimConfig.AnimInfo {
+//         if (self.model_configs.get(model_name)) |config| {
+//             return config.animations.get(logic_anim);
+//         }
+//         return null;
+//     }
+// };
+// // 4. 实体动画状态组件
+// pub const AnimationState = struct {
+//     // 逻辑层面的动画状态
+//     current_logic_anim: LogicAnimType = .idle,
+//     logic_anim_time: f32 = 0, // 归一化时间 [0, 1]
+//     // 实际动画信息（运行时查询）
+//     actual_anim_name: ?[]const u8 = null,
+//     actual_clip_index: ?u32 = null,
+//     // 动画参数
+//     speed: f32 = 1.0,
+//     weight: f32 = 1.0,
+//     looping: bool = true,
+// };
+
 pub const EntityId = u32;
 pub const Player = struct {
     player_id: u32 = 0, // 用于区分不同玩家（联机时有用）
@@ -19,11 +78,7 @@ pub const Health = struct {
     current: f32,
     max: f32,
 };
-// 将来可能用于动画系统，但这可能不是一个好的设计，为了支持多个动画，可能应该用bitset
-pub const ActionStatus = enum {
-    moving,
-    idel,
-};
+
 // 组件签名（bitset），用于更优雅的组件匹配
 pub const ComponentType = enum(u16) {
     player,
@@ -59,10 +114,9 @@ pub fn ComponentStorage(comptime T: type) type {
         }
         pub fn set(self: *Self, entity: EntityId, component: T) !void {
             if (self.entity_to_index.get(entity)) |index| {
-                // 更新现有组件
+                // 如果组件已存在则更新现有组件
                 self.dense.items[index] = component;
-            } else {
-                // 添加新组件
+            } else { // 否则添加新组件
                 const index = self.dense.items.len;
                 try self.dense.append(self.allocator, component);
                 try self.sparse.append(self.allocator, entity);
@@ -70,9 +124,8 @@ pub fn ComponentStorage(comptime T: type) type {
             }
         }
         pub fn get(self: *Self, entity: EntityId) ?*T {
-            if (self.entity_to_index.get(entity)) |index| {
+            if (self.entity_to_index.get(entity)) |index|
                 return &self.dense.items[index];
-            }
             return null;
         }
         pub fn has(self: *Self, entity: EntityId) bool {
@@ -125,7 +178,6 @@ pub const World = struct {
     moving_targets: ComponentStorage(MovingTarget), // 移动目标（将来用于寻路）
     speeds: ComponentStorage(Speed), // 移速
     healths: ComponentStorage(Health), // 生命值
-    action_status: ComponentStorage(ActionStatus), // 动作状态
     // 初始化
     pub fn init(allocator: std.mem.Allocator) World {
         return .{
@@ -138,7 +190,6 @@ pub const World = struct {
             .moving_targets = ComponentStorage(MovingTarget).init(allocator),
             .speeds = ComponentStorage(Speed).init(allocator),
             .healths = ComponentStorage(Health).init(allocator),
-            .action_status = ComponentStorage(ActionStatus).init(allocator),
         };
     }
     // 析构
@@ -151,7 +202,6 @@ pub const World = struct {
         self.moving_targets.deinit(self.allocator);
         self.speeds.deinit(self.allocator);
         self.healths.deinit(self.allocator);
-        self.action_status.deinit(self.allocator);
     }
     // 更新所有系统
     pub fn update(self: *World, delta_time: f32) !void {
@@ -243,7 +293,6 @@ pub const World = struct {
             MovingTarget => .moving_target,
             Speed => .speed,
             Health => .health,
-            ActionStatus => .action_status,
             else => @compileError("Unsupported component type"),
         };
         // 存储组件数据
@@ -271,7 +320,6 @@ pub const World = struct {
             MovingTarget => .moving_target,
             Speed => .speed,
             Health => .health,
-            ActionStatus => .action_status,
             else => @compileError("Unsupported component type"),
         };
         var removed = false;
@@ -316,7 +364,6 @@ pub const World = struct {
         _ = self.moving_targets.remove(entity);
         _ = self.speeds.remove(entity);
         _ = self.healths.remove(entity);
-        _ = self.action_status.remove(entity);
     }
     // 创建基础实体
     pub fn createBaseEntity(
