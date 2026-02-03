@@ -118,7 +118,7 @@ fn initTestWorld(game: *Game) !void {
         .{ .value = 2.0 }, // 基础速度
         .{ .current = 100.0, .max = 100.0 }, // 生命值
     );
-    try game.world.setComponent(entity1, ECS.MovingTarget{ .vec = Vec3.new(10, 0, 0) });
+    try game.world.setComponent(entity1, Components.MovingTarget{ .vec = Vec3.new(10, 0, 0) });
 
     const entity2 = try game.world.createBaseEntity(
         .BarramundiFish,
@@ -126,7 +126,7 @@ fn initTestWorld(game: *Game) !void {
         .{ .value = 1.5 }, // 基础速度
         .{ .current = 80.0, .max = 80.0 }, // 生命值
     );
-    try game.world.setComponent(entity2, ECS.MovingTarget{ .vec = Vec3.new(-10, 0, 0) });
+    try game.world.setComponent(entity2, Components.MovingTarget{ .vec = Vec3.new(-10, 0, 0) });
 }
 
 const Game = @This();
@@ -151,8 +151,8 @@ const ModelName = @import("model.zig").ModelName;
 const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
 
-const ECS = @import("ecs.zig");
-const World = ECS.World;
+const World = @import("world.zig").World;
 
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
+const Components = @import("components.zig").Components;
