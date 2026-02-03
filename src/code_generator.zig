@@ -9,8 +9,8 @@ fn writeFmt(writer: anytype, comptime format: []const u8, args: anytype) !void {
     try writer.writeAll(formatted);
 }
 
-// 主函数 - 生成 generated_ecs.zig 文件
-pub fn foo() !void {
+// 生成 generated_ecs.zig 文件
+pub fn generate() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -89,6 +89,7 @@ pub fn foo() !void {
     std.debug.print("✅ 成功生成 generated_ecs.zig 文件，包含 {} 个组件\n", .{component_count});
 }
 
-test "foo" {
-    try foo();
+// 暂时先使用test生成代码
+test "generate" {
+    try generate();
 }

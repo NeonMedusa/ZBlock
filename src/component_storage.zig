@@ -60,7 +60,7 @@ pub fn ComponentStorage(comptime T: type) type {
         const Iterator = struct {
             storage: *Self,
             index: usize = 0,
-            pub fn next(self: *@This()) ?struct { EntityId, *T } {
+            pub fn next(self: *Iterator) ?struct { EntityId, *T } {
                 if (self.index >= self.storage.dense.items.len) return null;
                 const entity = self.storage.sparse.items[self.index];
                 const component = &self.storage.dense.items[self.index];

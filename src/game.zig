@@ -76,7 +76,8 @@ pub fn start(self: *@This()) !void {
                     entry.@"1".current -= 1;
             }
             if (self.input.isKeyDown(.equal)) {
-                _ = try self.world.createBaseEntity(
+                _ = try Systems.createBaseEntity(
+                    &self.world,
                     .CesiumMan,
                     .{ .vec = Vec3.new(0, 0, -pos_offset) },
                     .{ .value = 1 },
@@ -86,7 +87,7 @@ pub fn start(self: *@This()) !void {
             }
 
             // 更新世界
-            try self.world.update(self.window.delta_time);
+            try Systems.updateAll(&self.world, self.window.delta_time);
             // 更新摄像头
             self.camera.update(self);
             self.ubo.view_matrix = self.camera.getViewMatrix();
@@ -103,7 +104,8 @@ pub fn start(self: *@This()) !void {
 }
 
 fn initTestWorld(game: *Game) !void {
-    const player1 = try game.world.createPlayer(
+    const player1 = try Systems.createPlayer(
+        &game.world,
         .CesiumMan,
         .{ .vec = Vec3.new(0, 0, 0) },
         .{ .value = 2.0 }, // 基础速度
@@ -112,7 +114,8 @@ fn initTestWorld(game: *Game) !void {
     );
     _ = player1;
 
-    const entity1 = try game.world.createBaseEntity(
+    const entity1 = try Systems.createBaseEntity(
+        &game.world,
         .Wolf,
         .{ .vec = Vec3.new(0, 0, 0) },
         .{ .value = 2.0 }, // 基础速度
@@ -120,7 +123,8 @@ fn initTestWorld(game: *Game) !void {
     );
     try game.world.setComponent(entity1, Components.MovingTarget{ .vec = Vec3.new(10, 0, 0) });
 
-    const entity2 = try game.world.createBaseEntity(
+    const entity2 = try Systems.createBaseEntity(
+        &game.world,
         .BarramundiFish,
         .{ .vec = Vec3.new(0, 0, 0) },
         .{ .value = 1.5 }, // 基础速度
@@ -156,3 +160,4 @@ const World = @import("world.zig").World;
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
 const Components = @import("components.zig").Components;
+const Systems = @import("systems.zig");
