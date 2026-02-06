@@ -5,6 +5,8 @@
 const std = @import("std");
 const Components = @import("components.zig").Components;
 
+pub const EntityId = u32;
+
 // 组件类型枚举
 pub const ComponentType = enum(u16) {
     Player,

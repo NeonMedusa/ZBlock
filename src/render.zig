@@ -34,7 +34,7 @@ pub fn draw(game: *Game) !void {
         const anim = model.animations.get(.walk) orelse undefined;
 
         game.res_manager.entities_data[entity_counter] = EntityData{
-            .transform = Systems.getTransformMatrix(&game.world, entity_id).?,
+            .transform = WorldHelper.getTransformMatrix(&game.world, entity_id).?,
             .color_texture_index = model.color_texture_idx,
 
             .anime_texture_index = anim.texture.index,
@@ -147,3 +147,4 @@ const VertexIndirectCmd = ShaderType.VertexIndirectCmd;
 const UiSystem = @import("ui_system.zig");
 const Game = @import("game.zig");
 const Systems = @import("systems.zig");
+const WorldHelper = @import("world_helper.zig");

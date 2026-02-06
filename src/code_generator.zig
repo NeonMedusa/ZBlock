@@ -33,6 +33,7 @@ pub fn generate() !void {
         \\const std = @import("std");
         \\const Components = @import("components.zig").Components;
         \\
+        \\pub const EntityId = u32;
         \\
     );
 
