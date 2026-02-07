@@ -156,7 +156,7 @@ const ModelName = @import("model.zig").ModelName;
 const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
 
-const World = @import("world.zig").World;
+const World = @import("generated_ecs.zig").World;
 
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;

@@ -8,7 +8,7 @@ const EntityId = ECS.EntityId;
 const Signature = ECS.Signature;
 const ComponentType = ECS.ComponentType;
 const Components = @import("../components.zig").Components;
-const World = @import("../world.zig").World;
+const World = @import("../generated_ecs.zig").World;
 
 const mobile_entity_sig = blk: {
     var sig = Signature.initEmpty();
@@ -30,14 +30,14 @@ pub fn update(world: *World, delta_time: f32) !void {
             // 如果距离目标点已经足够近，则判定为已经到达目标点，停止移动并移除目标点组件
             if (distance < 0.01) {
                 position.vec = target.vec;
-                _ = world.removeComponent(entity, Components.MovingTarget);
+                _ = world.removeComponent(entity, .MovingTarget);
                 continue;
             }
             // 如果本次帧移动距离大于到目标的距离，直接到达
             const move_distance = speed.value * delta_time;
             if (move_distance >= distance) {
                 position.vec = target.vec;
-                _ = world.removeComponent(entity, Components.MovingTarget);
+                _ = world.removeComponent(entity, .MovingTarget);
                 continue;
             }
             // 否则沿方向移动

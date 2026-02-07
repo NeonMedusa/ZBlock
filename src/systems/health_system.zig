@@ -8,7 +8,7 @@ const EntityId = ECS.EntityId;
 const Signature = ECS.Signature;
 const ComponentType = ECS.ComponentType;
 const Components = @import("../components.zig").Components;
-const World = @import("../world.zig").World;
+const World = @import("../generated_ecs.zig").World;
 
 pub fn update(world: *World) !void {
     var health_iter = world.healths.iterator();

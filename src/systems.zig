@@ -8,4 +8,4 @@ pub fn updata(world: *World, delta_time: f32) !void {
     try Health.update(world);
 }
 
-const World = @import("world.zig").World;
+const World = @import("generated_ecs.zig").World;

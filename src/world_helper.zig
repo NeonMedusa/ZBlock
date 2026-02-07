@@ -10,7 +10,7 @@ const ECS = @import("generated_ecs.zig");
 const EntityId = ECS.EntityId;
 const Signature = ECS.Signature;
 const ComponentType = ECS.ComponentType;
-const World = @import("world.zig").World;
+const World = @import("generated_ecs.zig").World;
 // 辅助函数创建基础实体
 pub fn createBaseEntity(
     world: *World,
