@@ -44,6 +44,22 @@ pub inline fn getComponentType(comptime T: type) ComponentType {
     };
 }
 
+// 从枚举值获取类型名
+pub fn getComponentTypeName(comp_type: ComponentType) []const u8 {
+    return switch (comp_type) {
+        .Player => "Player",
+        .Model => "Model",
+        .Position => "Position",
+        .MovingTarget => "MovingTarget",
+        .Speed => "Speed",
+        .Health => "Health",
+        .AnimationState => "AnimationState",
+        .Collider => "Collider",
+        .PhysicsBody => "PhysicsBody",
+        .Ground => "Ground",
+    };
+}
+
 // 世界
 pub const World = struct {
     allocator: std.mem.Allocator,
@@ -183,34 +199,34 @@ pub const World = struct {
 
     // 获取组件容器
     pub inline fn getStorage(self: *World, T: type) *ComponentStorage(T) {
-        return switch (T) {
-            Components.Player => &self.players,
-            Components.Model => &self.models,
-            Components.Position => &self.positions,
-            Components.MovingTarget => &self.moving_targets,
-            Components.Speed => &self.speeds,
-            Components.Health => &self.healths,
-            Components.AnimationState => &self.animation_states,
-            Components.Collider => &self.colliders,
-            Components.PhysicsBody => &self.physics_bodys,
-            Components.Ground => &self.grounds,
-            else => @compileError("不支持的组件类型: " ++ @typeName(T)),
-        };
+        switch (T) {
+            Components.Player => return &self.players,
+            Components.Model => return &self.models,
+            Components.Position => return &self.positions,
+            Components.MovingTarget => return &self.moving_targets,
+            Components.Speed => return &self.speeds,
+            Components.Health => return &self.healths,
+            Components.AnimationState => return &self.animation_states,
+            Components.Collider => return &self.colliders,
+            Components.PhysicsBody => return &self.physics_bodys,
+            Components.Ground => return &self.grounds,
+            else => @compileError("Unsupported component type: " ++ @typeName(T)),
+        }
     }
 
     // 检测实体是否包含组件
     pub fn hasComponent(self: *World, entity_id: EntityId, comp_type: ComponentType) bool {
-        return switch (comp_type) {
-            .Player => self.players.has(entity_id),
-            .Model => self.models.has(entity_id),
-            .Position => self.positions.has(entity_id),
-            .MovingTarget => self.moving_targets.has(entity_id),
-            .Speed => self.speeds.has(entity_id),
-            .Health => self.healths.has(entity_id),
-            .AnimationState => self.animation_states.has(entity_id),
-            .Collider => self.colliders.has(entity_id),
-            .PhysicsBody => self.physics_bodys.has(entity_id),
-            .Ground => self.grounds.has(entity_id),
-        };
+        switch (comp_type) {
+            .Player => return self.players.has(entity_id),
+            .Model => return self.models.has(entity_id),
+            .Position => return self.positions.has(entity_id),
+            .MovingTarget => return self.moving_targets.has(entity_id),
+            .Speed => return self.speeds.has(entity_id),
+            .Health => return self.healths.has(entity_id),
+            .AnimationState => return self.animation_states.has(entity_id),
+            .Collider => return self.colliders.has(entity_id),
+            .PhysicsBody => return self.physics_bodys.has(entity_id),
+            .Ground => return self.grounds.has(entity_id),
+        }
     }
 };

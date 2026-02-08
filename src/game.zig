@@ -57,7 +57,10 @@ pub fn start(self: *@This()) !void {
     var main_menu = @import("ui/main_menu.zig"){};
 
     // 将世界初始化为测试场景
-    try initTestWorld(self);
+    try initTestPhysicsWorld(self);
+
+    var physics_system = try PhysicsSystem.init(self.allocator);
+    defer physics_system.deinit();
 
     var pos_offset: f32 = 0;
     // 主循环
@@ -87,7 +90,8 @@ pub fn start(self: *@This()) !void {
             }
 
             // 更新世界
-            try Systems.updata(&self.world, self.window.delta_time);
+            // try Systems.updata(&self.world, self.window.delta_time);
+            try physics_system.update(&self.world, self.window.delta_time);
 
             // 更新摄像头
             self.camera.update(self);
@@ -132,6 +136,46 @@ fn initTestWorld(game: *Game) !void {
         .{ .current = 80.0, .max = 80.0 }, // 生命值
     );
     try game.world.setComponent(entity2, Components.MovingTarget{ .vec = Vec3.new(-10, 0, 0) });
+
+    const ground = try WorldHelper.createGround(&game.world, 64);
+    try game.world.setComponent(ground, Components.Position{ .vec = Vec3.new(-10, -10, -10) });
+}
+
+fn initTestPhysicsWorld(game: *Game) !void {
+    // 创建实体
+    const entity = try Entity.init(&game.world);
+
+    // 设置组件和获取组件时必须明确类型
+    try entity.setComponent(Components.Position{ .vec = Vec3.new(3, 0, 0) });
+    _ = entity.getComponent(Components.Position);
+
+    // 方案1:传枚举，在括号中输入.即可调出代码提示
+    _ = entity.hasComponent(.Position);
+    _ = entity.removeComponent(.Position);
+
+    // 方案2:传类型，在括号中输入Components.调出代码提示
+    // _ = entity.hasComponent(Components.Position);
+    // _ = entity.removeComponent(Components.Position);
+
+    // 创建空实体
+    const player = try game.world.createEntity();
+    // 设置位置
+    try game.world.setComponent(player, Components.Position{ .vec = Vec3.new(0, 0, 0) });
+    // 设置渲染模型
+    try game.world.setComponent(player, Components.Model.Wolf);
+    // 设置碰撞体组件
+    try game.world.setComponent(player, Components.Collider{
+        .shape_type = .sphere,
+        .dimensions = Vec3.new(1, 0, 0), // x存储半径
+    });
+    // 设置物理属性组件
+    try game.world.setComponent(player, Components.PhysicsBody{
+        .mass = 1,
+    });
+
+    // 创建地面
+    const ground = try WorldHelper.createGround(&game.world, 64);
+    try game.world.setComponent(ground, Components.Position{ .vec = Vec3.new(-10, -10, -10) });
 }
 
 const Game = @This();
@@ -164,3 +208,7 @@ const Components = @import("components.zig").Components;
 
 const Systems = @import("systems.zig");
 const WorldHelper = @import("world_helper.zig");
+
+const PhysicsSystem = @import("systems/physics_system.zig").PhysicsSystem;
+
+const Entity = @import("entity.zig").Entity;

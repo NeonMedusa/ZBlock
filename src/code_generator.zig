@@ -54,11 +54,6 @@ pub fn generate() !void {
         \\// 请勿手动修改此文件
         \\
         \\const std = @import("std");
-        \\const Algebra = @import("zalgebra");
-        \\const Vec3 = Algebra.Vec3;
-        \\const Mat4 = Algebra.Mat4;
-        \\const Input = @import("input.zig");
-        \\const Key = Input.Key;
         \\const ComponentStorage = @import("component_storage.zig").ComponentStorage;
         \\const Components = @import("components.zig").Components;
         \\
@@ -102,18 +97,7 @@ pub fn generate() !void {
     try writer.writeAll("    };\n");
     try writer.writeAll("}\n\n");
 
-    // 6. 生成从枚举值到类型名的映射函数
-    try writer.writeAll("// 从枚举值获取类型名\n");
-    try writer.writeAll("pub fn getComponentTypeName(comp_type: ComponentType) []const u8 {\n");
-    try writer.writeAll("    return switch (comp_type) {\n");
-
-    for (decls) |decl|
-        try writeFmt(writer, "        .{s} => \"{s}\",\n", .{ decl.name, decl.name });
-
-    try writer.writeAll("    };\n");
-    try writer.writeAll("}\n\n");
-
-    // 7. 生成 World 结构体
+    // 6. 生成 World 结构体
     try writer.writeAll("// 世界\n");
     try writer.writeAll("pub const World = struct {\n");
     try writer.writeAll("    allocator: std.mem.Allocator,\n");
@@ -228,12 +212,37 @@ pub fn generate() !void {
     try writer.writeAll("        // 清空组件签名\n");
     try writer.writeAll("        self.signatures.items[entity] = Signature.initEmpty();\n");
     try writer.writeAll("        // 清理所有组件\n");
-
-    // 为每个组件生成移除调用
     for (snake_names.items) |snake_name|
         try writeFmt(writer, "        _ = self.{s}.remove(entity);\n", .{snake_name});
+    try writer.writeAll("    }\n\n");
 
+    // 生成获取组件函数
+    try writer.writeAll("    // 获取实体组件\n");
+    try writer.writeAll("    pub fn getComponent(self: *World, entity_id: EntityId, T: type) ?*T {\n");
+    try writer.writeAll("        var comp_storage = self.getStorage(T);\n");
+    try writer.writeAll("        return comp_storage.get(entity_id);\n");
+    try writer.writeAll("    }\n\n");
+
+    // 生成获取组件容器函数
+    try writer.writeAll("    // 获取组件容器\n");
+    try writer.writeAll("    pub inline fn getStorage(self: *World, T: type) *ComponentStorage(T) {\n");
+    try writer.writeAll("        return switch (T) {\n");
+    for (decls, 0..) |decl, i|
+        try writeFmt(writer, "            Components.{s} => &self.{s},\n", .{ decl.name, snake_names.items[i] });
+    try writer.writeAll("            else => @compileError(\"不支持的组件类型: \" ++ @typeName(T)),\n");
+    try writer.writeAll("        };\n");
+    try writer.writeAll("    }\n\n");
+
+    // 生成检测组件函数
+    try writer.writeAll("    // 检测实体是否包含组件\n");
+    try writer.writeAll("    pub fn hasComponent(self: *World, entity_id: EntityId, comp_type: ComponentType) bool {\n");
+    try writer.writeAll("        return switch (comp_type) {\n");
+    for (decls, 0..) |decl, i|
+        try writeFmt(writer, "            .{s} => self.{s}.has(entity_id),\n", .{ decl.name, snake_names.items[i] });
+    try writer.writeAll("        };\n");
     try writer.writeAll("    }\n");
+
+    // World类结尾
     try writer.writeAll("};\n");
 
     // 写入文件
