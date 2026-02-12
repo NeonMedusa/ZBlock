@@ -7,7 +7,8 @@ const World = ECS.World;
 pub const Entity = struct {
     id: u32,
     world: *World,
-    pub fn init(world: *World) !Entity {
+    Signature: ECS.Signature,
+    pub fn new(world: *World) !Entity {
         const id = try world.createEntity();
         return .{
             .world = world,

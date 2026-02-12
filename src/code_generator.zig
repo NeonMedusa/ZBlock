@@ -1,6 +1,8 @@
 // code_generator.zig
 const std = @import("std");
 const Components = @import("components.zig").Components;
+// 最大实体数量
+pub const MAX_ENTITIES = 8192;
 
 // 辅助函数：写入格式化字符串
 fn writeFmt(writer: anytype, comptime format: []const u8, args: anytype) !void {
@@ -174,20 +176,20 @@ pub fn generate() !void {
 
     // 生成移除组件函数
     try writer.writeAll("    // 移除组件并更新签名\n");
-    try writer.writeAll("    pub fn removeComponent(self: *World, entity: EntityId, comp_type: ComponentType) bool {\n");
+    try writer.writeAll("    pub fn removeComponent(self: *World, entity_id: EntityId, comp_type: ComponentType) bool {\n");
     try writer.writeAll("        var removed = false;\n");
     try writer.writeAll("        switch (comp_type) {\n");
 
     // 为每个组件生成 case
     for (decls, 0..) |decl, i|
-        try writeFmt(writer, "            .{s} => removed = self.{s}.remove(entity),\n", .{ decl.name, snake_names.items[i] });
+        try writeFmt(writer, "            .{s} => removed = self.{s}.remove(entity_id),\n", .{ decl.name, snake_names.items[i] });
 
     try writer.writeAll("        }\n");
     try writer.writeAll("        // 更新实体签名（清除对应位）\n");
     try writer.writeAll("        if (removed) {\n");
-    try writer.writeAll("            var sig = self.signatures.items[entity];\n");
+    try writer.writeAll("            var sig = self.signatures.items[entity_id];\n");
     try writer.writeAll("            sig.unset(@intFromEnum(comp_type));\n");
-    try writer.writeAll("            self.signatures.items[entity] = sig;\n");
+    try writer.writeAll("            self.signatures.items[entity_id] = sig;\n");
     try writer.writeAll("        }\n");
     try writer.writeAll("        return removed;\n");
     try writer.writeAll("    }\n\n");
@@ -206,14 +208,14 @@ pub fn generate() !void {
 
     // 生成移除实体函数
     try writer.writeAll("    // 移除实体\n");
-    try writer.writeAll("    pub fn removeEntity(self: *World, entity: EntityId) !void {\n");
+    try writer.writeAll("    pub fn removeEntity(self: *World, entity_id: EntityId) !void {\n");
     try writer.writeAll("        // 将ID归还给可用ID池\n");
-    try writer.writeAll("        try self.available_ids.append(self.allocator, entity);\n");
+    try writer.writeAll("        try self.available_ids.append(self.allocator, entity_id);\n");
     try writer.writeAll("        // 清空组件签名\n");
-    try writer.writeAll("        self.signatures.items[entity] = Signature.initEmpty();\n");
+    try writer.writeAll("        self.signatures.items[entity_id] = Signature.initEmpty();\n");
     try writer.writeAll("        // 清理所有组件\n");
     for (snake_names.items) |snake_name|
-        try writeFmt(writer, "        _ = self.{s}.remove(entity);\n", .{snake_name});
+        try writeFmt(writer, "        _ = self.{s}.remove(entity_id);\n", .{snake_name});
     try writer.writeAll("    }\n\n");
 
     // 生成获取组件函数

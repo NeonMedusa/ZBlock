@@ -4,10 +4,9 @@ const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Input = @import("input.zig");
 const Key = Input.Key;
-const ComponentStorage = @import("component_storage.zig").ComponentStorage;
 const Components = @import("components.zig").Components;
 const ECS = @import("generated_ecs.zig");
-const EntityId = ECS.EntityId;
+const Entity = ECS.Entity;
 const Signature = ECS.Signature;
 const ComponentType = ECS.ComponentType;
 const World = @import("generated_ecs.zig").World;
@@ -18,12 +17,12 @@ pub fn createBaseEntity(
     start_pos: Components.Position,
     base_speed: Components.Speed,
     health: Components.Health,
-) !EntityId {
+) !Entity {
     const entity = try world.createEntity();
-    try world.setComponent(entity, model);
-    try world.setComponent(entity, start_pos);
-    try world.setComponent(entity, base_speed);
-    try world.setComponent(entity, health);
+    try entity.setComponent(model);
+    try entity.setComponent(start_pos);
+    try entity.setComponent(base_speed);
+    try entity.setComponent(health);
     return entity;
 }
 // 创建玩家
@@ -34,7 +33,7 @@ pub fn createPlayer(
     base_speed: Components.Speed,
     health: Components.Health,
     player: Components.Player,
-) !EntityId {
+) !Entity {
     const entity = try createBaseEntity(
         world,
         model,
@@ -42,12 +41,12 @@ pub fn createPlayer(
         base_speed,
         health,
     );
-    try world.setComponent(entity, player);
+    try entity.setComponent(player);
     return entity;
 }
 // 获取变换矩阵（用于渲染）
-pub fn getTransformMatrix(world: *World, entity: EntityId) ?Mat4 {
-    if (world.positions.get(entity)) |position|
+pub fn getTransformMatrix(entity: Entity) ?Mat4 {
+    if (entity.getComponent(Components.Position)) |position|
         return Mat4.fromTranslate(position.vec);
     return null;
 }
@@ -59,7 +58,7 @@ pub fn createPhysicsSphere(
     radius: f32,
     mass: f32,
     is_static: bool,
-) !EntityId {
+) !Entity {
     const entity = try world.createEntity();
 
     // 位置组件
@@ -82,22 +81,17 @@ pub fn createPhysicsSphere(
 }
 
 // 创建地面
-pub fn createGround(world: *World, size: f32) !EntityId {
+pub fn createGround(world: *World, size: f32) !Entity {
     const entity = try world.createEntity();
-
-    try world.setComponent(entity, Components.Position{ .vec = Vec3.new(0, -5, 0) });
-
-    try world.setComponent(entity, Components.Collider{
+    try entity.setComponent(Components.Position{ .vec = Vec3.new(0, -5, 0) });
+    try entity.setComponent(Components.Collider{
         .shape_type = .box,
         .dimensions = Vec3.new(size, 1, size),
     });
-
-    try world.setComponent(entity, Components.PhysicsBody{
+    try entity.setComponent(Components.PhysicsBody{
         .is_static = true,
         .restitution = 0.2,
     });
-
-    try world.setComponent(entity, Components.Ground{});
-
+    try entity.setComponent(Components.Ground{});
     return entity;
 }

@@ -19,14 +19,13 @@ const mobile_player_sig = blk: {
 };
 
 pub fn update(world: *World, delta_time: f32) !void {
-    for (world.signatures.items, 0..) |sig, entity_id| {
-        const entity = @as(EntityId, @intCast(entity_id));
+    for (world.activeEntities()) |entity| {
         // 如果该实体的组件签名是mobile_player_sig的超集，那它就是一个mobile_player（可移动玩家，不是手机玩家！）
-        if (sig.supersetOf(mobile_player_sig)) {
+        if (entity.signature.supersetOf(mobile_player_sig)) {
             // 现在可以安全地获取组件，无需空值检查
-            const player = world.players.get(entity).?;
-            const position = world.positions.get(entity).?;
-            const speed = world.speeds.get(entity).?;
+            const player = world.players.get(entity.id).?;
+            const position = world.positions.get(entity.id).?;
+            const speed = world.speeds.get(entity.id).?;
             const velocity = speed.value * delta_time;
             if (player.input.isKeyPressed(.left))
                 position.vec = position.vec.add(Vec3.new(-velocity, 0, 0));

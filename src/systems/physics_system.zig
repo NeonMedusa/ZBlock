@@ -91,11 +91,11 @@ pub const PhysicsSystem = struct {
 
     pub fn update(self: *PhysicsSystem, world: *World, delta_time: f32) !void {
         // 1. 应用力和积分
-        for (world.signatures.items, 0..) |sig, entity_id| {
-            const entity = @as(EntityId, @intCast(entity_id));
+        for (world.activeEntities()) |entity| {
+            const sig = entity.signature;
             if (sig.supersetOf(physics_entity_sig)) {
-                const position = world.positions.get(entity).?;
-                const body = world.physics_bodys.get(entity).?;
+                const position = world.positions.get(entity.id).?;
+                const body = world.physics_bodys.get(entity.id).?;
 
                 if (!body.is_static) {
                     // 应用重力

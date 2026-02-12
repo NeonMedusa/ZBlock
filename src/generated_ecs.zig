@@ -3,9 +3,33 @@
 // 请勿手动修改此文件
 
 const std = @import("std");
-const ComponentStorage = @import("component_storage.zig").ComponentStorage;
+const SparseSet = @import("sparse_set.zig").SparseSet;
 const Components = @import("components.zig").Components;
-pub const EntityId = u32;
+
+pub const EntityId = usize;
+
+pub const MAX_ENTITIES = 8192;
+
+pub const Entity = struct {
+    id: EntityId,
+    world: *World,
+    signature: Signature,
+    pub fn setComponent(self: Entity, component: anytype) !void {
+        try self.world.setComponent(self.id, component);
+    }
+    pub fn getComponent(self: Entity, T: type) ?*T {
+        return self.world.getComponent(self.id, T);
+    }
+    pub fn removeComponent(self: Entity, comp_type: ComponentType) !bool {
+        return self.world.removeComponent(self.id, comp_type);
+    }
+    pub fn destroy(self: Entity) !void {
+        try self.world.removeEntity(self.id);
+    }
+    pub fn hasComponent(self: Entity, comp_type: ComponentType) bool {
+        return self.world.hasComponent(self.id, comp_type);
+    }
+};
 
 // 组件类型枚举
 pub const ComponentType = enum(u16) {
@@ -49,130 +73,149 @@ pub const World = struct {
     allocator: std.mem.Allocator,
     next_entity_id: EntityId = 0,
     available_ids: std.ArrayList(EntityId), // 可用ID池
-    signatures: std.ArrayList(Signature), // 实体签名存储
+    // 活跃的实体稀疏集，遍历它的密集数组以匹配组件签名
+    active_entities: SparseSet(Entity, MAX_ENTITIES),
 
     // 组件存储
-    players: ComponentStorage(Components.Player), // player
-    models: ComponentStorage(Components.Model), // model
-    positions: ComponentStorage(Components.Position), // position
-    moving_targets: ComponentStorage(Components.MovingTarget), // movingtarget
-    speeds: ComponentStorage(Components.Speed), // speed
-    healths: ComponentStorage(Components.Health), // health
-    animation_states: ComponentStorage(Components.AnimationState), // animationstate
-    colliders: ComponentStorage(Components.Collider), // collider
-    physics_bodys: ComponentStorage(Components.PhysicsBody), // physicsbody
-    grounds: ComponentStorage(Components.Ground), // ground
+    players: SparseSet(Components.Player, MAX_ENTITIES), // player
+    models: SparseSet(Components.Model, MAX_ENTITIES), // model
+    positions: SparseSet(Components.Position, MAX_ENTITIES), // position
+    moving_targets: SparseSet(Components.MovingTarget, MAX_ENTITIES), // movingtarget
+    speeds: SparseSet(Components.Speed, MAX_ENTITIES), // speed
+    healths: SparseSet(Components.Health, MAX_ENTITIES), // health
+    animation_states: SparseSet(Components.AnimationState, MAX_ENTITIES), // animationstate
+    colliders: SparseSet(Components.Collider, MAX_ENTITIES), // collider
+    physics_bodys: SparseSet(Components.PhysicsBody, MAX_ENTITIES), // physicsbody
+    grounds: SparseSet(Components.Ground, MAX_ENTITIES), // ground
 
     // 初始化
     pub fn init(allocator: std.mem.Allocator) World {
         return .{
             .allocator = allocator,
+            .next_entity_id = 0,
             .available_ids = std.ArrayList(EntityId){},
-            .signatures = std.ArrayList(Signature){},
-            .players = ComponentStorage(Components.Player).init(allocator),
-            .models = ComponentStorage(Components.Model).init(allocator),
-            .positions = ComponentStorage(Components.Position).init(allocator),
-            .moving_targets = ComponentStorage(Components.MovingTarget).init(allocator),
-            .speeds = ComponentStorage(Components.Speed).init(allocator),
-            .healths = ComponentStorage(Components.Health).init(allocator),
-            .animation_states = ComponentStorage(Components.AnimationState).init(allocator),
-            .colliders = ComponentStorage(Components.Collider).init(allocator),
-            .physics_bodys = ComponentStorage(Components.PhysicsBody).init(allocator),
-            .grounds = ComponentStorage(Components.Ground).init(allocator),
+            .active_entities = SparseSet(Entity, MAX_ENTITIES).init(allocator),
+            // 组件存储
+            .players = SparseSet(Components.Player, MAX_ENTITIES).init(allocator),
+            .models = SparseSet(Components.Model, MAX_ENTITIES).init(allocator),
+            .positions = SparseSet(Components.Position, MAX_ENTITIES).init(allocator),
+            .moving_targets = SparseSet(Components.MovingTarget, MAX_ENTITIES).init(allocator),
+            .speeds = SparseSet(Components.Speed, MAX_ENTITIES).init(allocator),
+            .healths = SparseSet(Components.Health, MAX_ENTITIES).init(allocator),
+            .animation_states = SparseSet(Components.AnimationState, MAX_ENTITIES).init(allocator),
+            .colliders = SparseSet(Components.Collider, MAX_ENTITIES).init(allocator),
+            .physics_bodys = SparseSet(Components.PhysicsBody, MAX_ENTITIES).init(allocator),
+            .grounds = SparseSet(Components.Ground, MAX_ENTITIES).init(allocator),
         };
     }
 
     // 析构
     pub fn deinit(self: *World) void {
         self.available_ids.deinit(self.allocator);
-        self.signatures.deinit(self.allocator);
-        self.players.deinit(self.allocator);
-        self.models.deinit(self.allocator);
-        self.positions.deinit(self.allocator);
-        self.moving_targets.deinit(self.allocator);
-        self.speeds.deinit(self.allocator);
-        self.healths.deinit(self.allocator);
-        self.animation_states.deinit(self.allocator);
-        self.colliders.deinit(self.allocator);
-        self.physics_bodys.deinit(self.allocator);
-        self.grounds.deinit(self.allocator);
+        self.active_entities.deinit();
+
+        self.players.deinit();
+        self.models.deinit();
+        self.positions.deinit();
+        self.moving_targets.deinit();
+        self.speeds.deinit();
+        self.healths.deinit();
+        self.animation_states.deinit();
+        self.colliders.deinit();
+        self.physics_bodys.deinit();
+        self.grounds.deinit();
     }
 
     // 设置组件并更新签名
-    pub fn setComponent(self: *World, entity: EntityId, component: anytype) !void {
+    pub fn setComponent(self: *World, entity_id: EntityId, component: anytype) !void {
         const T = @TypeOf(component);
         const comp_type = getComponentType(T);
         // 存储组件数据
         switch (comp_type) {
-            .Player => try self.players.set(entity, component),
-            .Model => try self.models.set(entity, component),
-            .Position => try self.positions.set(entity, component),
-            .MovingTarget => try self.moving_targets.set(entity, component),
-            .Speed => try self.speeds.set(entity, component),
-            .Health => try self.healths.set(entity, component),
-            .AnimationState => try self.animation_states.set(entity, component),
-            .Collider => try self.colliders.set(entity, component),
-            .PhysicsBody => try self.physics_bodys.set(entity, component),
-            .Ground => try self.grounds.set(entity, component),
+            .Player => try self.players.set(entity_id, component),
+            .Model => try self.models.set(entity_id, component),
+            .Position => try self.positions.set(entity_id, component),
+            .MovingTarget => try self.moving_targets.set(entity_id, component),
+            .Speed => try self.speeds.set(entity_id, component),
+            .Health => try self.healths.set(entity_id, component),
+            .AnimationState => try self.animation_states.set(entity_id, component),
+            .Collider => try self.colliders.set(entity_id, component),
+            .PhysicsBody => try self.physics_bodys.set(entity_id, component),
+            .Ground => try self.grounds.set(entity_id, component),
         }
         // 更新实体签名（设置对应位为1）
-        var sig = self.signatures.items[entity];
+        var sig = self.active_entities.get(entity_id).?.signature;
         sig.set(@intFromEnum(comp_type));
-        self.signatures.items[entity] = sig;
+        try self.active_entities.set(entity_id, Entity{
+            .id = entity_id,
+            .world = self,
+            .signature = sig,
+        });
     }
 
     // 移除组件并更新签名
-    pub fn removeComponent(self: *World, entity: EntityId, comp_type: ComponentType) bool {
+    pub fn removeComponent(self: *World, entity_id: EntityId, comp_type: ComponentType) !bool {
         var removed = false;
         switch (comp_type) {
-            .Player => removed = self.players.remove(entity),
-            .Model => removed = self.models.remove(entity),
-            .Position => removed = self.positions.remove(entity),
-            .MovingTarget => removed = self.moving_targets.remove(entity),
-            .Speed => removed = self.speeds.remove(entity),
-            .Health => removed = self.healths.remove(entity),
-            .AnimationState => removed = self.animation_states.remove(entity),
-            .Collider => removed = self.colliders.remove(entity),
-            .PhysicsBody => removed = self.physics_bodys.remove(entity),
-            .Ground => removed = self.grounds.remove(entity),
+            .Player => removed = self.players.remove(entity_id),
+            .Model => removed = self.models.remove(entity_id),
+            .Position => removed = self.positions.remove(entity_id),
+            .MovingTarget => removed = self.moving_targets.remove(entity_id),
+            .Speed => removed = self.speeds.remove(entity_id),
+            .Health => removed = self.healths.remove(entity_id),
+            .AnimationState => removed = self.animation_states.remove(entity_id),
+            .Collider => removed = self.colliders.remove(entity_id),
+            .PhysicsBody => removed = self.physics_bodys.remove(entity_id),
+            .Ground => removed = self.grounds.remove(entity_id),
         }
         // 更新实体签名（清除对应位）
         if (removed) {
-            var sig = self.signatures.items[entity];
+            var sig = self.active_entities.get(entity_id).?.signature;
             sig.unset(@intFromEnum(comp_type));
-            self.signatures.items[entity] = sig;
+            try self.active_entities.set(entity_id, Entity{
+                .id = entity_id,
+                .world = self,
+                .signature = sig,
+            });
         }
         return removed;
     }
 
     // 创建实体
-    pub fn createEntity(self: *World) !EntityId {
+    pub fn createEntity(self: *World) !Entity {
+        var entity = Entity{
+            .id = undefined,
+            .world = self,
+            .signature = Signature.initEmpty(),
+        };
         // 复用已删除的实体ID
-        if (self.available_ids.pop()) |id| return id;
-        // 如果无可复用ID，则分配新ID并初始化一个空的组件签名
-        const id = self.next_entity_id;
-        self.next_entity_id += 1;
-        try self.signatures.append(self.allocator, Signature.initEmpty());
-        return id;
+        if (self.available_ids.pop()) |id| {
+            entity.id = id;
+        } else { // 如果无可复用ID，则分配新ID
+            entity.id = self.next_entity_id;
+            self.next_entity_id += 1;
+        }
+        try self.active_entities.set(entity.id, entity);
+        return entity;
     }
 
     // 移除实体
-    pub fn removeEntity(self: *World, entity: EntityId) !void {
+    pub fn removeEntity(self: *World, entity_id: EntityId) !void {
         // 将ID归还给可用ID池
-        try self.available_ids.append(self.allocator, entity);
-        // 清空组件签名
-        self.signatures.items[entity] = Signature.initEmpty();
+        try self.available_ids.append(self.allocator, entity_id);
         // 清理所有组件
-        _ = self.players.remove(entity);
-        _ = self.models.remove(entity);
-        _ = self.positions.remove(entity);
-        _ = self.moving_targets.remove(entity);
-        _ = self.speeds.remove(entity);
-        _ = self.healths.remove(entity);
-        _ = self.animation_states.remove(entity);
-        _ = self.colliders.remove(entity);
-        _ = self.physics_bodys.remove(entity);
-        _ = self.grounds.remove(entity);
+        _ = self.players.remove(entity_id);
+        _ = self.models.remove(entity_id);
+        _ = self.positions.remove(entity_id);
+        _ = self.moving_targets.remove(entity_id);
+        _ = self.speeds.remove(entity_id);
+        _ = self.healths.remove(entity_id);
+        _ = self.animation_states.remove(entity_id);
+        _ = self.colliders.remove(entity_id);
+        _ = self.physics_bodys.remove(entity_id);
+        _ = self.grounds.remove(entity_id);
+        // 从活跃实体集中删除
+        _ = self.active_entities.remove(entity_id);
     }
 
     // 获取实体组件
@@ -182,7 +225,7 @@ pub const World = struct {
     }
 
     // 获取组件容器
-    pub inline fn getStorage(self: *World, T: type) *ComponentStorage(T) {
+    pub inline fn getStorage(self: *World, T: type) *SparseSet(T, MAX_ENTITIES) {
         return switch (T) {
             Components.Player => &self.players,
             Components.Model => &self.models,
@@ -212,5 +255,9 @@ pub const World = struct {
             .PhysicsBody => self.physics_bodys.has(entity_id),
             .Ground => self.grounds.has(entity_id),
         };
+    }
+
+    pub fn activeEntities(self: *World) []Entity {
+        return self.active_entities.dense.items;
     }
 };

@@ -221,10 +221,10 @@ pub const CollisionSystem = struct {
         var physics_entities = std.ArrayList(EntityId){};
         defer physics_entities.deinit(self.allocator);
 
-        for (world.signatures.items, 0..) |sig, entity_id| {
-            const entity = @as(EntityId, @intCast(entity_id));
+        for (world.activeEntities()) |entity| {
+            const sig = entity.signature;
             if (sig.supersetOf(physics_entity_sig)) {
-                try physics_entities.append(self.allocator, entity);
+                try physics_entities.append(self.allocator, entity.id);
             }
         }
 

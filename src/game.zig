@@ -57,10 +57,11 @@ pub fn start(self: *@This()) !void {
     var main_menu = @import("ui/main_menu.zig"){};
 
     // 将世界初始化为测试场景
-    try initTestPhysicsWorld(self);
+    try Tester.initTestWorld(self);
 
-    var physics_system = try PhysicsSystem.init(self.allocator);
-    defer physics_system.deinit();
+    // 初始化系统
+    var systems = Systems.init(self.allocator, &self.world);
+    defer systems.deinit();
 
     var pos_offset: f32 = 0;
     // 主循环
@@ -90,8 +91,8 @@ pub fn start(self: *@This()) !void {
             }
 
             // 更新世界
-            // try Systems.updata(&self.world, self.window.delta_time);
-            try physics_system.update(&self.world, self.window.delta_time);
+            try systems.updata(&self.world, self.window.delta_time);
+            // try physics_system.update(&self.world, self.window.delta_time);
 
             // 更新摄像头
             self.camera.update(self);
@@ -108,86 +109,16 @@ pub fn start(self: *@This()) !void {
     }
 }
 
-fn initTestWorld(game: *Game) !void {
-    const player1 = try WorldHelper.createPlayer(
-        &game.world,
-        .CesiumMan,
-        .{ .vec = Vec3.new(0, 0, 0) },
-        .{ .value = 2.0 }, // 基础速度
-        .{ .current = 3.0, .max = 3.0 }, // 生命值
-        .{ .input = &game.input, .player_id = 1 },
-    );
-    _ = player1;
-
-    const entity1 = try WorldHelper.createBaseEntity(
-        &game.world,
-        .Wolf,
-        .{ .vec = Vec3.new(0, 0, 0) },
-        .{ .value = 2.0 }, // 基础速度
-        .{ .current = 100.0, .max = 100.0 }, // 生命值
-    );
-    try game.world.setComponent(entity1, Components.MovingTarget{ .vec = Vec3.new(10, 0, 0) });
-
-    const entity2 = try WorldHelper.createBaseEntity(
-        &game.world,
-        .BarramundiFish,
-        .{ .vec = Vec3.new(0, 0, 0) },
-        .{ .value = 1.5 }, // 基础速度
-        .{ .current = 80.0, .max = 80.0 }, // 生命值
-    );
-    try game.world.setComponent(entity2, Components.MovingTarget{ .vec = Vec3.new(-10, 0, 0) });
-
-    const ground = try WorldHelper.createGround(&game.world, 64);
-    try game.world.setComponent(ground, Components.Position{ .vec = Vec3.new(-10, -10, -10) });
-}
-
-fn initTestPhysicsWorld(game: *Game) !void {
-    // 创建实体
-    const entity = try Entity.init(&game.world);
-
-    // 设置组件和获取组件时必须明确类型
-    try entity.setComponent(Components.Position{ .vec = Vec3.new(3, 0, 0) });
-    _ = entity.getComponent(Components.Position);
-
-    // 方案1:传枚举，在括号中输入.即可调出代码提示
-    _ = entity.hasComponent(.Position);
-    _ = entity.removeComponent(.Position);
-
-    // 方案2:传类型，在括号中输入Components.调出代码提示
-    // _ = entity.hasComponent(Components.Position);
-    // _ = entity.removeComponent(Components.Position);
-
-    // 创建空实体
-    const player = try game.world.createEntity();
-    // 设置位置
-    try game.world.setComponent(player, Components.Position{ .vec = Vec3.new(0, 0, 0) });
-    // 设置渲染模型
-    try game.world.setComponent(player, Components.Model.Wolf);
-    // 设置碰撞体组件
-    try game.world.setComponent(player, Components.Collider{
-        .shape_type = .sphere,
-        .dimensions = Vec3.new(1, 0, 0), // x存储半径
-    });
-    // 设置物理属性组件
-    try game.world.setComponent(player, Components.PhysicsBody{
-        .mass = 1,
-    });
-
-    // 创建地面
-    const ground = try WorldHelper.createGround(&game.world, 64);
-    try game.world.setComponent(ground, Components.Position{ .vec = Vec3.new(-10, -10, -10) });
-}
-
 const Game = @This();
 const std = @import("std");
 
 const Wgpu = @import("cimports.zig").Wgpu;
 const Glfw = @import("cimports.zig").Glfw;
+const Gltf = @import("zgltf");
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
-const Gltf = @import("zgltf");
 
 const Gctx = @import("gctx.zig");
 const Window = @import("window.zig");
@@ -206,9 +137,8 @@ const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
 const Components = @import("components.zig").Components;
 
-const Systems = @import("systems.zig");
+const Systems = @import("systems.zig").Systems;
 const WorldHelper = @import("world_helper.zig");
 
-const PhysicsSystem = @import("systems/physics_system.zig").PhysicsSystem;
-
-const Entity = @import("entity.zig").Entity;
+const Tester = @import("test_game.zig");
+const Entity = @import("generated_ecs.zig").Entity;

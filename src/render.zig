@@ -27,10 +27,10 @@ pub fn draw(game: *Game) !void {
         sig.set(@intFromEnum(ComponentType.Model));
         break :blk sig;
     };
-    for (game.world.signatures.items, 0..) |sig, entity_id_usize| {
-        const entity_id = @as(ECS.EntityId, @intCast(entity_id_usize));
+    for (game.world.activeEntities()) |entity| {
+        const sig = entity.signature;
         if (sig.supersetOf(requested_sig)) {
-            const model_name = game.world.models.get(entity_id).?.*;
+            const model_name = game.world.models.get(entity.id).?.*;
             const model_info = game.res_manager.models_info.get(model_name);
             game.res_manager.indexed_indirect_cmds[entity_counter].indexCount = model_info.index_count;
             game.res_manager.indexed_indirect_cmds[entity_counter].instanceCount = 1;
@@ -41,7 +41,7 @@ pub fn draw(game: *Game) !void {
             const anim = model_info.animations.get(.walk) orelse undefined;
 
             game.res_manager.entities_data[entity_counter] = EntityData{
-                .transform = WorldHelper.getTransformMatrix(&game.world, entity_id).?,
+                .transform = WorldHelper.getTransformMatrix(entity).?,
                 .color_texture_index = model_info.color_texture_idx,
 
                 .anime_texture_index = anim.texture.index,
