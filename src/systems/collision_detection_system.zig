@@ -143,13 +143,13 @@ pub const CollisionSystem = struct {
     }
 
     fn checkCollision(self: *CollisionSystem, world: *World, entity_a: EntityId, entity_b: EntityId) !void {
-        const pos_a = world.positions.get(entity_a).?.vec;
-        const collider_a = world.colliders.get(entity_a).?;
-        const body_a = world.physics_bodys.get(entity_a).?;
+        const pos_a = world.positions.getPtr(entity_a).?.vec;
+        const collider_a = world.colliders.getPtr(entity_a).?;
+        const body_a = world.physics_bodys.getPtr(entity_a).?;
 
-        const pos_b = world.positions.get(entity_b).?.vec;
-        const collider_b = world.colliders.get(entity_b).?;
-        const body_b = world.physics_bodys.get(entity_b).?;
+        const pos_b = world.positions.getPtr(entity_b).?.vec;
+        const collider_b = world.colliders.getPtr(entity_b).?;
+        const body_b = world.physics_bodys.getPtr(entity_b).?;
 
         // 如果都是静态物体，不需要检测
         if (body_a.is_static and body_b.is_static) return;

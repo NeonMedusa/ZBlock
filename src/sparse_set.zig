@@ -38,7 +38,7 @@ pub fn SparseSet(comptime T: type, comptime MAX_ENTITIES: usize) type {
             }
         }
         /// 获取组件
-        pub fn get(self: *Self, key: usize) ?*T {
+        pub fn getPtr(self: *Self, key: usize) ?*T {
             const index = self.sparse[key];
             if (index == NULL_INDEX) return null;
             return &self.dense.items[index];

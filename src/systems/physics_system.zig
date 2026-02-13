@@ -34,10 +34,10 @@ pub const PhysicsSystem = struct {
     }
 
     fn resolveCollision(world: *World, collision: CollisionEvent) void {
-        const body_a = world.physics_bodys.get(collision.entity_a).?;
-        const pos_a = world.positions.get(collision.entity_a).?;
-        const body_b = world.physics_bodys.get(collision.entity_b).?;
-        const pos_b = world.positions.get(collision.entity_b).?;
+        const body_a = world.physics_bodys.getPtr(collision.entity_a).?;
+        const pos_a = world.positions.getPtr(collision.entity_a).?;
+        const body_b = world.physics_bodys.getPtr(collision.entity_b).?;
+        const pos_b = world.positions.getPtr(collision.entity_b).?;
 
         const cr = collision.result;
 
@@ -94,8 +94,8 @@ pub const PhysicsSystem = struct {
         for (world.activeEntities()) |entity| {
             const sig = entity.signature;
             if (sig.supersetOf(physics_entity_sig)) {
-                const position = world.positions.get(entity.id).?;
-                const body = world.physics_bodys.get(entity.id).?;
+                const position = world.positions.getPtr(entity.id).?;
+                const body = world.physics_bodys.getPtr(entity.id).?;
 
                 if (!body.is_static) {
                     // 应用重力

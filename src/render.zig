@@ -1,5 +1,5 @@
 //render.zig:
-pub fn draw(game: *Game) !void {
+pub fn draw(game: *Game) void {
     // 获取当前帧的纹理
     var surface_texture: Wgpu.WGPUSurfaceTexture = undefined;
     Wgpu.wgpuSurfaceGetCurrentTexture(game.gctx.surface, &surface_texture);
@@ -30,7 +30,7 @@ pub fn draw(game: *Game) !void {
     for (game.world.activeEntities()) |entity| {
         const sig = entity.signature;
         if (sig.supersetOf(requested_sig)) {
-            const model_name = game.world.models.get(entity.id).?.*;
+            const model_name = game.world.models.getPtr(entity.id).?.*;
             const model_info = game.res_manager.models_info.get(model_name);
             game.res_manager.indexed_indirect_cmds[entity_counter].indexCount = model_info.index_count;
             game.res_manager.indexed_indirect_cmds[entity_counter].instanceCount = 1;

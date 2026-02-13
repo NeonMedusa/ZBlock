@@ -3,31 +3,30 @@
 // 请勿手动修改此文件
 
 const std = @import("std");
-const SparseSet = @import("sparse_set.zig").SparseSet;
 const Components = @import("components.zig").Components;
+const SparseSet = @import("sparse_set.zig").SparseSet;
+pub const MAX_ENTITIES = @import("code_generator.zig").MAX_ENTITIES;
 
 pub const EntityId = usize;
-
-pub const MAX_ENTITIES = 8192;
 
 pub const Entity = struct {
     id: EntityId,
     world: *World,
     signature: Signature,
-    pub fn setComponent(self: Entity, component: anytype) !void {
-        try self.world.setComponent(self.id, component);
+    pub fn setComp(self: Entity, component: anytype) void {
+        self.world.setComp(self.id, component);
     }
-    pub fn getComponent(self: Entity, T: type) ?*T {
-        return self.world.getComponent(self.id, T);
+    pub fn getCompPtr(self: Entity, T: type) ?*T {
+        return self.world.getCompPtr(self.id, T);
     }
-    pub fn removeComponent(self: Entity, comp_type: ComponentType) !bool {
-        return self.world.removeComponent(self.id, comp_type);
+    pub fn delComp(self: Entity, comp_type: ComponentType) bool {
+        return self.world.delComp(self.id, comp_type);
     }
     pub fn destroy(self: Entity) !void {
         try self.world.removeEntity(self.id);
     }
-    pub fn hasComponent(self: Entity, comp_type: ComponentType) bool {
-        return self.world.hasComponent(self.id, comp_type);
+    pub fn hasComp(self: Entity, comp_type: ComponentType) bool {
+        return self.world.hasComp(self.id, comp_type);
     }
 };
 
@@ -127,62 +126,58 @@ pub const World = struct {
     }
 
     // 设置组件并更新签名
-    pub fn setComponent(self: *World, entity_id: EntityId, component: anytype) !void {
+    pub fn setComp(self: *World, entity_id: EntityId, component: anytype) void {
         const T = @TypeOf(component);
         const comp_type = getComponentType(T);
         // 存储组件数据
         switch (comp_type) {
-            .Player => try self.players.set(entity_id, component),
-            .Model => try self.models.set(entity_id, component),
-            .Position => try self.positions.set(entity_id, component),
-            .MovingTarget => try self.moving_targets.set(entity_id, component),
-            .Speed => try self.speeds.set(entity_id, component),
-            .Health => try self.healths.set(entity_id, component),
-            .AnimationState => try self.animation_states.set(entity_id, component),
-            .Collider => try self.colliders.set(entity_id, component),
-            .PhysicsBody => try self.physics_bodys.set(entity_id, component),
-            .Ground => try self.grounds.set(entity_id, component),
+            .Player => self.players.set(entity_id, component) catch unreachable,
+            .Model => self.models.set(entity_id, component) catch unreachable,
+            .Position => self.positions.set(entity_id, component) catch unreachable,
+            .MovingTarget => self.moving_targets.set(entity_id, component) catch unreachable,
+            .Speed => self.speeds.set(entity_id, component) catch unreachable,
+            .Health => self.healths.set(entity_id, component) catch unreachable,
+            .AnimationState => self.animation_states.set(entity_id, component) catch unreachable,
+            .Collider => self.colliders.set(entity_id, component) catch unreachable,
+            .PhysicsBody => self.physics_bodys.set(entity_id, component) catch unreachable,
+            .Ground => self.grounds.set(entity_id, component) catch unreachable,
         }
         // 更新实体签名（设置对应位为1）
-        var sig = self.active_entities.get(entity_id).?.signature;
+        var sig = self.active_entities.getPtr(entity_id).?.signature;
         sig.set(@intFromEnum(comp_type));
-        try self.active_entities.set(entity_id, Entity{
+        self.active_entities.set(entity_id, Entity{
             .id = entity_id,
             .world = self,
             .signature = sig,
-        });
+        }) catch unreachable;
     }
 
     // 移除组件并更新签名
-    pub fn removeComponent(self: *World, entity_id: EntityId, comp_type: ComponentType) !bool {
-        var removed = false;
+    pub fn delComp(self: *World, entity_id: EntityId, comp_type: ComponentType) void {
         switch (comp_type) {
-            .Player => removed = self.players.remove(entity_id),
-            .Model => removed = self.models.remove(entity_id),
-            .Position => removed = self.positions.remove(entity_id),
-            .MovingTarget => removed = self.moving_targets.remove(entity_id),
-            .Speed => removed = self.speeds.remove(entity_id),
-            .Health => removed = self.healths.remove(entity_id),
-            .AnimationState => removed = self.animation_states.remove(entity_id),
-            .Collider => removed = self.colliders.remove(entity_id),
-            .PhysicsBody => removed = self.physics_bodys.remove(entity_id),
-            .Ground => removed = self.grounds.remove(entity_id),
+            .Player => _ = self.players.remove(entity_id),
+            .Model => _ = self.models.remove(entity_id),
+            .Position => _ = self.positions.remove(entity_id),
+            .MovingTarget => _ = self.moving_targets.remove(entity_id),
+            .Speed => _ = self.speeds.remove(entity_id),
+            .Health => _ = self.healths.remove(entity_id),
+            .AnimationState => _ = self.animation_states.remove(entity_id),
+            .Collider => _ = self.colliders.remove(entity_id),
+            .PhysicsBody => _ = self.physics_bodys.remove(entity_id),
+            .Ground => _ = self.grounds.remove(entity_id),
         }
         // 更新实体签名（清除对应位）
-        if (removed) {
-            var sig = self.active_entities.get(entity_id).?.signature;
-            sig.unset(@intFromEnum(comp_type));
-            try self.active_entities.set(entity_id, Entity{
-                .id = entity_id,
-                .world = self,
-                .signature = sig,
-            });
-        }
-        return removed;
+        var sig = self.active_entities.getPtr(entity_id).?.signature;
+        sig.unset(@intFromEnum(comp_type));
+        self.active_entities.set(entity_id, Entity{
+            .id = entity_id,
+            .world = self,
+            .signature = sig,
+        }) catch unreachable;
     }
 
     // 创建实体
-    pub fn createEntity(self: *World) !Entity {
+    pub fn createEntity(self: *World) Entity {
         var entity = Entity{
             .id = undefined,
             .world = self,
@@ -195,7 +190,7 @@ pub const World = struct {
             entity.id = self.next_entity_id;
             self.next_entity_id += 1;
         }
-        try self.active_entities.set(entity.id, entity);
+        self.active_entities.set(entity.id, entity) catch unreachable;
         return entity;
     }
 
@@ -219,9 +214,9 @@ pub const World = struct {
     }
 
     // 获取实体组件
-    pub fn getComponent(self: *World, entity_id: EntityId, T: type) ?*T {
+    pub fn getCompPtr(self: *World, entity_id: EntityId, T: type) ?*T {
         var comp_storage = self.getStorage(T);
-        return comp_storage.get(entity_id);
+        return comp_storage.getPtr(entity_id);
     }
 
     // 获取组件容器
@@ -242,7 +237,7 @@ pub const World = struct {
     }
 
     // 检测实体是否包含组件
-    pub fn hasComponent(self: *World, entity_id: EntityId, comp_type: ComponentType) bool {
+    pub fn hasComp(self: *World, entity_id: EntityId, comp_type: ComponentType) bool {
         return switch (comp_type) {
             .Player => self.players.has(entity_id),
             .Model => self.models.has(entity_id),

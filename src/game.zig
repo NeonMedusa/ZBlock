@@ -73,26 +73,24 @@ pub fn start(self: *@This()) !void {
         // 如果主菜单不可见，则更新世界和摄像头
         if (!main_menu.visible) {
 
-            // 测试实例增删
+            // 测试实体创建
+            if (self.input.isKeyDown(.equal)) {
+                const entity = self.world.createEntity();
+                entity.setComp(Components.Model.CesiumMan);
+                entity.setComp(Components.Position{ .vec = .new(0, 0, -pos_offset) });
+                entity.setComp(Components.Health{ .current = 3.0, .max = 3.0 });
+                pos_offset += 1;
+            }
+
+            // 测试实体删除
             if (self.input.isKeyDown(.minus)) {
                 var it = self.world.healths.iterator();
                 while (it.next()) |entry|
                     entry.@"1".current -= 1;
             }
-            if (self.input.isKeyDown(.equal)) {
-                _ = try WorldHelper.createBaseEntity(
-                    &self.world,
-                    .CesiumMan,
-                    .{ .vec = Vec3.new(0, 0, -pos_offset) },
-                    .{ .value = 1 },
-                    .{ .current = 3, .max = 3 },
-                );
-                pos_offset += 1;
-            }
 
-            // 更新世界
+            // 更新系统
             try systems.updata(&self.world, self.window.delta_time);
-            // try physics_system.update(&self.world, self.window.delta_time);
 
             // 更新摄像头
             self.camera.update(self);
@@ -105,7 +103,7 @@ pub fn start(self: *@This()) !void {
         // UI帧结束
         try self.ui_system.endFrame(&self.gctx);
         // 渲染
-        try Render.draw(self);
+        Render.draw(self);
     }
 }
 
