@@ -5,34 +5,32 @@ const NULL_INDEX = std.math.maxInt(usize);
 pub fn SparseSet(comptime T: type, comptime MAX_ENTITIES: usize) type {
     return struct {
         const Self = @This();
-        allocator: std.mem.Allocator,
         dense: std.ArrayList(T),
         sparse: [MAX_ENTITIES]usize = [_]usize{NULL_INDEX} ** MAX_ENTITIES,
         index_to_key: std.ArrayList(usize),
         /// 初始化
-        pub fn init(allocator: std.mem.Allocator) Self {
+        pub fn init() Self {
             return Self{
-                .allocator = allocator,
                 .dense = std.ArrayList(T){},
                 .sparse = [_]usize{NULL_INDEX} ** MAX_ENTITIES, // 初始化为NULL_INDEX
                 .index_to_key = std.ArrayList(usize){},
             };
         }
-        /// 销毁
-        pub fn deinit(self: *Self) void {
-            self.dense.deinit(self.allocator);
-            self.index_to_key.deinit(self.allocator);
+        /// 释放内存
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.dense.deinit(allocator);
+            self.index_to_key.deinit(allocator);
         }
         /// 设置组件
-        pub fn set(self: *Self, key: usize, value: T) !void {
+        pub fn set(self: *Self, allocator: std.mem.Allocator, key: usize, value: T) !void {
             const existing_idx = self.sparse[key];
             // 如果组件已存在则更新
             if (existing_idx != NULL_INDEX) {
                 self.dense.items[existing_idx] = value;
             } else { // 否则添加新组件
                 const new_index = self.dense.items.len;
-                try self.dense.append(self.allocator, value);
-                try self.index_to_key.append(self.allocator, key);
+                try self.dense.append(allocator, value);
+                try self.index_to_key.append(allocator, key);
                 // 更新稀疏数组
                 self.sparse[key] = new_index;
             }

@@ -5,12 +5,10 @@
 const std = @import("std");
 const Components = @import("components.zig").Components;
 const SparseSet = @import("sparse_set.zig").SparseSet;
-pub const MAX_ENTITIES = @import("code_generator.zig").MAX_ENTITIES;
-
-pub const EntityId = usize;
+const MAX_ENTITIES = @import("code_generator.zig").MAX_ENTITIES;
 
 pub const Entity = struct {
-    id: EntityId,
+    id: usize,
     world: *World,
     signature: Signature,
     pub fn setComp(self: Entity, component: anytype) void {
@@ -70,8 +68,8 @@ pub inline fn getComponentType(comptime T: type) ComponentType {
 // 世界
 pub const World = struct {
     allocator: std.mem.Allocator,
-    next_entity_id: EntityId = 0,
-    available_ids: std.ArrayList(EntityId), // 可用ID池
+    next_entity_id: usize = 0,
+    available_ids: std.ArrayList(usize), // 可用ID池
     // 活跃的实体稀疏集，遍历它的密集数组以匹配组件签名
     active_entities: SparseSet(Entity, MAX_ENTITIES),
 
@@ -92,60 +90,59 @@ pub const World = struct {
         return .{
             .allocator = allocator,
             .next_entity_id = 0,
-            .available_ids = std.ArrayList(EntityId){},
-            .active_entities = SparseSet(Entity, MAX_ENTITIES).init(allocator),
-            // 组件存储
-            .players = SparseSet(Components.Player, MAX_ENTITIES).init(allocator),
-            .models = SparseSet(Components.Model, MAX_ENTITIES).init(allocator),
-            .positions = SparseSet(Components.Position, MAX_ENTITIES).init(allocator),
-            .moving_targets = SparseSet(Components.MovingTarget, MAX_ENTITIES).init(allocator),
-            .speeds = SparseSet(Components.Speed, MAX_ENTITIES).init(allocator),
-            .healths = SparseSet(Components.Health, MAX_ENTITIES).init(allocator),
-            .animation_states = SparseSet(Components.AnimationState, MAX_ENTITIES).init(allocator),
-            .colliders = SparseSet(Components.Collider, MAX_ENTITIES).init(allocator),
-            .physics_bodys = SparseSet(Components.PhysicsBody, MAX_ENTITIES).init(allocator),
-            .grounds = SparseSet(Components.Ground, MAX_ENTITIES).init(allocator),
+            .available_ids = std.ArrayList(usize){},
+            .active_entities = SparseSet(Entity, MAX_ENTITIES).init(),
+            .players = SparseSet(Components.Player, MAX_ENTITIES).init(),
+            .models = SparseSet(Components.Model, MAX_ENTITIES).init(),
+            .positions = SparseSet(Components.Position, MAX_ENTITIES).init(),
+            .moving_targets = SparseSet(Components.MovingTarget, MAX_ENTITIES).init(),
+            .speeds = SparseSet(Components.Speed, MAX_ENTITIES).init(),
+            .healths = SparseSet(Components.Health, MAX_ENTITIES).init(),
+            .animation_states = SparseSet(Components.AnimationState, MAX_ENTITIES).init(),
+            .colliders = SparseSet(Components.Collider, MAX_ENTITIES).init(),
+            .physics_bodys = SparseSet(Components.PhysicsBody, MAX_ENTITIES).init(),
+            .grounds = SparseSet(Components.Ground, MAX_ENTITIES).init(),
         };
     }
 
     // 析构
     pub fn deinit(self: *World) void {
         self.available_ids.deinit(self.allocator);
-        self.active_entities.deinit();
+        self.active_entities.deinit(self.allocator);
 
-        self.players.deinit();
-        self.models.deinit();
-        self.positions.deinit();
-        self.moving_targets.deinit();
-        self.speeds.deinit();
-        self.healths.deinit();
-        self.animation_states.deinit();
-        self.colliders.deinit();
-        self.physics_bodys.deinit();
-        self.grounds.deinit();
+        self.players.deinit(self.allocator);
+        self.models.deinit(self.allocator);
+        self.positions.deinit(self.allocator);
+        self.moving_targets.deinit(self.allocator);
+        self.speeds.deinit(self.allocator);
+        self.healths.deinit(self.allocator);
+        self.animation_states.deinit(self.allocator);
+        self.colliders.deinit(self.allocator);
+        self.physics_bodys.deinit(self.allocator);
+        self.grounds.deinit(self.allocator);
     }
 
     // 设置组件并更新签名
-    pub fn setComp(self: *World, entity_id: EntityId, component: anytype) void {
+    pub fn setComp(self: *World, entity_id: usize, component: anytype) void {
         const T = @TypeOf(component);
         const comp_type = getComponentType(T);
         // 存储组件数据
         switch (comp_type) {
-            .Player => self.players.set(entity_id, component) catch unreachable,
-            .Model => self.models.set(entity_id, component) catch unreachable,
-            .Position => self.positions.set(entity_id, component) catch unreachable,
-            .MovingTarget => self.moving_targets.set(entity_id, component) catch unreachable,
-            .Speed => self.speeds.set(entity_id, component) catch unreachable,
-            .Health => self.healths.set(entity_id, component) catch unreachable,
-            .AnimationState => self.animation_states.set(entity_id, component) catch unreachable,
-            .Collider => self.colliders.set(entity_id, component) catch unreachable,
-            .PhysicsBody => self.physics_bodys.set(entity_id, component) catch unreachable,
-            .Ground => self.grounds.set(entity_id, component) catch unreachable,
+            .Player => self.players.set(self.allocator, entity_id, component) catch unreachable,
+            .Model => self.models.set(self.allocator, entity_id, component) catch unreachable,
+            .Position => self.positions.set(self.allocator, entity_id, component) catch unreachable,
+            .MovingTarget => self.moving_targets.set(self.allocator, entity_id, component) catch unreachable,
+            .Speed => self.speeds.set(self.allocator, entity_id, component) catch unreachable,
+            .Health => self.healths.set(self.allocator, entity_id, component) catch unreachable,
+            .AnimationState => self.animation_states.set(self.allocator, entity_id, component) catch unreachable,
+            .Collider => self.colliders.set(self.allocator, entity_id, component) catch unreachable,
+            .PhysicsBody => self.physics_bodys.set(self.allocator, entity_id, component) catch unreachable,
+            .Ground => self.grounds.set(self.allocator, entity_id, component) catch unreachable,
         }
         // 更新实体签名（设置对应位为1）
         var sig = self.active_entities.getPtr(entity_id).?.signature;
         sig.set(@intFromEnum(comp_type));
-        self.active_entities.set(entity_id, Entity{
+        self.active_entities.set(self.allocator, entity_id, Entity{
             .id = entity_id,
             .world = self,
             .signature = sig,
@@ -153,7 +150,7 @@ pub const World = struct {
     }
 
     // 移除组件并更新签名
-    pub fn delComp(self: *World, entity_id: EntityId, comp_type: ComponentType) void {
+    pub fn delComp(self: *World, entity_id: usize, comp_type: ComponentType) void {
         switch (comp_type) {
             .Player => _ = self.players.remove(entity_id),
             .Model => _ = self.models.remove(entity_id),
@@ -169,7 +166,7 @@ pub const World = struct {
         // 更新实体签名（清除对应位）
         var sig = self.active_entities.getPtr(entity_id).?.signature;
         sig.unset(@intFromEnum(comp_type));
-        self.active_entities.set(entity_id, Entity{
+        self.active_entities.set(self.allocator, entity_id, Entity{
             .id = entity_id,
             .world = self,
             .signature = sig,
@@ -190,12 +187,12 @@ pub const World = struct {
             entity.id = self.next_entity_id;
             self.next_entity_id += 1;
         }
-        self.active_entities.set(entity.id, entity) catch unreachable;
+        self.active_entities.set(self.allocator, entity.id, entity) catch unreachable;
         return entity;
     }
 
     // 移除实体
-    pub fn removeEntity(self: *World, entity_id: EntityId) !void {
+    pub fn removeEntity(self: *World, entity_id: usize) !void {
         // 将ID归还给可用ID池
         try self.available_ids.append(self.allocator, entity_id);
         // 清理所有组件
@@ -214,7 +211,7 @@ pub const World = struct {
     }
 
     // 获取实体组件
-    pub fn getCompPtr(self: *World, entity_id: EntityId, T: type) ?*T {
+    pub fn getCompPtr(self: *World, entity_id: usize, T: type) ?*T {
         var comp_storage = self.getStorage(T);
         return comp_storage.getPtr(entity_id);
     }
@@ -237,7 +234,7 @@ pub const World = struct {
     }
 
     // 检测实体是否包含组件
-    pub fn hasComp(self: *World, entity_id: EntityId, comp_type: ComponentType) bool {
+    pub fn hasComp(self: *World, entity_id: usize, comp_type: ComponentType) bool {
         return switch (comp_type) {
             .Player => self.players.has(entity_id),
             .Model => self.models.has(entity_id),

@@ -3,7 +3,6 @@ const std = @import("std");
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const ECS = @import("../generated_ecs.zig");
-const EntityId = ECS.EntityId;
 const Signature = ECS.Signature;
 const ComponentType = ECS.ComponentType;
 const Components = @import("../components.zig").Components;
@@ -25,8 +24,8 @@ pub const CollisionResult = struct {
 };
 
 pub const CollisionEvent = struct {
-    entity_a: EntityId,
-    entity_b: EntityId,
+    entity_a: usize,
+    entity_b: usize,
     result: CollisionResult,
 };
 
@@ -142,7 +141,7 @@ pub const CollisionSystem = struct {
         };
     }
 
-    fn checkCollision(self: *CollisionSystem, world: *World, entity_a: EntityId, entity_b: EntityId) !void {
+    fn checkCollision(self: *CollisionSystem, world: *World, entity_a: usize, entity_b: usize) !void {
         const pos_a = world.positions.getPtr(entity_a).?.vec;
         const collider_a = world.colliders.getPtr(entity_a).?;
         const body_a = world.physics_bodys.getPtr(entity_a).?;
@@ -218,7 +217,7 @@ pub const CollisionSystem = struct {
         self.collisions.clearRetainingCapacity();
 
         // 收集所有物理实体
-        var physics_entities = std.ArrayList(EntityId){};
+        var physics_entities = std.ArrayList(usize){};
         defer physics_entities.deinit(self.allocator);
 
         for (world.activeEntities()) |entity| {
