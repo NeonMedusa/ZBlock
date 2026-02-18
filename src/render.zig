@@ -21,39 +21,32 @@ pub fn draw(game: *Game) void {
     var entity_counter: u32 = 0;
 
     // 准备缓冲区数据
-    const requested_sig = blk: {
-        var sig = Signature.initEmpty();
-        sig.set(@intFromEnum(ComponentType.Position));
-        sig.set(@intFromEnum(ComponentType.Model));
-        break :blk sig;
-    };
-    for (game.world.activeEntities()) |entity| {
-        const sig = entity.signature;
-        if (sig.supersetOf(requested_sig)) {
-            const model_name = game.world.models.getPtr(entity.id).?.*;
-            const model_info = game.res_manager.models_info.get(model_name);
-            game.res_manager.indexed_indirect_cmds[entity_counter].indexCount = model_info.index_count;
-            game.res_manager.indexed_indirect_cmds[entity_counter].instanceCount = 1;
-            game.res_manager.indexed_indirect_cmds[entity_counter].firstIndex = model_info.first_index_idx;
-            game.res_manager.indexed_indirect_cmds[entity_counter].baseVertex = model_info.first_vertex_idx;
-            game.res_manager.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
+    var view = game.registry.view(.{ Comps.Model, Comps.Position }, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        const model_name = view.getConst(Comps.Model, entity);
+        const model_info = game.res_manager.models_info.get(model_name);
+        game.res_manager.indexed_indirect_cmds[entity_counter].indexCount = model_info.index_count;
+        game.res_manager.indexed_indirect_cmds[entity_counter].instanceCount = 1;
+        game.res_manager.indexed_indirect_cmds[entity_counter].firstIndex = model_info.first_index_idx;
+        game.res_manager.indexed_indirect_cmds[entity_counter].baseVertex = model_info.first_vertex_idx;
+        game.res_manager.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
 
-            const anim = model_info.animations.get(.walk) orelse undefined;
+        const anim = model_info.animations.get(.walk) orelse undefined;
 
-            game.res_manager.entities_data[entity_counter] = EntityData{
-                .transform = WorldHelper.getTransformMatrix(entity).?,
-                .color_texture_index = model_info.color_texture_idx,
+        game.res_manager.entities_data[entity_counter] = EntityData{
+            .transform = WorldHelper.getTransformMatrix(&game.registry, entity).?,
+            .color_texture_index = model_info.color_texture_idx,
 
-                .anime_texture_index = anim.texture.index,
-                .anime_texture_size = anim.texture.size,
-                .anime_texture_start = anim.texture.coord,
+            .anime_texture_index = anim.texture.index,
+            .anime_texture_size = anim.texture.size,
+            .anime_texture_start = anim.texture.coord,
 
-                .anime_duration = anim.duration,
+            .anime_duration = anim.duration,
 
-                .cur_anime_time = game.window.time,
-            };
-            entity_counter += 1;
-        }
+            .cur_anime_time = game.window.time,
+        };
+        entity_counter += 1;
     }
 
     // 更新entities_data_buffer
@@ -158,6 +151,5 @@ const Game = @import("game.zig");
 const Systems = @import("systems.zig");
 const WorldHelper = @import("world_helper.zig");
 
-const ECS = @import("generated_ecs.zig");
-const Signature = ECS.Signature;
-const ComponentType = ECS.ComponentType;
+const ECS = @import("zigecs");
+const Comps = @import("components.zig").Components;

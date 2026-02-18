@@ -2,7 +2,7 @@ allocator: std.mem.Allocator,
 window: Window,
 gctx: Gctx,
 input: Input,
-world: World,
+registry: ECS.Registry,
 ui_system: UiSystem,
 res_manager: ResourceManager,
 render_pipeline: RenderPipeline,
@@ -13,7 +13,7 @@ pub fn deinit(self: *@This()) void {
     self.gctx.deinit();
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
-    self.world.deinit();
+    self.registry.deinit();
     self.ui_system.deinit();
     self.allocator.destroy(self);
 }
@@ -43,8 +43,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 初始化ubo
     self.ubo = SceneUniform.init(self.window);
     // 初始化世界
-    const world = World.init(allocator);
-    self.world = world;
+    const registry = ECS.Registry.init(allocator);
+    self.registry = registry;
     // 初始化UI系统
     const ui_system = try UiSystem.init(allocator, &self.gctx, self);
     self.ui_system = ui_system;
@@ -60,7 +60,7 @@ pub fn start(self: *@This()) !void {
     try Tester.initTestWorld(self);
 
     // 初始化系统
-    var systems = Systems.init(self.allocator, &self.world);
+    var systems = Systems.init(self.allocator, &self.registry);
     defer systems.deinit();
 
     var pos_offset: f32 = 0;
@@ -75,22 +75,25 @@ pub fn start(self: *@This()) !void {
 
             // 测试实体创建
             if (self.input.isKeyDown(.equal)) {
-                const entity = self.world.createEntity();
-                entity.setComp(Components.Model.CesiumMan);
-                entity.setComp(Components.Position{ .vec = .new(0, 0, -pos_offset) });
-                entity.setComp(Components.Health{ .current = 3.0, .max = 3.0 });
+                const entity = self.registry.create();
+                self.registry.add(entity, Components.Model.CesiumMan);
+                self.registry.add(entity, Components.Position{ .vec = .new(0, 0, -pos_offset) });
+                self.registry.add(entity, Components.Health{ .current = 3.0, .max = 3.0 });
                 pos_offset += 1;
             }
 
             // 测试实体删除
             if (self.input.isKeyDown(.minus)) {
-                var it = self.world.healths.iterator();
-                while (it.next()) |entry|
-                    entry.@"1".current -= 1;
+                var view = self.registry.view(.{Components.Health}, .{});
+                var iter = view.entityIterator();
+                while (iter.next()) |entity| {
+                    const health = self.registry.get(Components.Health, entity);
+                    health.current -= 1.0;
+                }
             }
 
             // 更新系统
-            try systems.updata(&self.world, self.window.delta_time);
+            try systems.updata(&self.registry, self.window.delta_time);
 
             // 更新摄像头
             self.camera.update(self);
@@ -129,7 +132,7 @@ const ModelName = @import("model.zig").ModelName;
 const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
 
-const World = @import("generated_ecs.zig").World;
+const ECS = @import("zigecs");
 
 const ShaderType = @import("shader_types.zig");
 const SceneUniform = ShaderType.SceneUniform;
@@ -139,4 +142,3 @@ const Systems = @import("systems.zig").Systems;
 const WorldHelper = @import("world_helper.zig");
 
 const Tester = @import("test_game.zig");
-const Entity = @import("generated_ecs.zig").Entity;

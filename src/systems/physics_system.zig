@@ -2,22 +2,10 @@
 const std = @import("std");
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
-const ECS = @import("../generated_ecs.zig");
-const EntityId = ECS.EntityId;
-const Signature = ECS.Signature;
-const ComponentType = ECS.ComponentType;
-const Components = @import("../components.zig").Components;
-const World = @import("../generated_ecs.zig").World;
+const ECS = @import("zigecs");
+const Comps = @import("../components.zig").Components;
 const CollisionSystem = @import("./collision_detection_system.zig").CollisionSystem;
 const CollisionEvent = @import("./collision_detection_system.zig").CollisionEvent;
-
-const physics_entity_sig = blk: {
-    var sig = Signature.initEmpty();
-    sig.set(@intFromEnum(ComponentType.Position));
-    sig.set(@intFromEnum(ComponentType.Collider));
-    sig.set(@intFromEnum(ComponentType.PhysicsBody));
-    break :blk sig;
-};
 
 pub const PhysicsSystem = struct {
     collision_system: CollisionSystem,
@@ -33,11 +21,12 @@ pub const PhysicsSystem = struct {
         self.collision_system.deinit();
     }
 
-    fn resolveCollision(world: *World, collision: CollisionEvent) void {
-        const body_a = world.physics_bodys.getPtr(collision.entity_a).?;
-        const pos_a = world.positions.getPtr(collision.entity_a).?;
-        const body_b = world.physics_bodys.getPtr(collision.entity_b).?;
-        const pos_b = world.positions.getPtr(collision.entity_b).?;
+    fn resolveCollision(registry: *ECS.Registry, collision: CollisionEvent) void {
+        const body_a = registry.get(Comps.PhysicsBody, collision.entity_a);
+        const pos_a = registry.get(Comps.Position, collision.entity_a);
+
+        const body_b = registry.get(Comps.PhysicsBody, collision.entity_b);
+        const pos_b = registry.get(Comps.Position, collision.entity_b);
 
         const cr = collision.result;
 
@@ -89,35 +78,34 @@ pub const PhysicsSystem = struct {
         }
     }
 
-    pub fn update(self: *PhysicsSystem, world: *World, delta_time: f32) !void {
+    pub fn update(self: *PhysicsSystem, registry: *ECS.Registry, delta_time: f32) !void {
         // 1. 应用力和积分
-        for (world.activeEntities()) |entity| {
-            const sig = entity.signature;
-            if (sig.supersetOf(physics_entity_sig)) {
-                const position = world.positions.getPtr(entity.id).?;
-                const body = world.physics_bodys.getPtr(entity.id).?;
+        var view = registry.view(.{ Comps.Position, Comps.Collider, Comps.PhysicsBody }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            const position = view.get(Comps.Position, entity);
+            const body = view.get(Comps.PhysicsBody, entity);
 
-                if (!body.is_static) {
-                    // 应用重力
-                    body.acceleration = body.acceleration.add(self.gravity.scale(body.gravity_scale));
+            if (!body.is_static) {
+                // 应用重力
+                body.acceleration = body.acceleration.add(self.gravity.scale(body.gravity_scale));
 
-                    // 欧拉积分
-                    body.velocity = body.velocity.add(body.acceleration.scale(delta_time));
-                    position.vec = position.vec.add(body.velocity.scale(delta_time));
+                // 欧拉积分
+                body.velocity = body.velocity.add(body.acceleration.scale(delta_time));
+                position.vec = position.vec.add(body.velocity.scale(delta_time));
 
-                    // 简单阻尼
-                    body.velocity = body.velocity.scale(0.99);
-                    body.acceleration = Vec3.zero();
-                }
+                // 简单阻尼
+                body.velocity = body.velocity.scale(0.99);
+                body.acceleration = Vec3.zero();
             }
         }
 
         // 2. 检测碰撞
-        try self.collision_system.detectCollisions(world, delta_time);
+        try self.collision_system.detectCollisions(registry, delta_time);
 
         // 3. 解决碰撞
         for (self.collision_system.collisions.items) |collision| {
-            resolveCollision(world, collision);
+            resolveCollision(registry, collision);
         }
     }
 };

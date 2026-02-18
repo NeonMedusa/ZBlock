@@ -2,19 +2,8 @@
 const std = @import("std");
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
-const ECS = @import("../generated_ecs.zig");
-const Signature = ECS.Signature;
-const ComponentType = ECS.ComponentType;
-const Components = @import("../components.zig").Components;
-const World = @import("../generated_ecs.zig").World;
-
-const physics_entity_sig = blk: {
-    var sig = Signature.initEmpty();
-    sig.set(@intFromEnum(ComponentType.Position));
-    sig.set(@intFromEnum(ComponentType.Collider));
-    sig.set(@intFromEnum(ComponentType.PhysicsBody));
-    break :blk sig;
-};
+const ECS = @import("zigecs");
+const Comps = @import("../components.zig").Components;
 
 // 定义碰撞结果类型
 pub const CollisionResult = struct {
@@ -24,8 +13,8 @@ pub const CollisionResult = struct {
 };
 
 pub const CollisionEvent = struct {
-    entity_a: usize,
-    entity_b: usize,
+    entity_a: ECS.Entity,
+    entity_b: ECS.Entity,
     result: CollisionResult,
 };
 
@@ -141,14 +130,14 @@ pub const CollisionSystem = struct {
         };
     }
 
-    fn checkCollision(self: *CollisionSystem, world: *World, entity_a: usize, entity_b: usize) !void {
-        const pos_a = world.positions.getPtr(entity_a).?.vec;
-        const collider_a = world.colliders.getPtr(entity_a).?;
-        const body_a = world.physics_bodys.getPtr(entity_a).?;
+    fn checkCollision(self: *CollisionSystem, registry: *ECS.Registry, entity_a: ECS.Entity, entity_b: ECS.Entity) !void {
+        const pos_a = registry.get(Comps.Position, entity_a).vec;
+        const collider_a = registry.get(Comps.Collider, entity_a);
+        const body_a = registry.get(Comps.PhysicsBody, entity_a);
 
-        const pos_b = world.positions.getPtr(entity_b).?.vec;
-        const collider_b = world.colliders.getPtr(entity_b).?;
-        const body_b = world.physics_bodys.getPtr(entity_b).?;
+        const pos_b = registry.get(Comps.Position, entity_b).vec;
+        const collider_b = registry.get(Comps.Collider, entity_b);
+        const body_b = registry.get(Comps.PhysicsBody, entity_b);
 
         // 如果都是静态物体，不需要检测
         if (body_a.is_static and body_b.is_static) return;
@@ -212,19 +201,18 @@ pub const CollisionSystem = struct {
         }
     }
 
-    pub fn detectCollisions(self: *CollisionSystem, world: *World, delta_time: f32) !void {
+    pub fn detectCollisions(self: *CollisionSystem, registry: *ECS.Registry, delta_time: f32) !void {
         _ = delta_time;
         self.collisions.clearRetainingCapacity();
 
         // 收集所有物理实体
-        var physics_entities = std.ArrayList(usize){};
+        var physics_entities = std.ArrayList(ECS.Entity){};
         defer physics_entities.deinit(self.allocator);
 
-        for (world.activeEntities()) |entity| {
-            const sig = entity.signature;
-            if (sig.supersetOf(physics_entity_sig)) {
-                try physics_entities.append(self.allocator, entity.id);
-            }
+        var view = registry.view(.{ Comps.Position, Comps.Collider, Comps.PhysicsBody }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            try physics_entities.append(self.allocator, entity);
         }
 
         // 检测所有实体对之间的碰撞
@@ -233,7 +221,7 @@ pub const CollisionSystem = struct {
 
             for (i + 1..physics_entities.items.len) |j| {
                 const entity_b = physics_entities.items[j];
-                try self.checkCollision(world, entity_a, entity_b);
+                try self.checkCollision(registry, entity_a, entity_b);
             }
         }
     }

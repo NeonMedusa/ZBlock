@@ -73,6 +73,14 @@ pub fn build(b: *std.Build) void {
     const zigimg_module = zigimg_dep.module("zigimg");
     exe.root_module.addImport("zigimg", zigimg_module);
 
+    //zigecs
+    const ecs_dep = b.dependency("zigecs", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const ecs_module = ecs_dep.module("zig-ecs");
+    exe.root_module.addImport("zigecs", ecs_module);
+
     // 复制资源文件
     b.installDirectory(.{
         .source_dir = b.path("resources"),

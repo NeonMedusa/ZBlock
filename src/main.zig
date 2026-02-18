@@ -21,7 +21,6 @@ pub fn main() !void {
     // }
 }
 
-const World = @import("generated_ecs.zig").World;
 const std = @import("std");
 const Game = @import("game.zig");
 const zigimg = @import("zigimg");

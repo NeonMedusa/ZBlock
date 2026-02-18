@@ -5,18 +5,11 @@
     .fingerprint = 0xbc7ddde633a1cedb,
     .minimum_zig_version = "0.15.1",
     .dependencies = .{
-        .zgltf = .{
-            .path = "libs/zgltf-main",
-        },
-        .zalgebra = .{
-            .path = "libs/zalgebra-main",
-        },
-        .zigimg = .{
-            .path = "libs/zigimg-master",
-        },
-        .stb = .{
-            .path = "libs/stb-master",
-        },
+        .zgltf = .{ .path = "libs/zgltf-main" },
+        .zalgebra = .{ .path = "libs/zalgebra-main" },
+        .zigimg = .{ .path = "libs/zigimg-master" },
+        .zigecs = .{ .path = "libs/zig-ecs-master" },
+        .stb = .{ .path = "libs/stb-master" },
     },
     .paths = .{
         "build.zig",
