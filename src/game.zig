@@ -4,7 +4,7 @@ gctx: Gctx,
 input: Input,
 registry: ECS.Registry,
 ui_system: UiSystem,
-res_manager: ResourceManager,
+res_manager: ResManager,
 render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
@@ -30,7 +30,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const gctx = try Gctx.init(self.window);
     self.gctx = gctx;
     // 初始化资源管理器
-    const res_manager = try ResourceManager.init(allocator, self.gctx);
+    const res_manager = try ResManager.init(allocator, self.gctx);
     self.res_manager = res_manager;
     // 创建渲染管线
     const render_pipeline = try RenderPipeline.init(
@@ -56,14 +56,25 @@ pub fn start(self: *@This()) !void {
     // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
 
-    // 将世界初始化为测试场景
-    try Tester.initTestWorld(self);
+    // 加载一个模型并使其成为一个实体的组件
+    const model_1 = try Model.load(self.allocator, self.gctx, "Wolf", self.render_pipeline);
+    const e1 = self.registry.create();
+    self.registry.add(e1, model_1);
+    self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
+    // 另一个实体
+    const e2 = self.registry.create();
+    self.registry.add(e2, model_1);
+    self.registry.add(e2, Comps.Position{ .vec = .new(0, 1, 0) });
 
-    // 初始化系统
-    var systems = Systems.init(self.allocator, &self.registry);
-    defer systems.deinit();
-
-    var pos_offset: f32 = 0;
+    const model_2 = try Model.load(self.allocator, self.gctx, "BarramundiFish", self.render_pipeline);
+    // 第三个实体
+    const e3 = self.registry.create();
+    self.registry.add(e3, model_2);
+    self.registry.add(e3, Comps.Position{ .vec = .new(0, 2, 0) });
+    // 第四个实体
+    const e4 = self.registry.create();
+    self.registry.add(e4, model_2);
+    self.registry.add(e4, Comps.Position{ .vec = .new(0, 3, 0) });
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
@@ -72,29 +83,6 @@ pub fn start(self: *@This()) !void {
         self.window.pollEvents();
         // 如果主菜单不可见，则更新世界和摄像头
         if (!main_menu.visible) {
-
-            // 测试实体创建
-            if (self.input.isKeyDown(.equal)) {
-                const entity = self.registry.create();
-                self.registry.add(entity, Components.Model.CesiumMan);
-                self.registry.add(entity, Components.Position{ .vec = .new(0, 0, -pos_offset) });
-                self.registry.add(entity, Components.Health{ .current = 3.0, .max = 3.0 });
-                pos_offset += 1;
-            }
-
-            // 测试实体删除
-            if (self.input.isKeyDown(.minus)) {
-                var view = self.registry.view(.{Components.Health}, .{});
-                var iter = view.entityIterator();
-                while (iter.next()) |entity| {
-                    const health = self.registry.get(Components.Health, entity);
-                    health.current -= 1.0;
-                }
-            }
-
-            // 更新系统
-            try systems.updata(&self.registry, self.window.delta_time);
-
             // 更新摄像头
             self.camera.update(self);
             self.ubo.view_matrix = self.camera.getViewMatrix();
@@ -113,8 +101,8 @@ pub fn start(self: *@This()) !void {
 const Game = @This();
 const std = @import("std");
 
-const Wgpu = @import("cimports.zig").Wgpu;
-const Glfw = @import("cimports.zig").Glfw;
+const Wgpu = @import("imports.zig").Wgpu;
+const Glfw = @import("imports.zig").Glfw;
 const Gltf = @import("zgltf");
 
 const Algebra = @import("zalgebra");
@@ -125,20 +113,15 @@ const Gctx = @import("gctx.zig");
 const Window = @import("window.zig");
 const Render = @import("render.zig");
 const Camera3D = @import("camera3d.zig");
-const ResourceManager = @import("resource_manager.zig");
+const ResManager = @import("rend_ctx.zig").ResManager;
 const RenderPipeline = @import("render_pipeline.zig");
-const ModelName = @import("model.zig").ModelName;
 
 const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
 
 const ECS = @import("zigecs");
 
-const ShaderType = @import("shader_types.zig");
-const SceneUniform = ShaderType.SceneUniform;
-const Components = @import("components.zig").Components;
+const SceneUniform = @import("rend_ctx.zig").SceneUniform;
+const Comps = @import("components.zig").Components;
 
-const Systems = @import("systems.zig").Systems;
-const WorldHelper = @import("world_helper.zig");
-
-const Tester = @import("test_game.zig");
+const Model = @import("rend_ctx.zig").Model;

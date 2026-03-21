@@ -273,11 +273,28 @@ const UiRenderPipeline = struct {
     }
 };
 
+pub const UiUniform = struct {
+    ortho_matrix: Mat4,
+    pub fn init(window: Window) @This() {
+        const ortho_matrix = Mat4.orthographic(
+            0,
+            window.width,
+            window.height,
+            0,
+            -1.0,
+            1.0,
+        );
+        return @This(){
+            .ortho_matrix = ortho_matrix,
+        };
+    }
+};
+
 const std = @import("std");
 const Gctx = @import("gctx.zig");
 const Game = @import("game.zig");
 const Gltf = @import("zgltf");
-const Wgpu = @import("cimports.zig").Wgpu;
-const ResourceManager = @import("resource_manager.zig");
-const ShaderTypes = @import("shader_types.zig");
-const UiUniform = ShaderTypes.UiUniform;
+const Wgpu = @import("imports.zig").Wgpu;
+const Algebra = @import("zalgebra");
+const Mat4 = Algebra.Mat4;
+const Window = @import("imports.zig").Window;

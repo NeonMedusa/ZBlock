@@ -156,13 +156,11 @@ pub fn setWindowShouldClose(self: @This()) void {
     Glfw.glfwSetWindowShouldClose(self.handle, 1);
 }
 
-const Glfw = @import("cimports.zig").Glfw;
+const Glfw = @import("imports.zig").Glfw;
 const Gctx = @import("gctx.zig");
 const Algebra = @import("zalgebra");
 const Mat4 = Algebra.Mat4;
 const Vec2_f64 = Algebra.Vec2_f64;
 const Input = @import("input.zig");
 const std = @import("std");
-const ShaderTypes = @import("shader_types.zig");
-const SceneUniform = ShaderTypes.SceneUniform;
 const Game = @import("game.zig");

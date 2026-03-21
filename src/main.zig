@@ -9,16 +9,6 @@ pub fn main() !void {
     var game = try Game.init(allocator);
     defer game.deinit();
     try game.start();
-
-    // const file_path = try std.fs.path.join(allocator, &.{ "resources", "models", "Wolf.json" });
-    // defer allocator.free(file_path);
-
-    // var wolf_model_info: ModelInfo = undefined;
-    // wolf_model_info.animations = try loadAnimConfig(allocator, file_path);
-
-    // if (wolf_model_info.animations.get(.idle)) |idel_anim| {
-    //     std.debug.print("{s}\n", .{idel_anim.clip_name.?});
-    // }
 }
 
 const std = @import("std");

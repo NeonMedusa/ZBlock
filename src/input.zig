@@ -237,6 +237,6 @@ pub const Key = enum(i32) {
 };
 
 const std = @import("std");
-const Glfw = @import("cimports.zig").Glfw;
+const Glfw = @import("imports.zig").Glfw;
 const Window = @import("window.zig");
 const Game = @import("game.zig");

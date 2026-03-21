@@ -1,14 +1,16 @@
-//render.zig:
+// render.zig
+// 需要为新的模型资源结构重构渲染代码:
 pub fn draw(game: *Game) void {
     // 获取当前帧的纹理
     var surface_texture: Wgpu.WGPUSurfaceTexture = undefined;
     Wgpu.wgpuSurfaceGetCurrentTexture(game.gctx.surface, &surface_texture);
-    // 创建纹理视图
-    const texture_view = Wgpu.wgpuTextureCreateView(surface_texture.texture, null);
-    defer Wgpu.wgpuTextureViewRelease(texture_view);
-    // 创建命令编码器
+
+    const surface_texture_view = Wgpu.wgpuTextureCreateView(surface_texture.texture, null);
+    defer Wgpu.wgpuTextureViewRelease(surface_texture_view);
+
     const encoder_desc = Wgpu.WGPUCommandEncoderDescriptor{};
     const encoder = Wgpu.wgpuDeviceCreateCommandEncoder(game.gctx.device, &encoder_desc);
+
     // 更新scene_uniform_buffer
     Wgpu.wgpuQueueWriteBuffer(
         game.gctx.queue,
@@ -17,57 +19,56 @@ pub fn draw(game: *Game) void {
         &game.ubo,
         Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
     );
-    // 重置渲染实例计数器
-    var entity_counter: u32 = 0;
 
-    // 准备缓冲区数据
-    var view = game.registry.view(.{ Comps.Model, Comps.Position }, .{});
+    // ========== 第一步：收集所有游戏实体的变换数据 ==========
+    var entity_idx: u32 = 0;
+    var ins_idx: u32 = 0;
+    var view = game.registry.view(.{ Model, Comps.Position }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
-        const model_name = view.getConst(Comps.Model, entity);
-        const model_info = game.res_manager.models_info.get(model_name);
-        game.res_manager.indexed_indirect_cmds[entity_counter].indexCount = model_info.index_count;
-        game.res_manager.indexed_indirect_cmds[entity_counter].instanceCount = 1;
-        game.res_manager.indexed_indirect_cmds[entity_counter].firstIndex = model_info.first_index_idx;
-        game.res_manager.indexed_indirect_cmds[entity_counter].baseVertex = model_info.first_vertex_idx;
-        game.res_manager.indexed_indirect_cmds[entity_counter].firstInstance = entity_counter;
-
-        const anim = model_info.animations.get(.walk) orelse undefined;
-
-        game.res_manager.entities_data[entity_counter] = EntityData{
-            .transform = WorldHelper.getTransformMatrix(&game.registry, entity).?,
-            .color_texture_index = model_info.color_texture_idx,
-
-            .anime_texture_index = anim.texture.index,
-            .anime_texture_size = anim.texture.size,
-            .anime_texture_start = anim.texture.coord,
-
-            .anime_duration = anim.duration,
-
-            .cur_anime_time = game.window.time,
+        const entity_pos = game.registry.getConst(Comps.Position, entity);
+        game.res_manager.entities_data[entity_idx] = EntityData{
+            .transform = Mat4.fromTranslate(entity_pos.vec),
         };
-        entity_counter += 1;
+        const model = view.getConst(Model, entity);
+        for (model.nodes) |node| {
+            if (node.mesh) |mesh_idx| {
+                const mesh = model.meshes[mesh_idx];
+                for (mesh.primitives) |_| {
+                    game.res_manager.instances_data[ins_idx] = .{
+                        .transform = node.matrix,
+                        .entity_idx = entity_idx,
+                    };
+                    ins_idx += 1;
+                }
+            }
+        }
+        entity_idx += 1;
     }
 
     // 更新entities_data_buffer
-    Wgpu.wgpuQueueWriteBuffer(
-        game.gctx.queue,
-        game.res_manager.entities_data_buffer,
-        0,
-        game.res_manager.entities_data.ptr,
-        @sizeOf(EntityData) * entity_counter,
-    );
-    // 更新indexed_indirect_cmds_buffer
-    Wgpu.wgpuQueueWriteBuffer(
-        game.gctx.queue,
-        game.res_manager.indexed_indirect_cmds_buffer,
-        0,
-        game.res_manager.indexed_indirect_cmds.ptr,
-        @sizeOf(IndexedIndirectCmd) * entity_counter,
-    );
-    // 执行渲染
+    if (entity_idx > 0) {
+        Wgpu.wgpuQueueWriteBuffer(
+            game.gctx.queue,
+            game.res_manager.entities_data_buffer,
+            0,
+            game.res_manager.entities_data.ptr,
+            @sizeOf(EntityData) * entity_idx,
+        );
+    }
+    if (ins_idx > 0) {
+        Wgpu.wgpuQueueWriteBuffer(
+            game.gctx.queue,
+            game.res_manager.instances_data_buffer,
+            0,
+            game.res_manager.instances_data.ptr,
+            @sizeOf(InstanceData) * ins_idx,
+        );
+    }
+
+    // ========== 第三步：准备渲染通道 ==========
     const color_attachment = Wgpu.WGPURenderPassColorAttachment{
-        .view = texture_view,
+        .view = surface_texture_view,
         .loadOp = Wgpu.WGPULoadOp_Clear,
         .storeOp = Wgpu.WGPUStoreOp_Store,
         .depthSlice = Wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
@@ -78,6 +79,7 @@ pub fn draw(game: *Game) void {
             .a = 1.0,
         },
     };
+
     const render_pass_desc = Wgpu.WGPURenderPassDescriptor{
         .colorAttachmentCount = 1,
         .colorAttachments = &color_attachment,
@@ -93,63 +95,86 @@ pub fn draw(game: *Game) void {
             .stencilReadOnly = 1,
         },
     };
-    const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
-    // 设置渲染管线和绑定组
-    Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.handle);
-    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.bind_group, 0, null);
-    // 设置顶点和索引缓冲区
-    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.res_manager.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.res_manager.vertex_buffer));
-    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.res_manager.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.res_manager.index_buffer));
-    // 间接绘制所有可见实例
-    if (entity_counter > 0)
-        Wgpu.wgpuRenderPassEncoderMultiDrawIndexedIndirect(pass, game.res_manager.indexed_indirect_cmds_buffer, 0, entity_counter);
 
-    //UI渲染!
-    // 设置UI渲染管线和绑定组
+    const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
+
+    // ========== 第四步：设置主渲染管线并开始绘制 ==========
+    Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.handle);
+    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
+
+    // 重新遍历并绘制（此时GPU已经收到实例数据）
+    var draw_entity_idx: u32 = 0;
+    var draw_ins_idx: u32 = 0;
+    iter.reset(); // 重置迭代器
+    while (iter.next()) |entity| {
+        const model = game.registry.getConst(Model, entity);
+        for (model.nodes) |node| {
+            if (node.mesh) |mesh_idx| {
+                const mesh = model.meshes[mesh_idx];
+                for (mesh.primitives) |primitive| {
+                    // 设置顶点/索引缓冲区
+                    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, primitive.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(primitive.vertex_buffer));
+                    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, primitive.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(primitive.index_buffer));
+                    // 设置材质绑定组
+                    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, primitive.material.bind_group, 0, null);
+                    // 绘制
+                    Wgpu.wgpuRenderPassEncoderDrawIndexed(
+                        pass,
+                        primitive.index_count,
+                        1,
+                        0,
+                        0,
+                        draw_ins_idx,
+                    );
+                    draw_ins_idx += 1;
+                }
+            }
+        }
+        draw_entity_idx += 1;
+    }
+
+    // UI渲染
     Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.ui_system.render_pipeline.handle);
     Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.ui_system.render_pipeline.bind_group, 0, null);
-    // 设置顶点和索引缓冲区
     Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.ui_system.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.ui_system.vertex_buffer));
     Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.ui_system.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.ui_system.index_buffer));
-    // 绘制UI
     Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @as(u32, @intCast(game.ui_system.index_count)), 1, 0, 0, 0);
 
-    // 结束并释放渲染通道
+    // 结束并释放
     Wgpu.wgpuRenderPassEncoderEnd(pass);
     Wgpu.wgpuRenderPassEncoderRelease(pass);
-    // 提交命令
+
     const command_buffer = Wgpu.wgpuCommandEncoderFinish(encoder, null);
     Wgpu.wgpuCommandEncoderRelease(encoder);
     Wgpu.wgpuQueueSubmit(game.gctx.queue, 1, &command_buffer);
     Wgpu.wgpuCommandBufferRelease(command_buffer);
-    // 呈现表面后释放纹理
+
     _ = Wgpu.wgpuSurfacePresent(game.gctx.surface);
     Wgpu.wgpuTextureRelease(surface_texture.texture);
 }
 
 const std = @import("std");
 
-const Wgpu = @import("cimports.zig").Wgpu;
+const Wgpu = @import("imports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
 
 const Algebra = @import("zalgebra");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 
-const ResourceManager = @import("resource_manager.zig");
 const RenderPipeline = @import("render_pipeline.zig");
 
-const ShaderType = @import("shader_types.zig");
-const SceneUniform = ShaderType.SceneUniform;
-const VertexAttribute = ShaderType.VertexAttribute;
-const EntityData = ShaderType.EntityData;
-const IndexedIndirectCmd = ShaderType.IndexedIndirectCmd;
-const VertexIndirectCmd = ShaderType.VertexIndirectCmd;
+const RendCTX = @import("rend_ctx.zig");
+const SceneUniform = RendCTX.SceneUniform;
+const VertexAttribute = RendCTX.VertexAttribute;
+const EntityData = RendCTX.EntityData;
+const InstanceData = RendCTX.InstanceData;
 
 const UiSystem = @import("ui_system.zig");
 const Game = @import("game.zig");
 const Systems = @import("systems.zig");
-const WorldHelper = @import("world_helper.zig");
 
 const ECS = @import("zigecs");
 const Comps = @import("components.zig").Components;
+
+const Model = @import("rend_ctx.zig").Model;

@@ -257,5 +257,5 @@ pub fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(Vert
 const std = @import("std");
 const Window = @import("window.zig");
 const Gctx = @import("gctx.zig");
-const Wgpu = @import("cimports.zig").Wgpu;
-const Glfw = @import("cimports.zig").Glfw;
+const Wgpu = @import("imports.zig").Wgpu;
+const Glfw = @import("imports.zig").Glfw;

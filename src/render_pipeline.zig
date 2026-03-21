@@ -1,13 +1,16 @@
 //render_pipeline.zig:
 handle: Wgpu.WGPURenderPipeline,
-bind_group_layout: Wgpu.WGPUBindGroupLayout,
-bind_group: Wgpu.WGPUBindGroup,
+global_bgl: Wgpu.WGPUBindGroupLayout,
+global_bind_group: Wgpu.WGPUBindGroup,
+material_bgl: Wgpu.WGPUBindGroupLayout,
 pipeline_layout: Wgpu.WGPUPipelineLayout,
 shader_module: Wgpu.WGPUShaderModule,
+entry_count: usize,
+
 pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
     const shader_module = try game.gctx.createShaderModule(shader_file_path);
-    // 创建 binding group
-    const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
+    // 创建 binding group layout
+    const global_bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
         .{ // scene_uniform
             .binding = 0,
             .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
@@ -24,24 +27,8 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
                 .hasDynamicOffset = 0,
             },
         },
-        .{ // textures
+        .{ // ins_data
             .binding = 2,
-            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
-            .texture = .{
-                .sampleType = Wgpu.WGPUTextureSampleType_Float,
-                .viewDimension = Wgpu.WGPUTextureViewDimension_2DArray,
-            },
-        },
-        .{ // anime_textures
-            .binding = 3,
-            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
-            .texture = .{
-                .sampleType = Wgpu.WGPUTextureSampleType_UnfilterableFloat,
-                .viewDimension = Wgpu.WGPUTextureViewDimension_2DArray,
-            },
-        },
-        .{ // texture_info_buffer
-            .binding = 4,
             .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
             .buffer = .{
                 .type = Wgpu.WGPUBufferBindingType_ReadOnlyStorage,
@@ -49,16 +36,16 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
             },
         },
     };
-    const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(
+    const global_bgl = Wgpu.wgpuDeviceCreateBindGroupLayout(
         game.gctx.device,
         &Wgpu.WGPUBindGroupLayoutDescriptor{
-            .entryCount = bgl_entries.len,
-            .entries = &bgl_entries,
+            .entryCount = global_bgl_entries.len,
+            .entries = &global_bgl_entries,
         },
     );
-    const bind_group = Wgpu.wgpuDeviceCreateBindGroup(game.gctx.device, &Wgpu.WGPUBindGroupDescriptor{
-        .layout = bind_group_layout,
-        .entryCount = bgl_entries.len,
+    const global_bind_group = Wgpu.wgpuDeviceCreateBindGroup(game.gctx.device, &Wgpu.WGPUBindGroupDescriptor{
+        .layout = global_bgl,
+        .entryCount = global_bgl_entries.len,
         .entries = &[_]Wgpu.WGPUBindGroupEntry{
             .{ // scene_uniform
                 .binding = 0,
@@ -72,30 +59,62 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
                 .offset = 0,
                 .size = Wgpu.wgpuBufferGetSize(game.res_manager.entities_data_buffer),
             },
-            .{ // color_altas
+            .{ // instances_data
                 .binding = 2,
-                .textureView = game.res_manager.color_altas_view,
-            },
-            .{ // anime_altas
-                .binding = 3,
-                .textureView = game.res_manager.anime_altas_view,
-            },
-            .{ // textures_info
-                .binding = 4,
-                .buffer = game.res_manager.color_textures_info_buffer,
+                .buffer = game.res_manager.instances_data_buffer,
                 .offset = 0,
-                .size = Wgpu.wgpuBufferGetSize(game.res_manager.color_textures_info_buffer),
+                .size = Wgpu.wgpuBufferGetSize(game.res_manager.instances_data_buffer),
             },
         },
     });
+
+    const material_bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
+        .{ // texture_uniform
+            .binding = 0,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
+            .buffer = .{
+                .type = Wgpu.WGPUBufferBindingType_Uniform,
+                .hasDynamicOffset = 0,
+            },
+        },
+        .{ // color_texture
+            .binding = 1,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
+            .texture = .{
+                .sampleType = Wgpu.WGPUTextureSampleType_Float,
+                .viewDimension = Wgpu.WGPUTextureViewDimension_2D,
+            },
+        },
+        .{ // normal_texture
+            .binding = 2,
+            .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
+            .texture = .{
+                .sampleType = Wgpu.WGPUTextureSampleType_Float,
+                .viewDimension = Wgpu.WGPUTextureViewDimension_2D,
+            },
+        },
+    };
+    const material_bgl = Wgpu.wgpuDeviceCreateBindGroupLayout(
+        game.gctx.device,
+        &Wgpu.WGPUBindGroupLayoutDescriptor{
+            .entryCount = material_bgl_entries.len,
+            .entries = &material_bgl_entries,
+        },
+    );
+
     // 创建渲染管线
-    const pipeline_layout = Wgpu.wgpuDeviceCreatePipelineLayout(game.gctx.device, &Wgpu.WGPUPipelineLayoutDescriptor{
-        .bindGroupLayoutCount = 1,
-        .bindGroupLayouts = &bind_group_layout,
-    });
+    const pipeline_layout = Wgpu.wgpuDeviceCreatePipelineLayout(
+        game.gctx.device,
+        &Wgpu.WGPUPipelineLayoutDescriptor{
+            .bindGroupLayoutCount = 2,
+            .bindGroupLayouts = &[_]Wgpu.WGPUBindGroupLayout{
+                global_bgl, material_bgl,
+            },
+        },
+    );
     const attributes = Gctx.generateVertexAttributes(VertexAttribute);
     const pipeline_desc = Wgpu.WGPURenderPipelineDescriptor{
-        .layout = pipeline_layout, // 添加管线布局
+        .layout = pipeline_layout,
         .vertex = .{
             .bufferCount = 1,
             .buffers = &Wgpu.WGPUVertexBufferLayout{
@@ -112,6 +131,8 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
         },
         .primitive = .{
             .topology = Wgpu.WGPUPrimitiveTopology_TriangleList,
+            .frontFace = Wgpu.WGPUFrontFace_CCW,
+            .cullMode = Wgpu.WGPUCullMode_Back,
         },
         .fragment = &Wgpu.WGPUFragmentState{
             .module = shader_module,
@@ -145,16 +166,20 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
     const pipeline = Wgpu.wgpuDeviceCreateRenderPipeline(game.gctx.device, &pipeline_desc);
     return @This(){
         .handle = pipeline,
-        .bind_group_layout = bind_group_layout,
-        .bind_group = bind_group,
+        .global_bgl = global_bgl,
+        .global_bind_group = global_bind_group,
+        .material_bgl = material_bgl,
         .pipeline_layout = pipeline_layout,
         .shader_module = shader_module,
+        .entry_count = global_bgl_entries.len,
     };
 }
+
 pub fn deinit(self: @This()) void {
     Wgpu.wgpuRenderPipelineRelease(self.handle);
-    Wgpu.wgpuBindGroupLayoutRelease(self.bind_group_layout);
-    Wgpu.wgpuBindGroupRelease(self.bind_group);
+    Wgpu.wgpuBindGroupLayoutRelease(self.global_bgl);
+    Wgpu.wgpuBindGroupRelease(self.global_bind_group);
+    Wgpu.wgpuBindGroupLayoutRelease(self.material_bgl);
     Wgpu.wgpuPipelineLayoutRelease(self.pipeline_layout);
     Wgpu.wgpuShaderModuleRelease(self.shader_module);
 }
@@ -166,11 +191,10 @@ const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
 const Gltf = @import("zgltf");
-const Wgpu = @import("cimports.zig").Wgpu;
-const ResourceManager = @import("resource_manager.zig");
+const Wgpu = @import("imports.zig").Wgpu;
 const Game = @import("game.zig");
 
-const ShaderType = @import("shader_types.zig");
-const SceneUniform = ShaderType.SceneUniform;
-const VertexAttribute = ShaderType.VertexAttribute;
-const EntityData = ShaderType.EntityData;
+const RenderCTX = @import("rend_ctx.zig");
+const SceneUniform = RenderCTX.SceneUniform;
+const VertexAttribute = RenderCTX.VertexAttribute;
+const EntityData = RenderCTX.EntityData;
