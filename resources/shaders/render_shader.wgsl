@@ -68,29 +68,17 @@ fn vs_main(in: VertexInput, @builtin(instance_index) ins_idx: u32) -> VertexOutp
 //片段着色器
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    var final_color: vec4f = vec4f(1.0, 0.0, 1.0, 1.0); // 默认洋红色（表示错误）
-    
-    // 如果有基础色纹理
-    if (texture_uniform.has_base_color != 0u) {
-        // 获取纹理尺寸
-        let texture_dims = textureDimensions(color_texture);
-        
-        // 将UV坐标转换为纹素坐标
-        // UV范围是[0,1]，纹素坐标范围是[0, width-1]
-        let texel_coords = vec2i(
-            i32(in.color_uv.x * f32(texture_dims.x)),
-            i32(in.color_uv.y * f32(texture_dims.y))
-        );
-        
-        // 使用textureLoad采样纹理（需要指定mip级别，这里用0）
-        final_color = textureLoad(color_texture, texel_coords, 0);
-    } else {
-        // 没有纹理时使用白色
-        final_color = vec4f(1.0, 1.0, 1.0, 1.0);
-    }
-    
+    // 获取纹理尺寸
+    let texture_dims = textureDimensions(color_texture);
+    // 将UV坐标转换为纹素坐标
+    // UV范围是[0,1]，纹素坐标范围是[0, width-1]
+    let texel_coords = vec2i(
+        i32(in.color_uv.x * f32(texture_dims.x)),
+        i32(in.color_uv.y * f32(texture_dims.y))
+    );
+    // 使用textureLoad采样纹理（需要指定mip级别，这里用0）
+    var final_color = textureLoad(color_texture, texel_coords, 0);
     // 简单的伽玛校正
     final_color = pow(final_color, vec4f(2.2));
-
     return final_color;
 }

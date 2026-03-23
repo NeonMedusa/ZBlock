@@ -57,7 +57,8 @@ pub fn start(self: *@This()) !void {
     var main_menu = @import("ui/main_menu.zig"){};
 
     // 加载一个模型并使其成为一个实体的组件
-    const model_1 = try Model.load(self.allocator, self.gctx, "Wolf", self.render_pipeline);
+    var model_1 = try Model.load(self.allocator, self.gctx, "Wolf", self.render_pipeline);
+    defer model_1.deinit(self.allocator);
     const e1 = self.registry.create();
     self.registry.add(e1, model_1);
     self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
@@ -66,7 +67,8 @@ pub fn start(self: *@This()) !void {
     self.registry.add(e2, model_1);
     self.registry.add(e2, Comps.Position{ .vec = .new(0, 1, 0) });
 
-    const model_2 = try Model.load(self.allocator, self.gctx, "BarramundiFish", self.render_pipeline);
+    var model_2 = try Model.load(self.allocator, self.gctx, "BarramundiFish", self.render_pipeline);
+    defer model_2.deinit(self.allocator);
     // 第三个实体
     const e3 = self.registry.create();
     self.registry.add(e3, model_2);

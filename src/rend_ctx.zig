@@ -2,7 +2,7 @@ const import = @import("imports.zig");
 const ECS = import.ECS;
 const GltfData = Gltf.Data;
 const ZigImg = import.zigimg;
-const RenderPipline = @import("render_pipeline.zig");
+const RenderPipeline = @import("render_pipeline.zig");
 const Game = @import("game.zig");
 
 const TextureRes = struct {
@@ -52,11 +52,8 @@ pub const Model = struct {
         allocator: std.mem.Allocator,
         gctx: Gctx,
         name: []const u8,
-        pipeline: RenderPipline,
+        pipeline: RenderPipeline,
     ) !Model {
-        // 内存泄漏警告，但是先不管，先渲染出画面了再说
-        const default_texture = try createDefaultTexture(gctx);
-
         // 加载GLTF文件
         const model_file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{name});
         defer allocator.free(model_file_name);
@@ -92,6 +89,10 @@ pub const Model = struct {
 
         // 动画纹理，暂时不处理，先实现基础渲染
         model.anim_textures = try allocator.alloc(TextureRes, gltf.data.animations.len);
+        for (model.anim_textures) |*anim_texture| {
+            anim_texture.texture = null;
+            anim_texture.view = null;
+        }
 
         // 加载纹理
         model.textures_res = try allocator.alloc(TextureRes, gltf.data.textures.len);
@@ -159,6 +160,7 @@ pub const Model = struct {
 
         // 为材质绑定纹理
         model.materials = try allocator.alloc(Material, gltf.data.materials.len);
+        const default_texture = createDefaultTexture(gctx) catch unreachable;
         for (gltf.data.materials, 0..) |gltf_meterial, i| {
             // 材质常量，后面会写入到material_uniform_buffer
             var material_constants = MaterialConstants{
@@ -295,6 +297,65 @@ pub const Model = struct {
         // 返回
         return model;
     }
+    pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
+        // 1. 释放所有纹理资源
+        for (self.textures_res) |tex| {
+            if (tex.texture) |texture| {
+                Wgpu.wgpuTextureRelease(texture);
+            }
+            if (tex.view) |view| {
+                Wgpu.wgpuTextureViewRelease(view);
+            }
+        }
+        allocator.free(self.textures_res);
+
+        // 2. 释放动画纹理（如果有的话）
+        for (self.anim_textures) |tex| {
+            if (tex.texture) |texture| {
+                Wgpu.wgpuTextureRelease(texture);
+            }
+            if (tex.view) |view| {
+                Wgpu.wgpuTextureViewRelease(view);
+            }
+        }
+        allocator.free(self.anim_textures);
+
+        // 3. 释放材质资源
+        for (self.materials) |material| {
+            // 释放 uniform buffer
+            if (material.uniform_buffer) |buffer| {
+                Wgpu.wgpuBufferRelease(buffer);
+            }
+            // 释放绑定组
+            if (material.bind_group) |bind_group| {
+                Wgpu.wgpuBindGroupRelease(bind_group);
+            }
+            // 注意：color_texture 和 normal_texture 是引用，不在这里释放
+            // 它们指向 textures_res 中的纹理，会在步骤1中释放
+        }
+        allocator.free(self.materials);
+
+        // 4. 释放网格和 primitive 资源
+        for (self.meshes) |mesh| {
+            for (mesh.primitives) |primitive| {
+                // 释放顶点缓冲区
+                if (primitive.vertex_buffer) |buffer| {
+                    Wgpu.wgpuBufferRelease(buffer);
+                }
+                // 释放索引缓冲区
+                if (primitive.index_buffer) |buffer| {
+                    Wgpu.wgpuBufferRelease(buffer);
+                }
+                // 注意：primitive.material 是引用，不在这里释放
+                // 它指向 materials 数组，会在步骤3中释放
+            }
+            allocator.free(mesh.primitives);
+        }
+        allocator.free(self.meshes);
+
+        // 5. 释放节点数据
+        allocator.free(self.nodes);
+    }
 };
 
 fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
@@ -356,42 +417,8 @@ pub const ResManager = struct {
     }
 };
 
-pub const SceneUniform = struct {
-    proj_matrix: Mat4 = undefined, // 投影矩阵
-    view_matrix: Mat4 = undefined, // 视图矩阵
-    time: f32 = undefined, // 当前时间
-    _padding: [3]f32 = undefined, // 需要对齐到16字节
-    pub fn init(window: Window) @This() {
-        const aspect_ratio: f32 = window.width / window.height;
-        const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 100);
-        const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero(), Vec3.up());
-        return .{
-            .proj_matrix = proj_matrix,
-            .view_matrix = view_matrix,
-            .time = window.time,
-        };
-    }
-};
-
-pub const VertexAttribute = struct {
-    position: [3]f32, //顶点位置
-    color_uv: [2]f32 = .{ 0, 0 }, //纹理UV
-    joint_indices: [4]u32 = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
-    joint_weights: [4]f32 = .{ 1, 0, 0, 0 }, // 骨骼矩阵权重
-};
-
-pub const EntityData = struct {
-    transform: Mat4, //实体的世界变换
-};
-
-pub const InstanceData = struct {
-    transform: Mat4, //渲染实例的变换
-    entity_idx: u32, // 该渲染实例属于哪个游戏实体
-    _padding: [3]f32 = undefined,
-};
-
 fn createDefaultTexture(gctx: Gctx) !TextureRes {
-    // 创建一个 1x1 的白色纹理
+    // 创建一个 1x1 的纹理
     const white_pixel = [_]u8{ 255, 255, 255, 255 };
 
     const texture_desc = Wgpu.WGPUTextureDescriptor{
@@ -447,6 +474,40 @@ fn createDefaultTexture(gctx: Gctx) !TextureRes {
         .view = texture_view,
     };
 }
+
+pub const SceneUniform = struct {
+    proj_matrix: Mat4 = undefined, // 投影矩阵
+    view_matrix: Mat4 = undefined, // 视图矩阵
+    time: f32 = undefined, // 当前时间
+    _padding: [3]f32 = undefined, // 需要对齐到16字节
+    pub fn init(window: Window) @This() {
+        const aspect_ratio: f32 = window.width / window.height;
+        const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 100);
+        const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero(), Vec3.up());
+        return .{
+            .proj_matrix = proj_matrix,
+            .view_matrix = view_matrix,
+            .time = window.time,
+        };
+    }
+};
+
+pub const VertexAttribute = struct {
+    position: [3]f32, //顶点位置
+    color_uv: [2]f32 = .{ 0, 0 }, //纹理UV
+    joint_indices: [4]u32 = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
+    joint_weights: [4]f32 = .{ 1, 0, 0, 0 }, // 骨骼矩阵权重
+};
+
+pub const EntityData = struct {
+    transform: Mat4, //实体的世界变换
+};
+
+pub const InstanceData = struct {
+    transform: Mat4, //渲染实例的变换
+    entity_idx: u32, // 该渲染实例属于哪个游戏实体
+    _padding: [3]f32 = undefined,
+};
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");

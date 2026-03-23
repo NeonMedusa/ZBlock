@@ -20,7 +20,7 @@ pub fn draw(game: *Game) void {
         Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
     );
 
-    // ========== 第一步：收集所有游戏实体的变换数据 ==========
+    // ========== 第一步：收集所有游戏实体和渲染实例的变换数据 ==========
     var entity_idx: u32 = 0;
     var ins_idx: u32 = 0;
     var view = game.registry.view(.{ Model, Comps.Position }, .{});
@@ -66,7 +66,7 @@ pub fn draw(game: *Game) void {
         );
     }
 
-    // ========== 第三步：准备渲染通道 ==========
+    // ========== 第二步：准备渲染通道 ==========
     const color_attachment = Wgpu.WGPURenderPassColorAttachment{
         .view = surface_texture_view,
         .loadOp = Wgpu.WGPULoadOp_Clear,
@@ -98,7 +98,7 @@ pub fn draw(game: *Game) void {
 
     const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
 
-    // ========== 第四步：设置主渲染管线并开始绘制 ==========
+    // ========== 第三步：设置主渲染管线并开始绘制 ==========
     Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.handle);
     Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
 
