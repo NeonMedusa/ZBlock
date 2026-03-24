@@ -50,6 +50,16 @@ pub fn draw(game: *Game) void {
         entity_idx += 1;
     }
 
+    // ！！！！！为地形分配数据（使用记录的索引）
+    game.res_manager.entities_data[entity_idx] = .{ .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)) };
+    game.res_manager.instances_data[ins_idx] = .{
+        .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)),
+        .entity_idx = entity_idx,
+    };
+    // 更新计数（在赋值之后）
+    entity_idx += 1;
+    ins_idx += 1;
+
     // 更新entities_data_buffer
     if (entity_idx > 0) {
         Wgpu.wgpuQueueWriteBuffer(
@@ -137,6 +147,19 @@ pub fn draw(game: *Game) void {
         }
         draw_entity_idx += 1;
     }
+
+    // ！！！绘制地形！！！！
+    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.terrain.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.terrain.vertex_buffer));
+    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.terrain.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.terrain.index_buffer));
+    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, game.terrain.material.bind_group, 0, null);
+    Wgpu.wgpuRenderPassEncoderDrawIndexed(
+        pass,
+        game.terrain.index_count,
+        1,
+        0,
+        0,
+        draw_ins_idx,
+    );
 
     // UI渲染
     Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.ui_system.render_pipeline.handle);

@@ -22,14 +22,14 @@ pub const Primitive = struct {
     material: Material,
 };
 
-const MaterialConstants = struct {
+pub const MaterialConstants = struct {
     // 标志位
     has_base_color: u32 = 0,
     has_normal: u32 = 0,
     _padding: [2]f32 = undefined,
 };
 
-const Material = struct {
+pub const Material = struct {
     color_texture: TextureRes, // 设计为不可为空，因为Wgpu.WGPUTexture和Wgpu.WGPUTextureView是可空类型
     normal_texture: TextureRes, // 设计为不可为空，因为Wgpu.WGPUTexture和Wgpu.WGPUTextureView是可空类型
     uniform_buffer: Wgpu.WGPUBuffer, // 存储 MaterialConstants
@@ -260,10 +260,18 @@ pub const Model = struct {
                                 const pos = [3]f32{ v[0], v[1], v[2] };
                                 try vertex_data.append(allocator, .{
                                     .position = pos,
-                                    .color_uv = .{ 0.1, 0.9 },
+                                    .texcoord = .{ 0.1, 0.9 },
                                     .joint_indices = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
                                     .joint_weights = .{ 0, 0, 0, 0 }, // 骨骼矩阵权重
                                 });
+                            }
+                        },
+                        .normal => |idx| {
+                            const accessor = gltf.data.accessors[idx];
+                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                            var i: u32 = 0;
+                            while (it.next()) |n| : (i += 1) {
+                                vertex_data.items[i].normal = [3]f32{ n[0], n[1], n[2] };
                             }
                         },
                         .texcoord => |idx| {
@@ -271,7 +279,7 @@ pub const Model = struct {
                             var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                             var i: u32 = 0;
                             while (it.next()) |t| : (i += 1)
-                                vertex_data.items[i].color_uv = .{ t[0], t[1] };
+                                vertex_data.items[i].texcoord = .{ t[0], t[1] };
                         },
                         else => {},
                     }
@@ -426,11 +434,6 @@ pub const ResManager = struct {
             }
         }
     }
-    // /// 增加某个模型的引用计数，应该在Draw函数中遍历游戏实例时调用
-    // pub fn addRefCount(self: *ResManager, name: []const u8) void {
-    //     if (self.models.getPtr(name)) |model_ref|
-    //         model_ref.ref_count += 1;
-    // }
 
     pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline) !@This() {
         const scene_uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
@@ -477,7 +480,7 @@ pub const ResManager = struct {
     }
 };
 
-fn createDefaultTexture(gctx: Gctx) !TextureRes {
+pub fn createDefaultTexture(gctx: Gctx) !TextureRes {
     // 创建一个 1x1 的纹理
     const white_pixel = [_]u8{ 255, 255, 255, 255 };
 
@@ -553,10 +556,13 @@ pub const SceneUniform = struct {
 };
 
 pub const VertexAttribute = struct {
-    position: [3]f32, //顶点位置
-    color_uv: [2]f32 = .{ 0, 0 }, //纹理UV
-    joint_indices: [4]u32 = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
-    joint_weights: [4]f32 = .{ 1, 0, 0, 0 }, // 骨骼矩阵权重
+    position: [3]f32 = .{ 0, 0, 0 },
+    normal: [3]f32 = .{ 0, 1, 0 },
+    tangent: [4]f32 = .{ 1, 0, 0, 1 }, // 注意：tangent 是 4D 向量，第4个分量是符号
+    texcoord: [2]f32 = .{ 0, 0 },
+    color: [4]f32 = .{ 1, 1, 1, 1 }, // RGBA，4通道
+    joint_indices: [4]u32 = .{ 0, 0, 0, 0 },
+    joint_weights: [4]f32 = .{ 1, 0, 0, 0 },
 };
 
 pub const EntityData = struct {

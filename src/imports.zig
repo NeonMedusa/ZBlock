@@ -25,3 +25,5 @@ pub const Gltf = @import("zgltf").Gltf;
 pub const zigimg = @import("zigimg");
 pub const ECS = @import("zigecs");
 pub const Game = @import("game.zig");
+pub const RendCTX = @import("rend_ctx.zig");
+pub const RenderPipeline = @import("render_pipeline.zig");

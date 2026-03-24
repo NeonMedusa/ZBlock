@@ -8,6 +8,7 @@ res_manager: ResManager,
 render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
+terrain: Terrain,
 pub fn deinit(self: *@This()) void {
     self.window.deinit();
     self.gctx.deinit();
@@ -15,6 +16,7 @@ pub fn deinit(self: *@This()) void {
     self.render_pipeline.deinit();
     self.registry.deinit();
     self.ui_system.deinit();
+    self.terrain.deinit();
     self.allocator.destroy(self);
 }
 pub fn init(allocator: std.mem.Allocator) !*@This() {
@@ -48,6 +50,10 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 初始化UI系统
     const ui_system = try UiSystem.init(allocator, &self.gctx, self);
     self.ui_system = ui_system;
+
+    const terrain = try Terrain.init(self.allocator, &self.gctx, 32, 32, &self.render_pipeline);
+    self.terrain = terrain;
+
     // 返回实例
     return self;
 }
@@ -77,6 +83,7 @@ pub fn start(self: *@This()) !void {
 
     const ve = self.registry.create();
     self.registry.add(ve, Comps.Position{ .vec = .new(3, 3, 3) });
+
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
@@ -132,3 +139,5 @@ const SceneUniform = @import("rend_ctx.zig").SceneUniform;
 const Comps = @import("components.zig").Components;
 
 const Model = @import("rend_ctx.zig").Model;
+
+const Terrain = @import("terrain.zig").Terrain;
