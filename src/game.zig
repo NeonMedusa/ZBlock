@@ -30,7 +30,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const gctx = try Gctx.init(self.window);
     self.gctx = gctx;
     // 初始化资源管理器
-    const res_manager = try ResManager.init(allocator, self.gctx);
+    const res_manager = try ResManager.init(allocator, &self.gctx, &self.render_pipeline);
     self.res_manager = res_manager;
     // 创建渲染管线
     const render_pipeline = try RenderPipeline.init(
@@ -57,26 +57,26 @@ pub fn start(self: *@This()) !void {
     var main_menu = @import("ui/main_menu.zig"){};
 
     // 加载一个模型并使其成为一个实体的组件
-    var model_1 = try Model.load(self.allocator, self.gctx, "Wolf", self.render_pipeline);
-    defer model_1.deinit(self.allocator);
     const e1 = self.registry.create();
-    self.registry.add(e1, model_1);
+    self.registry.add(e1, Comps.ModelName{ .string = "Wolf" });
     self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
+
     // 另一个实体
     const e2 = self.registry.create();
-    self.registry.add(e2, model_1);
+    self.registry.add(e2, Comps.ModelName{ .string = "Wolf" });
     self.registry.add(e2, Comps.Position{ .vec = .new(0, 1, 0) });
 
-    var model_2 = try Model.load(self.allocator, self.gctx, "BarramundiFish", self.render_pipeline);
-    defer model_2.deinit(self.allocator);
     // 第三个实体
     const e3 = self.registry.create();
-    self.registry.add(e3, model_2);
+    self.registry.add(e3, Comps.ModelName{ .string = "BarramundiFish" });
     self.registry.add(e3, Comps.Position{ .vec = .new(0, 2, 0) });
     // 第四个实体
     const e4 = self.registry.create();
-    self.registry.add(e4, model_2);
+    self.registry.add(e4, Comps.ModelName{ .string = "BarramundiFish" });
     self.registry.add(e4, Comps.Position{ .vec = .new(0, 3, 0) });
+
+    const ve = self.registry.create();
+    self.registry.add(ve, Comps.Position{ .vec = .new(3, 3, 3) });
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
@@ -88,6 +88,11 @@ pub fn start(self: *@This()) !void {
             // 更新摄像头
             self.camera.update(self);
             self.ubo.view_matrix = self.camera.getViewMatrix();
+
+            if (self.input.isKeyDown(.equal))
+                self.registry.add(ve, Comps.ModelName{ .string = "CesiumMan" });
+            if (self.input.isKeyDown(.minus))
+                self.registry.remove(Comps.ModelName, ve);
         }
         // UI开始新帧
         self.ui_system.beginFrame();

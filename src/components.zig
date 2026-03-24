@@ -27,4 +27,8 @@ pub const Components = struct {
         current: f32,
         max: f32,
     };
+    // 模型
+    pub const ModelName = struct {
+        string: []const u8,
+    };
 };

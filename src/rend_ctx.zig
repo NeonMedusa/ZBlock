@@ -371,6 +371,12 @@ fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
     return world_matrix;
 }
 
+const ModelRef = struct {
+    name: []const u8,
+    ref_count: u32 = 0,
+    model: Model,
+};
+
 pub const ResManager = struct {
     const MAX_ENTITIES = 500; // 限制最大渲染游戏实体数
     const MAX_INSTANCES = 3 * MAX_ENTITIES; // 限制最大渲染实例数
@@ -381,7 +387,52 @@ pub const ResManager = struct {
     instances_data: []InstanceData,
     instances_data_buffer: Wgpu.WGPUBuffer, // 渲染实例的世界矩阵缓冲区
 
-    pub fn init(allocator: std.mem.Allocator, gctx: Gctx) !@This() {
+    allocator: std.mem.Allocator,
+    models: std.StringHashMap(ModelRef),
+    gctx: *Gctx,
+    pipeline: *RenderPipeline,
+    /// 获取或加载模型，调用此函数时会增加ref_count
+    pub fn getOrLoadModel(self: *ResManager, name: []const u8) Model {
+        if (self.models.getPtr(name)) |model_ref| {
+            model_ref.ref_count += 1;
+            return model_ref.model;
+        }
+        const model_ref = ModelRef{
+            .name = name,
+            .ref_count = 1,
+            .model = Model.load(
+                self.allocator,
+                self.gctx.*,
+                name,
+                self.pipeline.*,
+            ) catch unreachable,
+        };
+        self.models.put(name, model_ref) catch unreachable;
+        return self.models.getPtr(name).?.model;
+    }
+    /// 归零所有模型的引用计数，应该在每帧开始时调用
+    pub fn resetRefCount(self: *ResManager) void {
+        var iter = self.*.models.iterator();
+        while (iter.next()) |entry|
+            entry.value_ptr.ref_count = 0;
+    }
+    /// 卸载所有引用为0的模型，应该在每帧结束时调用
+    pub fn removeZeroRefModel(self: *ResManager) void {
+        var iter = self.*.models.iterator();
+        while (iter.next()) |entry| {
+            if (entry.value_ptr.ref_count == 0) {
+                entry.value_ptr.model.deinit(self.allocator);
+                _ = self.models.remove(entry.key_ptr.*);
+            }
+        }
+    }
+    // /// 增加某个模型的引用计数，应该在Draw函数中遍历游戏实例时调用
+    // pub fn addRefCount(self: *ResManager, name: []const u8) void {
+    //     if (self.models.getPtr(name)) |model_ref|
+    //         model_ref.ref_count += 1;
+    // }
+
+    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline) !@This() {
         const scene_uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = @sizeOf(SceneUniform),
             .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
@@ -405,6 +456,10 @@ pub const ResManager = struct {
             .entities_data_buffer = entities_data_buffer,
             .instances_data = instances_data,
             .instances_data_buffer = instances_data_buffer,
+            .allocator = allocator,
+            .pipeline = pipeline,
+            .gctx = gctx,
+            .models = std.StringHashMap(ModelRef).init(allocator),
         };
     }
 
@@ -414,6 +469,11 @@ pub const ResManager = struct {
         Wgpu.wgpuBufferRelease(self.entities_data_buffer);
         allocator.free(self.instances_data);
         Wgpu.wgpuBufferRelease(self.instances_data_buffer);
+
+        var models_it = self.models.iterator();
+        while (models_it.next()) |entry|
+            entry.value_ptr.model.deinit(self.allocator);
+        self.models.deinit();
     }
 };
 

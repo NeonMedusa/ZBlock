@@ -1,6 +1,9 @@
 // render.zig
 // 需要为新的模型资源结构重构渲染代码:
 pub fn draw(game: *Game) void {
+    game.res_manager.resetRefCount();
+    defer game.res_manager.removeZeroRefModel();
+
     // 获取当前帧的纹理
     var surface_texture: Wgpu.WGPUSurfaceTexture = undefined;
     Wgpu.wgpuSurfaceGetCurrentTexture(game.gctx.surface, &surface_texture);
@@ -23,14 +26,15 @@ pub fn draw(game: *Game) void {
     // ========== 第一步：收集所有游戏实体和渲染实例的变换数据 ==========
     var entity_idx: u32 = 0;
     var ins_idx: u32 = 0;
-    var view = game.registry.view(.{ Model, Comps.Position }, .{});
+    var view = game.registry.view(.{ Comps.ModelName, Comps.Position }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
         const entity_pos = game.registry.getConst(Comps.Position, entity);
         game.res_manager.entities_data[entity_idx] = EntityData{
             .transform = Mat4.fromTranslate(entity_pos.vec),
         };
-        const model = view.getConst(Model, entity);
+        const model_name = view.getConst(Comps.ModelName, entity);
+        const model = game.res_manager.getOrLoadModel(model_name.string);
         for (model.nodes) |node| {
             if (node.mesh) |mesh_idx| {
                 const mesh = model.meshes[mesh_idx];
@@ -107,7 +111,8 @@ pub fn draw(game: *Game) void {
     var draw_ins_idx: u32 = 0;
     iter.reset(); // 重置迭代器
     while (iter.next()) |entity| {
-        const model = game.registry.getConst(Model, entity);
+        const model_name = game.registry.getConst(Comps.ModelName, entity);
+        const model = game.res_manager.getOrLoadModel(model_name.string);
         for (model.nodes) |node| {
             if (node.mesh) |mesh_idx| {
                 const mesh = model.meshes[mesh_idx];
