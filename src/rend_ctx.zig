@@ -50,7 +50,7 @@ pub const Model = struct {
     nodes: []Node, //简化的nodes结构，对应gltf.data.nodes
     pub fn load(
         allocator: std.mem.Allocator,
-        gctx: Gctx,
+        gctx: *Gctx,
         name: []const u8,
         pipeline: RenderPipeline,
     ) !Model {
@@ -410,7 +410,7 @@ pub const ResManager = struct {
             .ref_count = 1,
             .model = Model.load(
                 self.allocator,
-                self.gctx.*,
+                self.gctx,
                 name,
                 self.pipeline.*,
             ) catch unreachable,
@@ -480,7 +480,7 @@ pub const ResManager = struct {
     }
 };
 
-pub fn createDefaultTexture(gctx: Gctx) !TextureRes {
+pub fn createDefaultTexture(gctx: *Gctx) !TextureRes {
     // 创建一个 1x1 的纹理
     const white_pixel = [_]u8{ 255, 255, 255, 255 };
 

@@ -51,7 +51,17 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const ui_system = try UiSystem.init(allocator, &self.gctx, self);
     self.ui_system = ui_system;
 
-    const terrain = try Terrain.init(self.allocator, &self.gctx, 32, 32, &self.render_pipeline);
+    var terrain = try Terrain.init(
+        self.allocator,
+        &self.gctx,
+        16,
+        16,
+        16,
+        -2,
+        2,
+        &self.render_pipeline,
+    );
+    terrain.generateRandom(1);
     self.terrain = terrain;
 
     // 返回实例
@@ -81,9 +91,6 @@ pub fn start(self: *@This()) !void {
     self.registry.add(e4, Comps.ModelName{ .string = "BarramundiFish" });
     self.registry.add(e4, Comps.Position{ .vec = .new(0, 3, 0) });
 
-    const ve = self.registry.create();
-    self.registry.add(ve, Comps.Position{ .vec = .new(3, 3, 3) });
-
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
@@ -95,11 +102,11 @@ pub fn start(self: *@This()) !void {
             // 更新摄像头
             self.camera.update(self);
             self.ubo.view_matrix = self.camera.getViewMatrix();
-
-            if (self.input.isKeyDown(.equal))
+            if (self.input.isKeyDown(.equal)) {
+                const ve = self.registry.create();
+                self.registry.add(ve, Comps.Position{ .vec = .new(3, 3, 3) });
                 self.registry.add(ve, Comps.ModelName{ .string = "CesiumMan" });
-            if (self.input.isKeyDown(.minus))
-                self.registry.remove(Comps.ModelName, ve);
+            }
         }
         // UI开始新帧
         self.ui_system.beginFrame();
