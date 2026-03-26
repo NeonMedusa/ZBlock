@@ -1,6 +1,6 @@
 // target_movement_system.zig
 const std = @import("std");
-const Algebra = @import("zalgebra");
+const Algebra = @import("../algebra.zig");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const ECS = @import("zigecs");

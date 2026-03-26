@@ -56,7 +56,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
         &self.gctx,
         16,
         16,
-        16,
+        32,
         -2,
         2,
         &self.render_pipeline,
@@ -74,22 +74,22 @@ pub fn start(self: *@This()) !void {
 
     // 加载一个模型并使其成为一个实体的组件
     const e1 = self.registry.create();
-    self.registry.add(e1, Comps.ModelName{ .string = "Wolf" });
-    self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
+    self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
+    self.registry.add(e1, Comps.Position{ .vec = .new(1, 3, 0) });
 
     // 另一个实体
     const e2 = self.registry.create();
-    self.registry.add(e2, Comps.ModelName{ .string = "Wolf" });
-    self.registry.add(e2, Comps.Position{ .vec = .new(0, 1, 0) });
+    self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
+    self.registry.add(e2, Comps.Position{ .vec = .new(3, 3, 0) });
 
     // 第三个实体
     const e3 = self.registry.create();
     self.registry.add(e3, Comps.ModelName{ .string = "BarramundiFish" });
-    self.registry.add(e3, Comps.Position{ .vec = .new(0, 2, 0) });
+    self.registry.add(e3, Comps.Position{ .vec = .new(5, 3, 0) });
     // 第四个实体
     const e4 = self.registry.create();
     self.registry.add(e4, Comps.ModelName{ .string = "BarramundiFish" });
-    self.registry.add(e4, Comps.Position{ .vec = .new(0, 3, 0) });
+    self.registry.add(e4, Comps.Position{ .vec = .new(7, 3, 0) });
 
     // 主循环
     while (!self.window.shouldClose()) {
@@ -126,7 +126,7 @@ const Wgpu = @import("imports.zig").Wgpu;
 const Glfw = @import("imports.zig").Glfw;
 const Gltf = @import("zgltf");
 
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 

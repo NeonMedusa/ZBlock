@@ -15,11 +15,14 @@ pub const Stb = @cImport({
 
 pub const std = @import("std");
 pub const Gctx = @import("gctx.zig");
-pub const Algebra = @import("zalgebra");
+
+pub const Algebra = @import("algebra.zig");
+pub const Vec2 = Algebra.Vec2;
 pub const Vec3 = Algebra.Vec3;
-pub const Mat4 = Algebra.Mat4;
 pub const Vec4 = Algebra.Vec4;
 pub const Quat = Algebra.Quat;
+pub const Mat4 = Algebra.Mat4;
+
 pub const Window = @import("window.zig");
 pub const Gltf = @import("zgltf").Gltf;
 pub const zigimg = @import("zigimg");

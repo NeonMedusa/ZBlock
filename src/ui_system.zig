@@ -295,6 +295,6 @@ const Gctx = @import("gctx.zig");
 const Game = @import("game.zig");
 const Gltf = @import("zgltf");
 const Wgpu = @import("imports.zig").Wgpu;
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Mat4 = Algebra.Mat4;
 const Window = @import("imports.zig").Window;

@@ -1,6 +1,6 @@
 // components.zig
 const std = @import("std");
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Vec3 = Algebra.Vec3;
 const Input = @import("input.zig");
 // 在这里定义所有组件类型

@@ -18,8 +18,7 @@ pub const Primitive = struct {
     vertex_buffer: Wgpu.WGPUBuffer,
     index_buffer: Wgpu.WGPUBuffer,
     index_count: u32,
-    // 设计为不可为空，因为Wgpu.WGPUTexture和Wgpu.WGPUTextureView是可空类型
-    material: Material,
+    material: Material, // 设计为不可为空，因为Wgpu.WGPUTexture和Wgpu.WGPUTextureView是可空类型
 };
 
 pub const MaterialConstants = struct {
@@ -257,10 +256,9 @@ pub const Model = struct {
                             const accessor = gltf.data.accessors[idx];
                             var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                             while (it.next()) |v| {
-                                const pos = [3]f32{ v[0], v[1], v[2] };
                                 try vertex_data.append(allocator, .{
-                                    .position = pos,
-                                    .texcoord = .{ 0.1, 0.9 },
+                                    .position = .new(v[0], v[1], v[2]),
+                                    .texcoord = .new(0.1, 0.9),
                                     .joint_indices = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
                                     .joint_weights = .{ 0, 0, 0, 0 }, // 骨骼矩阵权重
                                 });
@@ -271,7 +269,7 @@ pub const Model = struct {
                             var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                             var i: u32 = 0;
                             while (it.next()) |n| : (i += 1) {
-                                vertex_data.items[i].normal = [3]f32{ n[0], n[1], n[2] };
+                                vertex_data.items[i].normal = .new(n[0], n[1], n[2]);
                             }
                         },
                         .texcoord => |idx| {
@@ -279,7 +277,7 @@ pub const Model = struct {
                             var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
                             var i: u32 = 0;
                             while (it.next()) |t| : (i += 1)
-                                vertex_data.items[i].texcoord = .{ t[0], t[1] };
+                                vertex_data.items[i].texcoord = .new(t[0], t[1]);
                         },
                         else => {},
                     }
@@ -308,38 +306,28 @@ pub const Model = struct {
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
         // 1. 释放所有纹理资源
         for (self.textures_res) |tex| {
-            if (tex.texture) |texture| {
+            if (tex.texture) |texture|
                 Wgpu.wgpuTextureRelease(texture);
-            }
-            if (tex.view) |view| {
+            if (tex.view) |view|
                 Wgpu.wgpuTextureViewRelease(view);
-            }
         }
         allocator.free(self.textures_res);
 
-        // 2. 释放动画纹理（如果有的话）
+        // 2. 释放动画纹理
         for (self.anim_textures) |tex| {
-            if (tex.texture) |texture| {
+            if (tex.texture) |texture|
                 Wgpu.wgpuTextureRelease(texture);
-            }
-            if (tex.view) |view| {
+            if (tex.view) |view|
                 Wgpu.wgpuTextureViewRelease(view);
-            }
         }
         allocator.free(self.anim_textures);
 
         // 3. 释放材质资源
         for (self.materials) |material| {
-            // 释放 uniform buffer
-            if (material.uniform_buffer) |buffer| {
+            if (material.uniform_buffer) |buffer|
                 Wgpu.wgpuBufferRelease(buffer);
-            }
-            // 释放绑定组
-            if (material.bind_group) |bind_group| {
+            if (material.bind_group) |bind_group|
                 Wgpu.wgpuBindGroupRelease(bind_group);
-            }
-            // 注意：color_texture 和 normal_texture 是引用，不在这里释放
-            // 它们指向 textures_res 中的纹理，会在步骤1中释放
         }
         allocator.free(self.materials);
 
@@ -347,13 +335,12 @@ pub const Model = struct {
         for (self.meshes) |mesh| {
             for (mesh.primitives) |primitive| {
                 // 释放顶点缓冲区
-                if (primitive.vertex_buffer) |buffer| {
+                if (primitive.vertex_buffer) |buffer|
                     Wgpu.wgpuBufferRelease(buffer);
-                }
+
                 // 释放索引缓冲区
-                if (primitive.index_buffer) |buffer| {
+                if (primitive.index_buffer) |buffer|
                     Wgpu.wgpuBufferRelease(buffer);
-                }
                 // 注意：primitive.material 是引用，不在这里释放
                 // 它指向 materials 数组，会在步骤3中释放
             }
@@ -368,7 +355,7 @@ pub const Model = struct {
 
 fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
     var current_idx = node_idx;
-    var world_matrix = Mat4.identity();
+    var world_matrix = Mat4.identity;
     while (true) {
         const node = gltf.data.nodes[current_idx];
         if (node.matrix) |matrix| {
@@ -546,7 +533,7 @@ pub const SceneUniform = struct {
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
         const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 100);
-        const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero(), Vec3.up());
+        const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero, Vec3.up);
         return .{
             .proj_matrix = proj_matrix,
             .view_matrix = view_matrix,
@@ -556,15 +543,14 @@ pub const SceneUniform = struct {
 };
 
 pub const VertexAttribute = struct {
-    position: [3]f32 = .{ 0, 0, 0 },
-    normal: [3]f32 = .{ 0, 1, 0 },
-    tangent: [4]f32 = .{ 1, 0, 0, 1 }, // 注意：tangent 是 4D 向量，第4个分量是符号
-    texcoord: [2]f32 = .{ 0, 0 },
-    color: [4]f32 = .{ 1, 1, 1, 1 }, // RGBA，4通道
+    position: Vec3 = Vec3.zero,
+    normal: Vec3 = Vec3.new(0, 1, 0),
+    tangent: Vec4 = Vec4.new(1, 0, 0, 1),
+    texcoord: Vec2 = Vec2.zero,
+    color: Vec4 = Vec4.new(1, 1, 1, 1),
     joint_indices: [4]u32 = .{ 0, 0, 0, 0 },
     joint_weights: [4]f32 = .{ 1, 0, 0, 0 },
 };
-
 pub const EntityData = struct {
     transform: Mat4, //实体的世界变换
 };
@@ -577,11 +563,14 @@ pub const InstanceData = struct {
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");
-const Algebra = @import("zalgebra");
+
+const Algebra = @import("algebra.zig");
+const Vec2 = Algebra.Vec2;
 const Vec3 = Algebra.Vec3;
-const Mat4 = Algebra.Mat4;
 const Vec4 = Algebra.Vec4;
 const Quat = Algebra.Quat;
+const Mat4 = Algebra.Mat4;
+
 const Window = @import("window.zig");
 const Gltf = @import("zgltf").Gltf;
 const Wgpu = @import("imports.zig").Wgpu;

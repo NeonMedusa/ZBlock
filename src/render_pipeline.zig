@@ -186,7 +186,7 @@ pub fn deinit(self: @This()) void {
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");

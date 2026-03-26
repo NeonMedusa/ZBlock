@@ -242,6 +242,9 @@ pub fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(Vert
             [4]f32 => Wgpu.WGPUVertexFormat_Float32x4,
             u32 => Wgpu.WGPUVertexFormat_Uint32,
             [4]u32 => Wgpu.WGPUVertexFormat_Uint32x4,
+            Vec2 => Wgpu.WGPUVertexFormat_Float32x2,
+            Vec3 => Wgpu.WGPUVertexFormat_Float32x3,
+            Vec4 => Wgpu.WGPUVertexFormat_Float32x4,
             else => @compileError("Unsupported vertex attribute type: " ++ @typeName(field.type)),
         };
         attributes[i] = .{
@@ -259,3 +262,10 @@ const Window = @import("window.zig");
 const Gctx = @import("gctx.zig");
 const Wgpu = @import("imports.zig").Wgpu;
 const Glfw = @import("imports.zig").Glfw;
+
+const Algebra = @import("algebra.zig");
+const Vec2 = Algebra.Vec2;
+const Vec3 = Algebra.Vec3;
+const Vec4 = Algebra.Vec4;
+const Quat = Algebra.Quat;
+const Mat4 = Algebra.Mat4;

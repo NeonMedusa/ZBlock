@@ -186,7 +186,7 @@ const std = @import("std");
 const Wgpu = @import("imports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
 
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 

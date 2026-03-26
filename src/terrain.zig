@@ -7,17 +7,20 @@ const VertexAttribute = @import("rend_ctx.zig").VertexAttribute;
 const Material = @import("rend_ctx.zig").Material;
 const MaterialConstants = RendCTX.MaterialConstants;
 const RenderPipeline = Import.RenderPipeline;
+const Vec3 = Import.Vec3;
+const Vec2 = Import.Vec2;
+const Vec4 = Import.Vec4;
 
 // terrain.zig
 pub const Terrain = struct {
     allocator: std.mem.Allocator,
 
     // 地形尺寸
-    size_x: f32, // X方向长度（世界单位）
-    size_z: f32, // Z方向长度（世界单位）
-    segments: u32, // 分段数（控制精细度）
-    height_min: f32, // 最低高度（世界单位）
-    height_max: f32, // 最高高度（世界单位）
+    size_x: f32,
+    size_z: f32,
+    segments: u32,
+    height_min: f32,
+    height_max: f32,
 
     // GPU资源
     gctx: *Gctx,
@@ -27,8 +30,8 @@ pub const Terrain = struct {
 
     // 地形数据（归一化存储 [0,1]）
     heights: []f32,
-    normals: [][3]f32,
-    colors: [][3]f32,
+    normals: []Vec3, // 改为 Vec3
+    colors: []Vec3, // 改为 Vec3
 
     // 材质
     material: Material,
@@ -56,11 +59,11 @@ pub const Terrain = struct {
 
         // 分配数据
         terrain.heights = try allocator.alloc(f32, vertex_count);
-        terrain.normals = try allocator.alloc([3]f32, vertex_count);
-        terrain.colors = try allocator.alloc([3]f32, vertex_count);
+        terrain.normals = try allocator.alloc(Vec3, vertex_count);
+        terrain.colors = try allocator.alloc(Vec3, vertex_count);
 
         // 初始化为平面
-        @memset(terrain.heights, 0.5); // 中间值，对应实际高度 (min+max)/2
+        @memset(terrain.heights, 0.5);
 
         // 计算法线和颜色
         terrain.calculateNormals();
@@ -80,7 +83,6 @@ pub const Terrain = struct {
 
         const segments_f = @as(f32, @floatFromInt(self.segments));
 
-        // 记录生成的最小最大值用于调试
         var min_height: f32 = 1.0;
         var max_height: f32 = 0.0;
 
@@ -96,32 +98,23 @@ pub const Terrain = struct {
                 const h3 = @cos(v * 8.0 * std.math.pi) * 0.3;
                 const h4 = @sin((u * 16.0 + v * 16.0) * std.math.pi) * 0.1;
 
-                // 添加随机噪声
                 const noise = (random.float(f32) - 0.5) * 0.2;
 
-                // 范围 [-1, 1]
                 var height = (h1 * 2.0 + h2 + h3 + h4) * 0.5 + noise;
 
-                // 限制范围 [-1, 1]
                 if (height < -1) height = -1;
                 if (height > 1) height = 1;
 
-                // 存储为 [0,1] 范围的归一化值
-                // 公式: normalized = (height + 1) / 2
-                // 这样 -1 -> 0, 0 -> 0.5, 1 -> 1
                 self.heights[idx] = (height + 1.0) / 2.0;
 
-                // 记录实际高度用于调试
                 const actual = self.getActualHeight(self.heights[idx]);
                 if (actual < min_height) min_height = actual;
                 if (actual > max_height) max_height = actual;
             }
         }
 
-        // 调试输出
         std.debug.print("Generated terrain: actual height range [{d:.2}, {d:.2}]\n", .{ min_height, max_height });
 
-        // 重新计算法线和颜色
         self.calculateNormals();
         self.generateColors();
         self.updateBuffers() catch {};
@@ -161,13 +154,11 @@ pub const Terrain = struct {
 
     // 获取实际高度（用于单位放置）
     pub fn getHeightAt(self: *Terrain, world_x: f32, world_z: f32) f32 {
-        // 转换为UV坐标
         const u = (world_x / self.size_x) + 0.5;
         const v = (world_z / self.size_z) + 0.5;
 
         if (u < 0 or u > 1 or v < 0 or v > 1) return self.height_min;
 
-        // 双线性插值
         const segments_f = @as(f32, @floatFromInt(self.segments));
         const x = u * segments_f;
         const z = v * segments_f;
@@ -210,17 +201,14 @@ pub const Terrain = struct {
                 const idx = self.getIndex(x, z);
                 const h_center = self.heights[idx];
 
-                // 获取相邻顶点的归一化高度
                 const h_right = if (x < segments) self.heights[self.getIndex(x + 1, z)] else h_center;
                 const h_left = if (x > 0) self.heights[self.getIndex(x - 1, z)] else h_center;
                 const h_down = if (z < segments) self.heights[self.getIndex(x, z + 1)] else h_center;
                 const h_up = if (z > 0) self.heights[self.getIndex(x, z - 1)] else h_center;
 
-                // 计算世界空间的实际高度差
                 const segment_size_x = self.size_x / segments_f;
                 const segment_size_z = self.size_z / segments_f;
 
-                // 转换为实际高度
                 const actual_h_right = self.getActualHeight(h_right);
                 const actual_h_left = self.getActualHeight(h_left);
                 const actual_h_down = self.getActualHeight(h_down);
@@ -240,7 +228,7 @@ pub const Terrain = struct {
                     nz /= len;
                 }
 
-                self.normals[idx] = .{ nx, ny, nz };
+                self.normals[idx] = Vec3.new(nx, ny, nz);
             }
         }
     }
@@ -260,12 +248,15 @@ pub const Terrain = struct {
                 const world_z = (v - 0.5) * self.size_z;
                 const world_y = self.getActualHeight(self.heights[idx]);
 
+                const color = self.colors[idx];
+                const normal = self.normals[idx];
+
                 vertices[idx] = .{
-                    .position = .{ world_x, world_y, world_z },
-                    .normal = self.normals[idx],
-                    .tangent = .{ 1, 0, 0, 1 },
-                    .texcoord = .{ u, v },
-                    .color = .{ self.colors[idx][0], self.colors[idx][1], self.colors[idx][2], 1.0 },
+                    .position = Vec3.new(world_x, world_y, world_z),
+                    .normal = normal,
+                    .tangent = Vec4.new(1, 0, 0, 1),
+                    .texcoord = Vec2.new(u, v),
+                    .color = Vec4.new(color.x, color.y, color.z, 1.0),
                     .joint_indices = .{ 0, 0, 0, 0 },
                     .joint_weights = .{ 1, 0, 0, 0 },
                 };
@@ -394,23 +385,18 @@ pub const Terrain = struct {
             for (0..self.segments + 1) |x| {
                 const idx = self.getIndex(x, z);
                 const actual = self.getActualHeight(self.heights[idx]);
-
-                // 计算相对高度 (0 到 1 之间)
                 const t = (actual - self.height_min) / height_range;
 
-                var color: [3]f32 = undefined;
+                var color: Vec3 = undefined;
                 if (t < 0.3) {
-                    // 低地：绿色
                     const t2 = t / 0.3;
-                    color = .{ 0.2, 0.4 + t2 * 0.3, 0.2 };
+                    color = Vec3.new(0.2, 0.4 + t2 * 0.3, 0.2);
                 } else if (t < 0.6) {
-                    // 中地：棕色
                     const t2 = (t - 0.3) / 0.3;
-                    color = .{ 0.5 + t2 * 0.2, 0.4 + t2 * 0.1, 0.2 };
+                    color = Vec3.new(0.5 + t2 * 0.2, 0.4 + t2 * 0.1, 0.2);
                 } else {
-                    // 高地：灰色/白色
                     const t2 = (t - 0.6) / 0.4;
-                    color = .{ 0.7 + t2 * 0.3, 0.7 + t2 * 0.3, 0.7 + t2 * 0.3 };
+                    color = Vec3.new(0.7 + t2 * 0.3, 0.7 + t2 * 0.3, 0.7 + t2 * 0.3);
                 }
                 self.colors[idx] = color;
             }

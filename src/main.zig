@@ -16,6 +16,6 @@ const Game = @import("game.zig");
 const zigimg = @import("zigimg");
 const Stb = @import("stb").c;
 
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;

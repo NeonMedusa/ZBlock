@@ -1,8 +1,8 @@
 // camera3d.zig:
-position: Vec3 = Vec3.zero(),
-front: Vec3 = Vec3.forward(),
-up: Vec3 = Vec3.up(),
-world_up: Vec3 = Vec3.up(),
+position: Vec3 = Vec3.zero,
+front: Vec3 = Vec3.forward,
+up: Vec3 = Vec3.up,
+world_up: Vec3 = Vec3.up,
 yaw: f32 = -90.0,
 pitch: f32 = 0.0,
 sensitivity: f32 = 0.1,
@@ -10,10 +10,10 @@ movement_speed: f32 = 5.0,
 // 初始化
 pub fn init() @This() {
     return .{
-        .position = Vec3.zero(),
-        .front = Vec3.forward(),
-        .up = Vec3.up(),
-        .world_up = Vec3.up(),
+        .position = Vec3.zero,
+        .front = Vec3.forward,
+        .up = Vec3.up,
+        .world_up = Vec3.up,
         .yaw = -90.0,
         .pitch = 0.0,
         .sensitivity = 0.1,
@@ -51,10 +51,10 @@ fn updateVectors(self: *@This()) void {
 }
 // 获取视图矩阵
 pub fn getViewMatrix(self: @This()) Mat4 {
-    return Algebra.lookAt(self.position, self.position.add(self.front), self.up);
+    return Mat4.lookAt(self.position, self.position.add(self.front), self.up);
 }
 // 引用
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 const Glfw = @import("imports.zig").Glfw;

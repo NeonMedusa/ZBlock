@@ -158,7 +158,7 @@ pub fn setWindowShouldClose(self: @This()) void {
 
 const Glfw = @import("imports.zig").Glfw;
 const Gctx = @import("gctx.zig");
-const Algebra = @import("zalgebra");
+const Algebra = @import("algebra.zig");
 const Mat4 = Algebra.Mat4;
 const Vec2_f64 = Algebra.Vec2_f64;
 const Input = @import("input.zig");
