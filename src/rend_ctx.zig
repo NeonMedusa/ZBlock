@@ -229,9 +229,22 @@ pub const Model = struct {
                 defer index_data.deinit(allocator);
                 if (gltf_prim.indices) |indices_accessor_index| {
                     const accessor = gltf.data.accessors[indices_accessor_index];
-                    var it = accessor.iterator(u16, &gltf, gltf.glb_binary.?);
-                    while (it.next()) |indice|
-                        try index_data.append(allocator, indice[0]);
+                    // 使用 inline 循环避免重复代码
+                    inline for (.{ u8, u16, u32 }) |IndexType| {
+                        if (accessor.component_type == Gltf.ComponentType.fromType(IndexType)) {
+                            var it = accessor.iterator(IndexType, &gltf, gltf.glb_binary.?);
+                            while (it.next()) |indices| {
+                                for (indices) |idx| {
+                                    try index_data.append(allocator, @as(u32, idx));
+                                }
+                            }
+                            break;
+                        }
+                    } else {
+                        // 没有匹配的类型
+                        std.debug.print("Unsupported index type: {}\n", .{accessor.component_type});
+                        return error.UnsupportedIndexType;
+                    }
                 }
                 const index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
                     .size = @sizeOf(u32) * index_data.items.len,
@@ -551,6 +564,7 @@ pub const VertexAttribute = struct {
     joint_indices: [4]u32 = .{ 0, 0, 0, 0 },
     joint_weights: [4]f32 = .{ 1, 0, 0, 0 },
 };
+
 pub const EntityData = struct {
     transform: Mat4, //实体的世界变换
 };

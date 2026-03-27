@@ -113,8 +113,6 @@ pub const Terrain = struct {
             }
         }
 
-        std.debug.print("Generated terrain: actual height range [{d:.2}, {d:.2}]\n", .{ min_height, max_height });
-
         self.calculateNormals();
         self.generateColors();
         self.updateBuffers() catch {};
