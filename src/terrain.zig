@@ -1,16 +1,17 @@
 const std = @import("std");
-const Import = @import("imports.zig");
-const Wgpu = Import.Wgpu;
-const Gctx = Import.Gctx;
-const RendCTX = Import.RendCTX;
+const Imports = @import("imports.zig");
+const Game = Imports.Game;
+const Wgpu = Imports.Wgpu;
+const Gctx = Imports.Gctx;
+const RendCTX = Imports.RendCTX;
 const VertexAttribute = @import("rend_ctx.zig").VertexAttribute;
 const Material = @import("rend_ctx.zig").Material;
 const MaterialConstants = RendCTX.MaterialConstants;
-const RenderPipeline = Import.RenderPipeline;
-const Vec2 = Import.Vec2;
-const Vec3 = Import.Vec3;
-const Vec4 = Import.Vec4;
-const Mat4 = Import.Mat4;
+const RenderPipeline = Imports.RenderPipeline;
+const Vec2 = Imports.Vec2;
+const Vec3 = Imports.Vec3;
+const Vec4 = Imports.Vec4;
+const Mat4 = Imports.Mat4;
 
 // terrain.zig
 pub const Terrain = struct {

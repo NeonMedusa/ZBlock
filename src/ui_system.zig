@@ -292,7 +292,8 @@ pub const UiUniform = struct {
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");
-const Game = @import("game.zig");
+const Imports = @import("imports.zig");
+const Game = Imports.Game;
 const Gltf = @import("zgltf");
 const Wgpu = @import("imports.zig").Wgpu;
 const Algebra = @import("algebra.zig");

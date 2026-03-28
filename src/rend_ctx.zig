@@ -3,7 +3,8 @@ const ECS = import.ECS;
 const GltfData = Gltf.Data;
 const ZigImg = import.zigimg;
 const RenderPipeline = @import("render_pipeline.zig");
-const Game = @import("game.zig");
+const Imports = @import("imports.zig");
+const Game = Imports.Game;
 
 const TextureRes = struct {
     texture: Wgpu.WGPUTexture = null,

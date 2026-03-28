@@ -1,14 +1,13 @@
 // components.zig
 const std = @import("std");
-const Algebra = @import("algebra.zig");
+const Imports = @import("imports.zig");
+const Algebra = Imports.Algebra;
 const Vec3 = Algebra.Vec3;
-const Input = @import("input.zig");
 // 在这里定义所有组件类型
 pub const Components = struct {
     // 玩家组件
     pub const Player = struct {
-        player_id: u32 = 0,
-        input: *Input,
+        id: u32 = 0,
     };
     // 位置组件
     pub const Position = struct {

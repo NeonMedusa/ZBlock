@@ -192,7 +192,8 @@ const Mat4 = Algebra.Mat4;
 const Window = @import("window.zig");
 const Gltf = @import("zgltf");
 const Wgpu = @import("imports.zig").Wgpu;
-const Game = @import("game.zig");
+const Imports = @import("imports.zig");
+const Game = Imports.Game;
 
 const RenderCTX = @import("rend_ctx.zig");
 const SceneUniform = RenderCTX.SceneUniform;

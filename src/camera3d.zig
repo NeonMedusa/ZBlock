@@ -54,8 +54,9 @@ pub fn getViewMatrix(self: @This()) Mat4 {
     return Mat4.lookAt(self.position, self.position.add(self.front), self.up);
 }
 // 引用
-const Algebra = @import("algebra.zig");
+const Imports = @import("imports.zig");
+const Algebra = Imports.Algebra;
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
-const Glfw = @import("imports.zig").Glfw;
-const Game = @import("game.zig");
+const Glfw = Imports.Glfw;
+const Game = Imports.Game;

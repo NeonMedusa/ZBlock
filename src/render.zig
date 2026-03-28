@@ -203,7 +203,8 @@ const EntityData = RendCTX.EntityData;
 const InstanceData = RendCTX.InstanceData;
 
 const UiSystem = @import("ui_system.zig");
-const Game = @import("game.zig");
+const Imports = @import("imports.zig");
+const Game = Imports.Game;
 const Systems = @import("systems.zig");
 
 const ECS = @import("zigecs");

@@ -10,6 +10,7 @@ render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 terrain: Terrain,
+player_id: u32 = 0,
 pub fn deinit(self: *@This()) void {
     self.window.deinit();
     self.gctx.deinit();
@@ -57,8 +58,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
         &self.gctx,
         Vec3.new(4, 4, 4),
         45.0 * std.math.pi / 180.0,
-        16.0,
-        16.0,
+        32.0,
+        32.0,
         64,
         -2.0,
         2.0,
@@ -81,7 +82,7 @@ pub fn start(self: *Game) !void {
     self.registry.add(e1, Comps.Position{ .vec = .new(1, 3, 0) });
     self.registry.add(e1, Comps.Velocity{ .vec = Vec3.zero });
 
-    self.registry.add(e1, Comps.Player{ .input = &self.input });
+    self.registry.add(e1, Comps.Player{ .id = self.player_id });
     self.registry.add(e1, Comps.Speed{ .value = 3 });
 
     // 另一个实体
@@ -143,31 +144,35 @@ pub fn start(self: *Game) !void {
 }
 
 const Game = @This();
+
 const std = @import("std");
+const Imports = @import("imports.zig");
 
-const Wgpu = @import("imports.zig").Wgpu;
-const Glfw = @import("imports.zig").Glfw;
-const Gltf = @import("zgltf");
+const Wgpu = Imports.Wgpu;
+const Glfw = Imports.Glfw;
+const Gltf = Imports.Gltf;
 
-const Algebra = @import("algebra.zig");
+const Algebra = Imports.Algebra;
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 
-const Gctx = @import("gctx.zig");
-const Window = @import("window.zig");
-const Render = @import("render.zig");
-const Camera3D = @import("camera3d.zig");
-const ResManager = @import("rend_ctx.zig").ResManager;
-const RenderPipeline = @import("render_pipeline.zig");
+const Gctx = Imports.Gctx;
+const Window = Imports.Window;
+const Render = Imports.Render;
+const Camera3D = Imports.Camera3D;
 
-const UiSystem = @import("ui_system.zig");
-const Input = @import("input.zig");
+const RenderPipeline = Imports.RenderPipeline;
 
-const ECS = @import("zigecs");
+const UiSystem = Imports.UiSystem;
+const Input = Imports.Input;
 
-const SceneUniform = @import("rend_ctx.zig").SceneUniform;
-const Comps = @import("components.zig").Components;
+const ECS = Imports.ECS;
 
-const Model = @import("rend_ctx.zig").Model;
+const RendCTX = Imports.RendCTX;
+const ResManager = RendCTX.ResManager;
+const Model = RendCTX.Model;
+const SceneUniform = RendCTX.SceneUniform;
 
-const Terrain = @import("terrain.zig").Terrain;
+const Comps = Imports.Comps;
+
+const Terrain = Imports.Terrain;

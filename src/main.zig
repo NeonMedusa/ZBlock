@@ -12,7 +12,8 @@ pub fn main() !void {
 }
 
 const std = @import("std");
-const Game = @import("game.zig");
+const Imports = @import("imports.zig");
+const Game = Imports.Game;
 const zigimg = @import("zigimg");
 const Stb = @import("stb").c;
 

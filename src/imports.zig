@@ -32,3 +32,8 @@ pub const RendCTX = @import("rend_ctx.zig");
 pub const RenderPipeline = @import("render_pipeline.zig");
 
 pub const Comps = @import("components.zig").Components;
+pub const Render = @import("render.zig");
+pub const Camera3D = @import("camera3d.zig");
+pub const UiSystem = @import("ui_system.zig");
+pub const Input = @import("input.zig");
+pub const Terrain = @import("terrain.zig").Terrain;
