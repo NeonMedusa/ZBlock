@@ -31,4 +31,7 @@ pub const Components = struct {
     pub const ModelName = struct {
         string: []const u8,
     };
+    pub const Velocity = struct {
+        vec: Vec3 = Vec3.zero,
+    };
 };

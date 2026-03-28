@@ -387,9 +387,9 @@ pub const Terrain = struct {
         const dx = world_x - self.position.x;
         const dz = world_z - self.position.z;
 
-        // 2. 反向旋转（绕 Y 轴）
-        const cos = @cos(-self.rotation_y);
-        const sin = @sin(-self.rotation_y);
+        // 2. 反向旋转（绕 Y 轴），这里使用正角度，因为旋转矩阵是正交的，逆矩阵即转置
+        const cos = @cos(self.rotation_y);
+        const sin = @sin(self.rotation_y);
         const local_x = dx * cos - dz * sin;
         const local_z = dx * sin + dz * cos;
 
@@ -450,10 +450,11 @@ pub const Terrain = struct {
 
     // ========== 公共 API ==========
 
-    /// 获取世界坐标下的地形高度（主要接口）
+    /// 获取世界坐标下的地形高度
     pub fn getHeightAt(self: *Terrain, world_x: f32, world_z: f32) f32 {
         const local = self.worldToLocal(world_x, world_z);
-        return self.getHeightLocal(local.x, local.z);
+        const local_height = self.getHeightLocal(local.x, local.z);
+        return self.position.y + local_height;
     }
 
     /// 提升区域（世界坐标）

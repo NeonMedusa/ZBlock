@@ -1,3 +1,4 @@
+// game.zig
 allocator: std.mem.Allocator,
 window: Window,
 gctx: Gctx,
@@ -54,13 +55,13 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     var terrain = try Terrain.init(
         self.allocator,
         &self.gctx,
-        Vec3.new(10, 0, 5), // position
-        45.0 * std.math.pi / 180.0, // rotation_y (45度)
+        Vec3.new(4, 4, 4),
+        45.0 * std.math.pi / 180.0,
         16.0,
         16.0,
-        64, // size_x, size_z, segments
+        64,
         -2.0,
-        2.0, // height_min, height_max
+        2.0,
         &self.render_pipeline,
     );
     terrain.generateRandom(1);
@@ -70,7 +71,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     return self;
 }
 // 开始游戏
-pub fn start(self: *@This()) !void {
+pub fn start(self: *Game) !void {
     // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
 
@@ -78,21 +79,30 @@ pub fn start(self: *@This()) !void {
     const e1 = self.registry.create();
     self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
     self.registry.add(e1, Comps.Position{ .vec = .new(1, 3, 0) });
+    self.registry.add(e1, Comps.Velocity{ .vec = Vec3.zero });
+
+    self.registry.add(e1, Comps.Player{ .input = &self.input });
+    self.registry.add(e1, Comps.Speed{ .value = 3 });
 
     // 另一个实体
     const e2 = self.registry.create();
     self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
     self.registry.add(e2, Comps.Position{ .vec = .new(3, 3, 0) });
+    self.registry.add(e2, Comps.Velocity{ .vec = Vec3.zero });
 
     // 第三个实体
     const e3 = self.registry.create();
     self.registry.add(e3, Comps.ModelName{ .string = "BarramundiFish" });
     self.registry.add(e3, Comps.Position{ .vec = .new(5, 3, 0) });
+    self.registry.add(e3, Comps.Velocity{ .vec = Vec3.zero });
     // 第四个实体
     const e4 = self.registry.create();
     self.registry.add(e4, Comps.ModelName{ .string = "BarramundiFish" });
     self.registry.add(e4, Comps.Position{ .vec = .new(7, 3, 0) });
+    self.registry.add(e4, Comps.Velocity{ .vec = Vec3.zero });
 
+    const Physys = @import("systems/physics_sys.zig").PhysicsSystem;
+    const PlayerMoveSys = @import("systems/player_movement_system.zig").PlayerSystem;
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
@@ -104,12 +114,16 @@ pub fn start(self: *@This()) !void {
             // 更新摄像头
             self.camera.update(self);
             self.ubo.view_matrix = self.camera.getViewMatrix();
-            if (self.input.isKeyPressed(.right)) {
-                self.terrain.position.x += self.window.delta_time;
-            }
-            if (self.input.isKeyPressed(.left)) {
-                self.terrain.position.x -= self.window.delta_time;
-            }
+
+            Physys.update(self);
+            PlayerMoveSys.update(self);
+
+            // if (self.input.isKeyPressed(.right)) {
+            //     self.terrain.position.x += self.window.delta_time;
+            // }
+            // if (self.input.isKeyPressed(.left)) {
+            //     self.terrain.position.x -= self.window.delta_time;
+            // }
             if (self.input.isKeyPressed(.equal)) {
                 self.terrain.rotation_y += self.window.delta_time;
             }
