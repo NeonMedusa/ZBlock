@@ -7,15 +7,20 @@ const VertexAttribute = @import("rend_ctx.zig").VertexAttribute;
 const Material = @import("rend_ctx.zig").Material;
 const MaterialConstants = RendCTX.MaterialConstants;
 const RenderPipeline = Import.RenderPipeline;
-const Vec3 = Import.Vec3;
 const Vec2 = Import.Vec2;
+const Vec3 = Import.Vec3;
 const Vec4 = Import.Vec4;
+const Mat4 = Import.Mat4;
 
 // terrain.zig
 pub const Terrain = struct {
     allocator: std.mem.Allocator,
 
-    // 地形尺寸
+    // 地形变换
+    position: Vec3,
+    rotation_y: f32, // 弧度制，绕 Y 轴旋转
+
+    // 地形尺寸（局部坐标系中的大小）
     size_x: f32,
     size_z: f32,
     segments: u32,
@@ -30,51 +35,11 @@ pub const Terrain = struct {
 
     // 地形数据（归一化存储 [0,1]）
     heights: []f32,
-    normals: []Vec3, // 改为 Vec3
-    colors: []Vec3, // 改为 Vec3
+    normals: []Vec3,
+    colors: []Vec3,
 
     // 材质
     material: Material,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        gctx: *Gctx,
-        size_x: f32,
-        size_z: f32,
-        segments: u32,
-        height_min: f32,
-        height_max: f32,
-        render_pipeline: *RenderPipeline,
-    ) !Terrain {
-        const vertex_count = (segments + 1) * (segments + 1);
-
-        var terrain: Terrain = undefined;
-        terrain.allocator = allocator;
-        terrain.gctx = gctx;
-        terrain.size_x = size_x;
-        terrain.size_z = size_z;
-        terrain.segments = segments;
-        terrain.height_min = height_min;
-        terrain.height_max = height_max;
-
-        // 分配数据
-        terrain.heights = try allocator.alloc(f32, vertex_count);
-        terrain.normals = try allocator.alloc(Vec3, vertex_count);
-        terrain.colors = try allocator.alloc(Vec3, vertex_count);
-
-        // 初始化为平面
-        @memset(terrain.heights, 0.5);
-
-        // 计算法线和颜色
-        terrain.calculateNormals();
-        terrain.generateColors();
-
-        // 创建GPU资源
-        try terrain.createBuffers(gctx);
-        try terrain.createMaterial(gctx, render_pipeline);
-
-        return terrain;
-    }
 
     // 生成随机地形（用于调试）
     pub fn generateRandom(self: *Terrain, seed: u64) void {
@@ -148,37 +113,6 @@ pub const Terrain = struct {
         self.calculateNormals();
         self.generateColors();
         self.updateBuffers() catch {};
-    }
-
-    // 获取实际高度（用于单位放置）
-    pub fn getHeightAt(self: *Terrain, world_x: f32, world_z: f32) f32 {
-        const u = (world_x / self.size_x) + 0.5;
-        const v = (world_z / self.size_z) + 0.5;
-
-        if (u < 0 or u > 1 or v < 0 or v > 1) return self.height_min;
-
-        const segments_f = @as(f32, @floatFromInt(self.segments));
-        const x = u * segments_f;
-        const z = v * segments_f;
-
-        const x0 = @as(u32, @intFromFloat(@floor(x)));
-        const x1 = @min(x0 + 1, self.segments);
-        const z0 = @as(u32, @intFromFloat(@floor(z)));
-        const z1 = @min(z0 + 1, self.segments);
-
-        const fx = x - @as(f32, @floatFromInt(x0));
-        const fz = z - @as(f32, @floatFromInt(z0));
-
-        const h00 = self.heights[self.getIndex(x0, z0)];
-        const h10 = self.heights[self.getIndex(x1, z0)];
-        const h01 = self.heights[self.getIndex(x0, z1)];
-        const h11 = self.heights[self.getIndex(x1, z1)];
-
-        const h0 = h00 * (1 - fx) + h10 * fx;
-        const h1 = h01 * (1 - fx) + h11 * fx;
-        const normalized_height = h0 * (1 - fz) + h1 * fz;
-
-        return self.height_min + normalized_height * (self.height_max - self.height_min);
     }
 
     // 辅助方法
@@ -399,5 +333,203 @@ pub const Terrain = struct {
                 self.colors[idx] = color;
             }
         }
+    }
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        gctx: *Gctx,
+        position: Vec3,
+        rotation_y: f32,
+        size_x: f32,
+        size_z: f32,
+        segments: u32,
+        height_min: f32,
+        height_max: f32,
+        render_pipeline: *RenderPipeline,
+    ) !Terrain {
+        const vertex_count = (segments + 1) * (segments + 1);
+
+        var terrain: Terrain = undefined;
+        terrain.allocator = allocator;
+        terrain.gctx = gctx;
+        terrain.position = position;
+        terrain.rotation_y = rotation_y;
+        terrain.size_x = size_x;
+        terrain.size_z = size_z;
+        terrain.segments = segments;
+        terrain.height_min = height_min;
+        terrain.height_max = height_max;
+
+        // 分配数据
+        terrain.heights = try allocator.alloc(f32, vertex_count);
+        terrain.normals = try allocator.alloc(Vec3, vertex_count);
+        terrain.colors = try allocator.alloc(Vec3, vertex_count);
+
+        // 初始化为平面
+        @memset(terrain.heights, 0.5);
+
+        // 计算法线和颜色
+        terrain.calculateNormals();
+        terrain.generateColors();
+
+        // 创建GPU资源（使用局部坐标，不考虑变换）
+        try terrain.createBuffers(gctx);
+        try terrain.createMaterial(gctx, render_pipeline);
+
+        return terrain;
+    }
+
+    // ========== 坐标转换函数 ==========
+
+    /// 将世界坐标转换为地形局部坐标（考虑位置和旋转）
+    fn worldToLocal(self: *Terrain, world_x: f32, world_z: f32) struct { x: f32, z: f32 } {
+        // 1. 平移到地形原点
+        const dx = world_x - self.position.x;
+        const dz = world_z - self.position.z;
+
+        // 2. 反向旋转（绕 Y 轴）
+        const cos = @cos(-self.rotation_y);
+        const sin = @sin(-self.rotation_y);
+        const local_x = dx * cos - dz * sin;
+        const local_z = dx * sin + dz * cos;
+
+        return .{ .x = local_x, .z = local_z };
+    }
+
+    /// 将地形局部坐标转换为世界坐标
+    fn localToWorld(self: *Terrain, local_x: f32, local_z: f32) struct { x: f32, z: f32 } {
+        // 1. 旋转
+        const cos = @cos(self.rotation_y);
+        const sin = @sin(self.rotation_y);
+        const world_dx = local_x * cos - local_z * sin;
+        const world_dz = local_x * sin + local_z * cos;
+
+        // 2. 平移
+        return .{
+            .x = self.position.x + world_dx,
+            .z = self.position.z + world_dz,
+        };
+    }
+
+    /// 获取局部坐标下的 UV 坐标 (u, v)
+    fn getUV(self: *Terrain, local_x: f32, local_z: f32) struct { u: f32, v: f32 } {
+        // 局部坐标范围：[-size_x/2, size_x/2] -> [0, 1]
+        const u = (local_x + self.size_x * 0.5) / self.size_x;
+        const v = (local_z + self.size_z * 0.5) / self.size_z;
+        return .{ .u = u, .v = v };
+    }
+
+    /// 获取地形局部坐标系中的高度（输入：局部坐标）
+    fn getHeightLocal(self: *Terrain, local_x: f32, local_z: f32) f32 {
+        const uv = self.getUV(local_x, local_z);
+        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return self.height_min;
+
+        const segments_f = @as(f32, @floatFromInt(self.segments));
+        const x = uv.u * segments_f;
+        const z = uv.v * segments_f;
+
+        const x0 = @as(u32, @intFromFloat(@floor(x)));
+        const x1 = @min(x0 + 1, self.segments);
+        const z0 = @as(u32, @intFromFloat(@floor(z)));
+        const z1 = @min(z0 + 1, self.segments);
+
+        const fx = x - @as(f32, @floatFromInt(x0));
+        const fz = z - @as(f32, @floatFromInt(z0));
+
+        const h00 = self.heights[self.getIndex(x0, z0)];
+        const h10 = self.heights[self.getIndex(x1, z0)];
+        const h01 = self.heights[self.getIndex(x0, z1)];
+        const h11 = self.heights[self.getIndex(x1, z1)];
+
+        const h0 = h00 * (1 - fx) + h10 * fx;
+        const h1 = h01 * (1 - fx) + h11 * fx;
+        const normalized_height = h0 * (1 - fz) + h1 * fz;
+
+        return self.height_min + normalized_height * (self.height_max - self.height_min);
+    }
+
+    // ========== 公共 API ==========
+
+    /// 获取世界坐标下的地形高度（主要接口）
+    pub fn getHeightAt(self: *Terrain, world_x: f32, world_z: f32) f32 {
+        const local = self.worldToLocal(world_x, world_z);
+        return self.getHeightLocal(local.x, local.z);
+    }
+
+    /// 提升区域（世界坐标）
+    pub fn raiseAreaWorld(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
+        const center_local = self.worldToLocal(center_x, center_z);
+        self.raiseAreaLocal(center_local.x, center_local.z, radius, strength);
+    }
+
+    /// 提升区域（局部坐标）
+    pub fn raiseAreaLocal(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
+        const segments_f = @as(f32, @floatFromInt(self.segments));
+
+        for (0..self.segments + 1) |z| {
+            for (0..self.segments + 1) |x| {
+                // 计算顶点在局部坐标系中的位置
+                const u = @as(f32, @floatFromInt(x)) / segments_f;
+                const v = @as(f32, @floatFromInt(z)) / segments_f;
+                const local_x = (u - 0.5) * self.size_x;
+                const local_z = (v - 0.5) * self.size_z;
+
+                const dx = local_x - center_x;
+                const dz = local_z - center_z;
+                const dist = @sqrt(dx * dx + dz * dz);
+
+                if (dist < radius) {
+                    const factor = (1.0 - dist / radius) * strength;
+                    const idx = self.getIndex(x, z);
+                    var new_height = self.heights[idx] + factor;
+                    if (new_height < 0) new_height = 0;
+                    if (new_height > 1) new_height = 1;
+                    self.heights[idx] = new_height;
+                }
+            }
+        }
+
+        self.calculateNormals();
+        self.generateColors();
+        self.updateBuffers() catch {};
+    }
+
+    /// 设置地形位置
+    pub fn setPosition(self: *Terrain, new_pos: Vec3) void {
+        self.position = new_pos;
+        // 位置改变不需要重建网格，只需要更新渲染时的 model matrix
+        // 但渲染时地形是通过 instance matrix 变换的，所以这里只是存储位置
+    }
+
+    /// 设置地形旋转（弧度）
+    pub fn setRotation(self: *Terrain, radians: f32) void {
+        self.rotation_y = radians;
+    }
+
+    /// 设置地形旋转（角度）
+    pub fn setRotationDegrees(self: *Terrain, degrees: f32) void {
+        self.rotation_y = degrees * std.math.pi / 180.0;
+    }
+
+    /// 获取地形的变换矩阵（用于渲染）
+    pub fn getTransformMatrix(self: *Terrain) Mat4 {
+        // 先旋转，再平移
+        const cos = @cos(self.rotation_y);
+        const sin = @sin(self.rotation_y);
+
+        // 旋转矩阵（绕 Y 轴）
+        const rot = Mat4{
+            .m = .{
+                .{ cos, 0, sin, 0 },
+                .{ 0, 1, 0, 0 },
+                .{ -sin, 0, cos, 0 },
+                .{ 0, 0, 0, 1 },
+            },
+        };
+
+        // 平移矩阵
+        const trans = Mat4.fromTranslate(self.position);
+
+        return trans.mul(rot);
     }
 };

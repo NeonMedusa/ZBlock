@@ -54,11 +54,13 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     var terrain = try Terrain.init(
         self.allocator,
         &self.gctx,
-        16,
-        16,
-        32,
-        -2,
-        2,
+        Vec3.new(10, 0, 5), // position
+        45.0 * std.math.pi / 180.0, // rotation_y (45度)
+        16.0,
+        16.0,
+        64, // size_x, size_z, segments
+        -2.0,
+        2.0, // height_min, height_max
         &self.render_pipeline,
     );
     terrain.generateRandom(1);
@@ -102,10 +104,17 @@ pub fn start(self: *@This()) !void {
             // 更新摄像头
             self.camera.update(self);
             self.ubo.view_matrix = self.camera.getViewMatrix();
-            if (self.input.isKeyDown(.equal)) {
-                const ve = self.registry.create();
-                self.registry.add(ve, Comps.Position{ .vec = .new(3, 3, 3) });
-                self.registry.add(ve, Comps.ModelName{ .string = "CesiumMan" });
+            if (self.input.isKeyPressed(.right)) {
+                self.terrain.position.x += self.window.delta_time;
+            }
+            if (self.input.isKeyPressed(.left)) {
+                self.terrain.position.x -= self.window.delta_time;
+            }
+            if (self.input.isKeyPressed(.equal)) {
+                self.terrain.rotation_y += self.window.delta_time;
+            }
+            if (self.input.isKeyPressed(.minus)) {
+                self.terrain.rotation_y -= self.window.delta_time;
             }
         }
         // UI开始新帧

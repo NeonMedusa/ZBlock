@@ -52,8 +52,11 @@ pub fn draw(game: *Game) void {
 
     // ！！！！！为地形分配数据（使用记录的索引）
     game.res_manager.entities_data[entity_idx] = .{ .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)) };
+    const terrain_translate = Mat4.fromTranslate(game.terrain.position);
+    const terrain_rotation = Quat.fromAxisAngle(Vec3.unit_y, game.terrain.rotation_y).toMat4();
+    const terrain_transform = terrain_translate.mul(terrain_rotation);
     game.res_manager.instances_data[ins_idx] = .{
-        .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)),
+        .transform = terrain_transform,
         .entity_idx = entity_idx,
     };
     // 更新计数（在赋值之后）
@@ -188,6 +191,7 @@ const Gctx = @import("gctx.zig");
 
 const Algebra = @import("algebra.zig");
 const Vec3 = Algebra.Vec3;
+const Quat = Algebra.Quat;
 const Mat4 = Algebra.Mat4;
 
 const RenderPipeline = @import("render_pipeline.zig");
