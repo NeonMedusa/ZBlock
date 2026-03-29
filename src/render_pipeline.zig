@@ -5,7 +5,6 @@ global_bind_group: Wgpu.WGPUBindGroup,
 material_bgl: Wgpu.WGPUBindGroupLayout,
 pipeline_layout: Wgpu.WGPUPipelineLayout,
 shader_module: Wgpu.WGPUShaderModule,
-entry_count: usize,
 
 pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
     const shader_module = try game.gctx.createShaderModule(shader_file_path);
@@ -171,7 +170,6 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
         .material_bgl = material_bgl,
         .pipeline_layout = pipeline_layout,
         .shader_module = shader_module,
-        .entry_count = global_bgl_entries.len,
     };
 }
 

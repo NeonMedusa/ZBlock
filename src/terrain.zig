@@ -273,7 +273,7 @@ pub const Terrain = struct {
 
         const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
             .layout = render_pipeline.material_bgl,
-            .entryCount = render_pipeline.entry_count,
+            .entryCount = 3,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .size = Wgpu.wgpuBufferGetSize(uniform_buffer) },
                 .{ .binding = 1, .textureView = default_texture.view },
@@ -383,7 +383,7 @@ pub const Terrain = struct {
     // ========== 坐标转换函数 ==========
 
     /// 将世界坐标转换为地形局部坐标（考虑位置和旋转）
-    fn worldToLocal(self: *Terrain, world_x: f32, world_z: f32) struct { x: f32, z: f32 } {
+    pub fn worldToLocal(self: *Terrain, world_x: f32, world_z: f32) struct { x: f32, z: f32 } {
         // 1. 平移到地形原点
         const dx = world_x - self.position.x;
         const dz = world_z - self.position.z;
@@ -398,14 +398,12 @@ pub const Terrain = struct {
     }
 
     /// 将地形局部坐标转换为世界坐标
-    fn localToWorld(self: *Terrain, local_x: f32, local_z: f32) struct { x: f32, z: f32 } {
-        // 1. 旋转
+    pub fn localToWorld(self: *Terrain, local_x: f32, local_z: f32) struct { x: f32, z: f32 } {
         const cos = @cos(self.rotation_y);
         const sin = @sin(self.rotation_y);
-        const world_dx = local_x * cos - local_z * sin;
-        const world_dz = local_x * sin + local_z * cos;
-
-        // 2. 平移
+        // 使用 R(-θ) 矩阵: [ cos,  sin; -sin, cos ]
+        const world_dx = local_x * cos + local_z * sin;
+        const world_dz = -local_x * sin + local_z * cos;
         return .{
             .x = self.position.x + world_dx,
             .z = self.position.z + world_dz,
@@ -413,7 +411,7 @@ pub const Terrain = struct {
     }
 
     /// 获取局部坐标下的 UV 坐标 (u, v)
-    fn getUV(self: *Terrain, local_x: f32, local_z: f32) struct { u: f32, v: f32 } {
+    pub fn getUV(self: *Terrain, local_x: f32, local_z: f32) struct { u: f32, v: f32 } {
         // 局部坐标范围：[-size_x/2, size_x/2] -> [0, 1]
         const u = (local_x + self.size_x * 0.5) / self.size_x;
         const v = (local_z + self.size_z * 0.5) / self.size_z;
@@ -421,7 +419,7 @@ pub const Terrain = struct {
     }
 
     /// 获取地形局部坐标系中的高度（输入：局部坐标）
-    fn getHeightLocal(self: *Terrain, local_x: f32, local_z: f32) f32 {
+    pub fn getHeightLocal(self: *Terrain, local_x: f32, local_z: f32) f32 {
         const uv = self.getUV(local_x, local_z);
         if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return self.height_min;
 
@@ -533,5 +531,43 @@ pub const Terrain = struct {
         const trans = Mat4.fromTranslate(self.position);
 
         return trans.mul(rot);
+    }
+
+    // terrain.zig - 添加获取局部法线的函数
+    pub fn getNormalLocal(self: *Terrain, local_x: f32, local_z: f32) Vec3 {
+        const uv = self.getUV(local_x, local_z);
+        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return Vec3.new(0, 1, 0);
+
+        const segments_f = @as(f32, @floatFromInt(self.segments));
+        const x = uv.u * segments_f;
+        const z = uv.v * segments_f;
+
+        const x0 = @as(u32, @intFromFloat(@floor(x)));
+        const x1 = @min(x0 + 1, self.segments);
+        const z0 = @as(u32, @intFromFloat(@floor(z)));
+        const z1 = @min(z0 + 1, self.segments);
+
+        const fx = x - @as(f32, @floatFromInt(x0));
+        const fz = z - @as(f32, @floatFromInt(z0));
+
+        // 双线性插值法线
+        const n00 = self.normals[self.getIndex(x0, z0)];
+        const n10 = self.normals[self.getIndex(x1, z0)];
+        const n01 = self.normals[self.getIndex(x0, z1)];
+        const n11 = self.normals[self.getIndex(x1, z1)];
+
+        const nx0 = n00.x * (1 - fx) + n10.x * fx;
+        const nx1 = n01.x * (1 - fx) + n11.x * fx;
+        const nx = nx0 * (1 - fz) + nx1 * fz;
+
+        const ny0 = n00.y * (1 - fx) + n10.y * fx;
+        const ny1 = n01.y * (1 - fx) + n11.y * fx;
+        const ny = ny0 * (1 - fz) + ny1 * fz;
+
+        const nz0 = n00.z * (1 - fx) + n10.z * fx;
+        const nz1 = n01.z * (1 - fx) + n11.z * fx;
+        const nz = nz0 * (1 - fz) + nz1 * fz;
+
+        return Vec3.new(nx, ny, nz).norm();
     }
 };

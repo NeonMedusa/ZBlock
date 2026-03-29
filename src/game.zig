@@ -43,7 +43,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     );
     self.render_pipeline = render_pipeline;
     // 初始化摄像头
-    self.camera = Camera3D.init();
+    self.camera = Camera3D.init(self);
     // 初始化ubo
     self.ubo = SceneUniform.init(self.window);
     // 初始化世界
@@ -114,22 +114,25 @@ pub fn start(self: *Game) !void {
         if (!main_menu.visible) {
             // 更新摄像头
             self.camera.update(self);
-            self.ubo.view_matrix = self.camera.getViewMatrix();
 
             Physys.update(self);
             PlayerMoveSys.update(self);
 
-            // if (self.input.isKeyPressed(.right)) {
-            //     self.terrain.position.x += self.window.delta_time;
-            // }
-            // if (self.input.isKeyPressed(.left)) {
-            //     self.terrain.position.x -= self.window.delta_time;
-            // }
             if (self.input.isKeyPressed(.equal)) {
                 self.terrain.rotation_y += self.window.delta_time;
             }
             if (self.input.isKeyPressed(.minus)) {
                 self.terrain.rotation_y -= self.window.delta_time;
+            }
+
+            // 地形编辑
+            if (self.input.isMouseButtonPressed(.mouse_left)) {
+                const ray = self.camera.getScreenRay(0.5, 0.5);
+                const hit = Raycast.raycast(ray, 100.0, &self.terrain);
+
+                if (hit.hit and hit.hit_type == .terrain) {
+                    self.terrain.raiseAreaWorld(hit.point.x, hit.point.z, 2.0, 0.5);
+                }
             }
         }
         // UI开始新帧
@@ -176,3 +179,5 @@ const SceneUniform = RendCTX.SceneUniform;
 const Comps = Imports.Comps;
 
 const Terrain = Imports.Terrain;
+
+const Raycast = @import("raycast.zig");

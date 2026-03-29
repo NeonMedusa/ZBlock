@@ -199,7 +199,7 @@ pub const Model = struct {
             // 又或者应该将创建绑定组的工作外包出去，但为了简单快速的验证代码，暂时先这样
             model.materials[i].bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
                 .layout = pipeline.material_bgl,
-                .entryCount = pipeline.entry_count,
+                .entryCount = 3,
                 .entries = &[_]Wgpu.WGPUBindGroupEntry{
                     .{ // texture_uniform,我们刚刚创建的
                         .binding = 0,
