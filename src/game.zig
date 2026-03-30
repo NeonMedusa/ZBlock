@@ -129,10 +129,20 @@ pub fn start(self: *Game) !void {
             if (self.input.isMouseButtonPressed(.mouse_left)) {
                 const ray = self.camera.getScreenRay(0.5, 0.5);
                 const hit = Raycast.raycast(ray, 100.0, &self.terrain);
-
                 if (hit.hit and hit.hit_type == .terrain) {
-                    self.terrain.raiseAreaWorld(hit.point.x, hit.point.z, 2.0, 0.5);
+                    self.terrain.raiseAreaWorld(hit.point.x, hit.point.z, 2.0, 0.05);
                 }
+            }
+            if (self.input.isMouseButtonPressed(.mouse_right)) {
+                const ray = self.camera.getScreenRay(0.5, 0.5);
+                const hit = Raycast.raycast(ray, 100.0, &self.terrain);
+                if (hit.hit and hit.hit_type == .terrain) {
+                    self.terrain.raiseAreaWorld(hit.point.x, hit.point.z, 2.0, -0.05);
+                }
+            }
+            // 这个是不论在什么情况下都会生效的
+            if (self.input.isKeyPressed(.f)) {
+                self.terrain.raiseAreaWorld(0, 0, 5.0, 1.0);
             }
         }
         // UI开始新帧

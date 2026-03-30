@@ -7,14 +7,10 @@ mouse_states: [8]KeyState = [_]KeyState{.up} ** 8,
 // 上一帧键鼠状态
 prev_key_states: [512]KeyState = [_]KeyState{.up} ** 512,
 prev_mouse_states: [8]KeyState = [_]KeyState{.up} ** 8,
-mouse_x: f64 = 0,
-mouse_y: f64 = 0,
-prev_mouse_x: f64 = 0,
-prev_mouse_y: f64 = 0,
-mouse_dx: f64 = 0,
-mouse_dy: f64 = 0,
-scroll_x: f64 = 0,
-scroll_y: f64 = 0,
+cursor_pos: Vec2 = .zero, // 当前帧的光标位置 (屏幕坐标)
+prev_cursor_pos: Vec2 = .zero, // 上一帧的光标位置 (用于计算差值)
+cursor_delta: Vec2 = .zero, // 光标移动增量 (当前帧 - 上一帧)
+scroll_delta: Vec2 = .zero, // 滚轮滚动增量
 //初始化
 pub fn init(game: *Game) @This() {
     return .{ .game_ptr = game };
@@ -23,12 +19,9 @@ pub fn init(game: *Game) @This() {
 pub fn beginFrame(self: *Input) void {
     @memcpy(&self.prev_key_states, &self.key_states);
     @memcpy(&self.prev_mouse_states, &self.mouse_states);
-    self.prev_mouse_x = self.mouse_x;
-    self.prev_mouse_y = self.mouse_y;
-    self.mouse_dx = 0;
-    self.mouse_dy = 0;
-    self.scroll_x = 0;
-    self.scroll_y = 0;
+    self.prev_cursor_pos = self.cursor_pos;
+    self.cursor_delta = Vec2.zero;
+    self.scroll_delta = Vec2.zero;
 }
 // 更新按键状态（在GLFW回调中调用）
 pub fn updateKeyState(self: *Input, key: i32, action: i32) void {
@@ -51,80 +44,83 @@ pub fn updateMouseButtonState(self: *Input, button: i32, action: i32) void {
     };
     self.mouse_states[@as(usize, @intCast(button))] = state;
 }
-// 更新鼠标光标状态（在GLFW回调中调用）
+// 更新鼠标光标状态（在GLFW光标位置回调中调用）
 pub fn updateMousePos(self: *Input, x: f64, y: f64) void {
-    // 计算鼠标移动量
-    self.mouse_dx = x - self.mouse_x;
-    self.mouse_dy = y - self.mouse_y;
-    self.mouse_x = x;
-    self.mouse_y = y;
+    // 1. 将 GLFW 的 f64 坐标转换为 Vec2 (f32)
+    const current_pos = Vec2.new(@floatCast(x), @floatCast(y));
+    // 2. 保存上一帧位置 (用于下一帧计算 Delta)
+    self.prev_cursor_pos = self.cursor_pos;
+    // 3. 更新当前位置
+    self.cursor_pos = current_pos;
+    // 4. 利用向量减法计算增量: Delta = Current - Previous
+    self.cursor_delta = self.cursor_pos.sub(self.prev_cursor_pos);
 }
-// 更新鼠标滚轮状态（在GLFW回调中调用）
+// 更新鼠标滚轮状态（在GLFW滚轮回调中调用）
 pub fn updateScroll(self: *Input, xoffset: f64, yoffset: f64) void {
-    self.scroll_x = xoffset;
-    self.scroll_y = yoffset;
+    self.scroll_delta = Vec2.new(@floatCast(xoffset), @floatCast(yoffset));
 }
-
 // 按键状态查询函数（可在游戏循环中调用）
-pub fn isKeyDown(self: *const Input, key: Key) bool {
+pub fn isKeyDown(self: *Input, key: Key) bool {
     const keyCode = @intFromEnum(key);
     if (keyCode < 0 or keyCode >= self.key_states.len) return false;
     const idx = @as(usize, @intCast(keyCode));
     return (self.key_states[idx] == .down and self.prev_key_states[idx] == .up);
 }
-pub fn isKeyPressed(self: *const Input, key: Key) bool {
+pub fn isKeyPressed(self: *Input, key: Key) bool {
     const keyCode = @intFromEnum(key);
     if (keyCode < 0 or keyCode >= self.key_states.len) return false;
     return self.key_states[@as(usize, @intCast(keyCode))] == .down;
 }
-pub fn isKeyUp(self: *const Input, key: Key) bool {
+pub fn isKeyUp(self: *Input, key: Key) bool {
     const keyCode = @intFromEnum(key);
     if (keyCode < 0 or keyCode >= self.key_states.len) return false;
     const idx = @as(usize, @intCast(keyCode));
     return (self.key_states[idx] == .up and self.prev_key_states[idx] == .down);
 }
 // 鼠标状态查询函数（可在游戏循环中调用）
-pub fn isMouseButtonPressed(self: *const Input, mouse_button: MouseButton) bool {
+pub fn isMouseButtonPressed(self: *Input, mouse_button: MouseButton) bool {
+    const mouse_button_code = @intFromEnum(mouse_button);
+    if (mouse_button_code < 0 or mouse_button_code >= self.mouse_states.len) return false;
+    const idx = @as(usize, @intCast(mouse_button_code));
+    return (self.mouse_states[idx] == .down);
+}
+pub fn isMouseButtonDown(self: *Input, mouse_button: MouseButton) bool {
     const mouse_button_code = @intFromEnum(mouse_button);
     if (mouse_button_code < 0 or mouse_button_code >= self.mouse_states.len) return false;
     const idx = @as(usize, @intCast(mouse_button_code));
     return (self.mouse_states[idx] == .down and self.prev_mouse_states[idx] == .up);
 }
-pub fn isMouseButtonDown(self: *const Input, mouse_button: MouseButton) bool {
-    const mouse_button_code = @intFromEnum(mouse_button);
-    if (mouse_button_code < 0 or mouse_button_code >= self.mouse_states.len) return false;
-    return self.mouse_states[@as(usize, @intCast(mouse_button_code))] == .down;
-}
-pub fn isMouseButtonReleased(self: *const Input, mouse_button: MouseButton) bool {
+pub fn isMouseButtonReleased(self: *Input, mouse_button: MouseButton) bool {
     const mouse_button_code = @intFromEnum(mouse_button);
     if (mouse_button_code < 0 or mouse_button_code >= self.mouse_states.len) return false;
     const idx = @as(usize, @intCast(mouse_button_code));
     return (self.mouse_states[idx] == .up and self.prev_mouse_states[idx] == .down);
 }
 /// 以GLFW回调的方式获取的鼠标位置，或许相较于getCursorPosThroughPolling函数的延迟更低
-pub fn getCursorPos(self: *const Input) struct { x: f64, y: f64 } {
-    return .{ .x = self.mouse_x, .y = self.mouse_y };
+pub fn getCursorPos(self: *Input) Vec2 {
+    return self.cursor_pos;
 }
 ///以轮询的方式获取的鼠标位置，或许相较于getCursorPos函数的延迟更高，不推荐使用
-pub fn getCursorPosThroughPolling(self: @This()) struct { x: f64, y: f64 } {
+pub fn getCursorPosThroughPolling(self: *Input) Vec2 {
     var x: f64 = 0;
     var y: f64 = 0;
     Glfw.glfwGetCursorPos(self.game_ptr.window.handle, &x, &y);
-    return .{ .x = x, .y = y };
+    return Vec2.new(@floatCast(x), @floatCast(y));
 }
-///返回光标上一帧和这一帧之间的位置差距，注意：调用setCursorPos和setCursorToCenter函数会触发cursorPosCallback，从而影响到此函数的返回结果
-pub fn getCursorDelta(self: *const Input) struct { x: f64, y: f64 } {
-    return .{ .x = self.mouse_dx, .y = self.mouse_dy };
+/// 获取光标上一帧和这一帧之间的位置差距，注意：调用setCursorPos和setCursorToCenter函数会触发cursorPosCallback，从而影响到此函数的返回结果
+pub fn getCursorDelta(self: *Input) Vec2 {
+    return self.cursor_delta;
 }
-pub fn getScroll(self: *const Input) struct { x: f64, y: f64 } {
-    return .{ .x = self.scroll_x, .y = self.scroll_y };
+/// 获取滚轮滚动量
+pub fn getScrollDelta(self: *Input) Vec2 {
+    return self.scroll_delta;
 }
 ///注意：调用此数会触发cursorPosCallback，从而影响到getMouseDelta函数的返回结果
-pub fn setCursorPos(self: @This(), xpos: f64, ypos: f64) void {
+pub fn setCursorPos(self: *Input, xpos: f64, ypos: f64) void {
     Glfw.glfwSetCursorPos(self.game_ptr.window.handle, xpos, ypos);
 }
 ///注意：调用此数会触发cursorPosCallback，从而影响到getMouseDelta函数的返回结果
-pub fn setCursorToCenter(self: @This()) void {
+pub fn setCursorToCenter(self: *Input) void {
     self.setCursorPos(self.game_ptr.window.center_x, self.game_ptr.window.center_y);
 }
 // 按键状态
@@ -241,3 +237,4 @@ const Glfw = @import("imports.zig").Glfw;
 const Window = @import("window.zig");
 const Imports = @import("imports.zig");
 const Game = Imports.Game;
+const Vec2 = Imports.Vec2;

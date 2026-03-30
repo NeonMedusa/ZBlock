@@ -3,7 +3,6 @@ const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
 const Terrain = @import("terrain.zig").Terrain;
 
-// 射线命中结果
 pub const RaycastHit = struct {
     hit: bool,
     point: Vec3,
@@ -20,7 +19,6 @@ pub const RaycastHit = struct {
     };
 };
 
-// 射线结构
 pub const Ray = struct {
     origin: Vec3,
     direction: Vec3,
@@ -32,42 +30,19 @@ pub const Ray = struct {
         };
     }
 
-    // 获取射线上的点
     pub fn pointAt(self: Ray, t: f32) Vec3 {
         return self.origin.add(self.direction.scale(t));
     }
 };
 
-// 射线查询接口
-pub const RaycastQuery = struct {
-    ray: Ray,
-    max_distance: f32,
-
-    pub fn init(ray: Ray, max_distance: f32) RaycastQuery {
-        return .{
-            .ray = ray,
-            .max_distance = max_distance,
-        };
-    }
-
-    // 对地形进行射线检测
-    pub fn castTerrain(self: RaycastQuery, terrain: *Terrain) RaycastHit {
-        return raycastTerrain(terrain, self.ray, self.max_distance);
-    }
-
-    // 未来可以添加更多 cast 方法
-    // pub fn castMesh(self: RaycastQuery, mesh: *Mesh) RaycastHit { ... }
-    // pub fn castSphere(self: RaycastQuery, sphere: *Sphere) RaycastHit { ... }
-};
-
-// 地形射线检测的具体实现
-fn raycastTerrain(terrain: *Terrain, ray: Ray, max_distance: f32) RaycastHit {
-    // 1. 将射线转换到地形局部空间
+// 射线与地形相交检测（纯二分查找）
+pub fn raycastTerrain(terrain: *Terrain, ray: Ray, max_distance: f32) RaycastHit {
+    // 1. 转换到局部空间
     const local_origin = worldToLocal(terrain, ray.origin);
     const local_dir = worldToLocalDirection(terrain, ray.direction);
     const local_ray = Ray.init(local_origin, local_dir);
 
-    // 2. 计算与地形包围盒的交点
+    // 2. 计算与包围盒的交点范围
     const bounds_min = Vec3.new(-terrain.size_x / 2, terrain.height_min, -terrain.size_z / 2);
     const bounds_max = Vec3.new(terrain.size_x / 2, terrain.height_max, terrain.size_z / 2);
 
@@ -77,54 +52,43 @@ fn raycastTerrain(terrain: *Terrain, ray: Ray, max_distance: f32) RaycastHit {
         return RaycastHit{
             .hit = false,
             .hit_type = .none,
-            .point = Vec3.zero, // 添加缺失字段
-            .normal = Vec3.zero, // 添加缺失字段
-            .distance = 0, // 添加缺失字段
+            .point = Vec3.zero,
+            .normal = Vec3.zero,
+            .distance = 0,
         };
     }
 
-    // 3. 在局部空间中二分查找精确交点
-    const t_start = t_min;
-    const t_end = t_max;
-    const steps: u32 = 32;
+    // 3. 二分查找精确交点
+    var low = t_min;
+    var high = t_max;
 
-    var t = t_start;
-    const step = (t_end - t_start) / @as(f32, @floatFromInt(steps));
-
-    for (0..steps) |_| {
-        const point = local_ray.pointAt(t);
+    for (0..40) |_| { // 40次迭代足够达到浮点精度
+        const mid = (low + high) * 0.5;
+        const point = local_ray.pointAt(mid);
         const terrain_height = terrain.getHeightLocal(point.x, point.z);
 
         if (point.y <= terrain_height) {
-            // 找到交点，进行精确二分搜索
-            const hit_t = binarySearchTerrain(terrain, local_ray, t_start, t, terrain_height);
-            const hit_point_local = local_ray.pointAt(hit_t);
-            const hit_point_world = localToWorld(terrain, hit_point_local);
-            const normal_local = terrain.getNormalLocal(hit_point_local.x, hit_point_local.z);
-            const normal_world = localToWorldDirection(terrain, normal_local);
-
-            return RaycastHit{
-                .hit = true,
-                .point = hit_point_world,
-                .normal = normal_world,
-                .distance = hit_t,
-                .hit_type = .terrain,
-            };
+            high = mid; // 在表面下方，交点更近
+        } else {
+            low = mid; // 在表面上空，交点更远
         }
-
-        t += step;
     }
 
+    const hit_t = (low + high) * 0.5;
+    const hit_point_local = local_ray.pointAt(hit_t);
+    const hit_point_world = localToWorld(terrain, hit_point_local);
+    const normal_local = terrain.getNormalLocal(hit_point_local.x, hit_point_local.z);
+    const normal_world = localToWorldDirection(terrain, normal_local);
+
     return RaycastHit{
-        .hit = false,
-        .hit_type = .none,
-        .point = Vec3.zero, // 添加缺失字段
-        .normal = Vec3.zero, // 添加缺失字段
-        .distance = 0, // 添加缺失字段
+        .hit = true,
+        .point = hit_point_world,
+        .normal = normal_world,
+        .distance = hit_t,
+        .hit_type = .terrain,
     };
 }
 
-// 射线与 AABB 相交检测
 fn rayAABBIntersect(ray: Ray, min: Vec3, max: Vec3, t_min: *f32, t_max: *f32) bool {
     var t0: f32 = -std.math.floatMax(f32);
     var t1: f32 = std.math.floatMax(f32);
@@ -172,27 +136,6 @@ fn rayAABBIntersect(ray: Ray, min: Vec3, max: Vec3, t_min: *f32, t_max: *f32) bo
     return true;
 }
 
-// 二分搜索精确交点
-fn binarySearchTerrain(terrain: *Terrain, ray: Ray, t_start: f32, t_end: f32, target_height: f32) f32 {
-    var low = t_start;
-    var high = t_end;
-    _ = target_height;
-
-    for (0..16) |_| {
-        const mid = (low + high) * 0.5;
-        const point = ray.pointAt(mid);
-        const terrain_height = terrain.getHeightLocal(point.x, point.z);
-
-        if (point.y <= terrain_height) {
-            high = mid;
-        } else {
-            low = mid;
-        }
-    }
-
-    return (low + high) * 0.5;
-}
-
 // 坐标转换辅助函数
 fn worldToLocal(terrain: *Terrain, world: Vec3) Vec3 {
     const local_xz = terrain.worldToLocal(world.x, world.z);
@@ -220,8 +163,7 @@ fn localToWorldDirection(terrain: *Terrain, local_dir: Vec3) Vec3 {
     return Vec3.new(world_x, local_dir.y, world_z);
 }
 
-// 方便使用的辅助函数
+// 便捷函数
 pub fn raycast(ray: Ray, max_distance: f32, terrain: *Terrain) RaycastHit {
-    const query = RaycastQuery.init(ray, max_distance);
-    return query.castTerrain(terrain);
+    return raycastTerrain(terrain, ray, max_distance);
 }

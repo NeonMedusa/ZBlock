@@ -1,6 +1,5 @@
 const std = @import("std");
 const Imports = @import("imports.zig");
-const Game = Imports.Game;
 const Wgpu = Imports.Wgpu;
 const Gctx = Imports.Gctx;
 const RendCTX = Imports.RendCTX;
@@ -13,235 +12,274 @@ const Vec3 = Imports.Vec3;
 const Vec4 = Imports.Vec4;
 const Mat4 = Imports.Mat4;
 
-// terrain.zig
 pub const Terrain = struct {
     allocator: std.mem.Allocator,
-
-    // 地形变换
     position: Vec3,
-    rotation_y: f32, // 弧度制，绕 Y 轴旋转
-
-    // 地形尺寸（局部坐标系中的大小）
+    rotation_y: f32, // 弧度
     size_x: f32,
     size_z: f32,
     segments: u32,
     height_min: f32,
     height_max: f32,
-
-    // GPU资源
     gctx: *Gctx,
     vertex_buffer: Wgpu.WGPUBuffer,
     index_buffer: Wgpu.WGPUBuffer,
     index_count: u32,
-
-    // 地形数据（归一化存储 [0,1]）
-    heights: []f32,
+    heights: []f32, // 归一化 [0,1]
     normals: []Vec3,
     colors: []Vec3,
-
-    // 材质
     material: Material,
 
-    // 生成随机地形（用于调试）
+    const EPS = 1e-6;
+
+    // ---------- 辅助方法 ----------
+    inline fn getIndex(self: *Terrain, x: usize, z: usize) usize {
+        return z * (self.segments + 1) + x;
+    }
+
+    inline fn getActualHeight(self: *Terrain, normalized: f32) f32 {
+        return self.height_min + normalized * (self.height_max - self.height_min);
+    }
+
+    inline fn getNormalizedHeight(self: *Terrain, actual: f32) f32 {
+        return (actual - self.height_min) / (self.height_max - self.height_min);
+    }
+
+    // ---------- 插值工具 ----------
+    fn interpolateHeight(self: *Terrain, u: f32, v: f32) f32 {
+        const seg_f = @as(f32, @floatFromInt(self.segments));
+        const x = u * seg_f;
+        const z = v * seg_f;
+        const x0 = @as(u32, @intFromFloat(@floor(x)));
+        const x1 = @min(x0 + 1, self.segments);
+        const z0 = @as(u32, @intFromFloat(@floor(z)));
+        const z1 = @min(z0 + 1, self.segments);
+        const fx = x - @as(f32, @floatFromInt(x0));
+        const fz = z - @as(f32, @floatFromInt(z0));
+
+        const h00 = self.heights[self.getIndex(x0, z0)];
+        const h10 = self.heights[self.getIndex(x1, z0)];
+        const h01 = self.heights[self.getIndex(x0, z1)];
+        const h11 = self.heights[self.getIndex(x1, z1)];
+
+        const h0 = h00 * (1 - fx) + h10 * fx;
+        const h1 = h01 * (1 - fx) + h11 * fx;
+        return (h0 * (1 - fz) + h1 * fz);
+    }
+
+    fn interpolateNormal(self: *Terrain, u: f32, v: f32) Vec3 {
+        const seg_f = @as(f32, @floatFromInt(self.segments));
+        const x = u * seg_f;
+        const z = v * seg_f;
+        const x0 = @as(u32, @intFromFloat(@floor(x)));
+        const x1 = @min(x0 + 1, self.segments);
+        const z0 = @as(u32, @intFromFloat(@floor(z)));
+        const z1 = @min(z0 + 1, self.segments);
+        const fx = x - @as(f32, @floatFromInt(x0));
+        const fz = z - @as(f32, @floatFromInt(z0));
+
+        const n00 = self.normals[self.getIndex(x0, z0)];
+        const n10 = self.normals[self.getIndex(x1, z0)];
+        const n01 = self.normals[self.getIndex(x0, z1)];
+        const n11 = self.normals[self.getIndex(x1, z1)];
+
+        const nx0 = n00.x * (1 - fx) + n10.x * fx;
+        const nx1 = n01.x * (1 - fx) + n11.x * fx;
+        const ny0 = n00.y * (1 - fx) + n10.y * fx;
+        const ny1 = n01.y * (1 - fx) + n11.y * fx;
+        const nz0 = n00.z * (1 - fx) + n10.z * fx;
+        const nz1 = n01.z * (1 - fx) + n11.z * fx;
+
+        return Vec3.new(
+            nx0 * (1 - fz) + nx1 * fz,
+            ny0 * (1 - fz) + ny1 * fz,
+            nz0 * (1 - fz) + nz1 * fz,
+        ).norm();
+    }
+
+    // ---------- 地形数据生成 ----------
     pub fn generateRandom(self: *Terrain, seed: u64) void {
         var rng = std.Random.DefaultPrng.init(seed);
         const random = rng.random();
-
-        const segments_f = @as(f32, @floatFromInt(self.segments));
-
-        var min_height: f32 = 1.0;
-        var max_height: f32 = 0.0;
+        const seg_f = @as(f32, @floatFromInt(self.segments));
 
         for (0..self.segments + 1) |z| {
             for (0..self.segments + 1) |x| {
                 const idx = self.getIndex(x, z);
-                const u = @as(f32, @floatFromInt(x)) / segments_f;
-                const v = @as(f32, @floatFromInt(z)) / segments_f;
+                const u = @as(f32, @floatFromInt(x)) / seg_f;
+                const v = @as(f32, @floatFromInt(z)) / seg_f;
 
-                // 生成范围 [-1, 1] 的高度值
                 const h1 = @sin(u * 4.0 * std.math.pi) * @cos(v * 4.0 * std.math.pi);
                 const h2 = @sin(u * 8.0 * std.math.pi + 1.0) * 0.3;
                 const h3 = @cos(v * 8.0 * std.math.pi) * 0.3;
                 const h4 = @sin((u * 16.0 + v * 16.0) * std.math.pi) * 0.1;
-
                 const noise = (random.float(f32) - 0.5) * 0.2;
-
                 var height = (h1 * 2.0 + h2 + h3 + h4) * 0.5 + noise;
-
-                if (height < -1) height = -1;
-                if (height > 1) height = 1;
-
+                height = @max(-1.0, @min(1.0, height));
                 self.heights[idx] = (height + 1.0) / 2.0;
-
-                const actual = self.getActualHeight(self.heights[idx]);
-                if (actual < min_height) min_height = actual;
-                if (actual > max_height) max_height = actual;
             }
         }
-
         self.calculateNormals();
         self.generateColors();
         self.updateBuffers() catch {};
     }
 
-    // 提升区域（用于编辑器功能）
-    pub fn raiseArea(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
-        const segments_f = @as(f32, @floatFromInt(self.segments));
-
+    pub fn raiseAreaLocal(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
+        const seg_f = @as(f32, @floatFromInt(self.segments));
         for (0..self.segments + 1) |z| {
             for (0..self.segments + 1) |x| {
-                const u = @as(f32, @floatFromInt(x)) / segments_f;
-                const v = @as(f32, @floatFromInt(z)) / segments_f;
-
-                const world_x = (u - 0.5) * self.size_x;
-                const world_z = (v - 0.5) * self.size_z;
-
-                const dx = world_x - center_x;
-                const dz = world_z - center_z;
+                const u = @as(f32, @floatFromInt(x)) / seg_f;
+                const v = @as(f32, @floatFromInt(z)) / seg_f;
+                const local_x = (u - 0.5) * self.size_x;
+                const local_z = (v - 0.5) * self.size_z;
+                const dx = local_x - center_x;
+                const dz = local_z - center_z;
                 const dist = @sqrt(dx * dx + dz * dz);
-
                 if (dist < radius) {
                     const factor = (1.0 - dist / radius) * strength;
                     const idx = self.getIndex(x, z);
-                    var new_height = self.heights[idx] + factor;
-                    if (new_height < 0) new_height = 0;
-                    if (new_height > 1) new_height = 1;
-                    self.heights[idx] = new_height;
+                    const h = self.heights[idx] + factor;
+                    self.heights[idx] = @max(0.0, @min(1.0, h));
                 }
             }
         }
-
         self.calculateNormals();
         self.generateColors();
         self.updateBuffers() catch {};
     }
 
-    // 辅助方法
-    fn getIndex(self: *Terrain, x: usize, z: usize) usize {
-        return z * (self.segments + 1) + x;
+    pub fn raiseAreaWorld(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
+        const local = self.worldToLocal(center_x, center_z);
+        self.raiseAreaLocal(local.x, local.z, radius, strength);
     }
 
-    fn getActualHeight(self: *Terrain, normalized: f32) f32 {
-        return self.height_min + normalized * (self.height_max - self.height_min);
-    }
-
+    // ---------- 法线计算 ----------
     fn calculateNormals(self: *Terrain) void {
-        const segments = self.segments;
-        const segments_f = @as(f32, @floatFromInt(segments));
-
-        for (0..segments + 1) |z| {
-            for (0..segments + 1) |x| {
+        const seg = self.segments;
+        const seg_f = @as(f32, @floatFromInt(seg));
+        for (0..seg + 1) |z| {
+            for (0..seg + 1) |x| {
                 const idx = self.getIndex(x, z);
-                const h_center = self.heights[idx];
+                const hc = self.heights[idx];
 
-                const h_right = if (x < segments) self.heights[self.getIndex(x + 1, z)] else h_center;
-                const h_left = if (x > 0) self.heights[self.getIndex(x - 1, z)] else h_center;
-                const h_down = if (z < segments) self.heights[self.getIndex(x, z + 1)] else h_center;
-                const h_up = if (z > 0) self.heights[self.getIndex(x, z - 1)] else h_center;
+                const h_right = if (x < seg) self.heights[self.getIndex(x + 1, z)] else hc;
+                const h_left = if (x > 0) self.heights[self.getIndex(x - 1, z)] else hc;
+                const h_down = if (z < seg) self.heights[self.getIndex(x, z + 1)] else hc;
+                const h_up = if (z > 0) self.heights[self.getIndex(x, z - 1)] else hc;
 
-                const segment_size_x = self.size_x / segments_f;
-                const segment_size_z = self.size_z / segments_f;
+                const seg_sz_x = self.size_x / seg_f;
+                const seg_sz_z = self.size_z / seg_f;
 
-                const actual_h_right = self.getActualHeight(h_right);
-                const actual_h_left = self.getActualHeight(h_left);
-                const actual_h_down = self.getActualHeight(h_down);
-                const actual_h_up = self.getActualHeight(h_up);
+                const ar = self.getActualHeight(h_right);
+                const al = self.getActualHeight(h_left);
+                const ad = self.getActualHeight(h_down);
+                const au = self.getActualHeight(h_up);
 
-                const dx = (actual_h_right - actual_h_left) / (2.0 * segment_size_x);
-                const dz = (actual_h_down - actual_h_up) / (2.0 * segment_size_z);
+                const dx = (ar - al) / (2.0 * seg_sz_x);
+                const dz = (ad - au) / (2.0 * seg_sz_z);
 
                 var nx = -dx;
                 var ny: f32 = 1.0;
                 var nz = -dz;
-
                 const len = @sqrt(nx * nx + ny * ny + nz * nz);
-                if (len > 0.0001) {
+                if (len > EPS) {
                     nx /= len;
                     ny /= len;
                     nz /= len;
                 }
-
                 self.normals[idx] = Vec3.new(nx, ny, nz);
             }
         }
     }
 
+    fn generateColors(self: *Terrain) void {
+        const range = self.height_max - self.height_min;
+        for (0..self.segments + 1) |z| {
+            for (0..self.segments + 1) |x| {
+                const idx = self.getIndex(x, z);
+                const actual = self.getActualHeight(self.heights[idx]);
+                const t = (actual - self.height_min) / range;
+                const color = if (t < 0.3) blk: {
+                    const t2 = t / 0.3;
+                    break :blk Vec3.new(0.2, 0.4 + t2 * 0.3, 0.2);
+                } else if (t < 0.6) blk: {
+                    const t2 = (t - 0.3) / 0.3;
+                    break :blk Vec3.new(0.5 + t2 * 0.2, 0.4 + t2 * 0.1, 0.2);
+                } else blk: {
+                    const t2 = (t - 0.6) / 0.4;
+                    break :blk Vec3.new(0.7 + t2 * 0.3, 0.7 + t2 * 0.3, 0.7 + t2 * 0.3);
+                };
+                self.colors[idx] = color;
+            }
+        }
+    }
+
+    // ---------- GPU 资源 ----------
     fn generateVertices(self: *Terrain) ![]VertexAttribute {
-        const vertex_count = (self.segments + 1) * (self.segments + 1);
-        const vertices = try self.allocator.alloc(VertexAttribute, vertex_count);
-        const segments_f = @as(f32, @floatFromInt(self.segments));
+        const count = (self.segments + 1) * (self.segments + 1);
+        const vertices = try self.allocator.alloc(VertexAttribute, count);
+        const seg_f = @as(f32, @floatFromInt(self.segments));
 
         for (0..self.segments + 1) |z| {
             for (0..self.segments + 1) |x| {
                 const idx = self.getIndex(x, z);
-                const u = @as(f32, @floatFromInt(x)) / segments_f;
-                const v = @as(f32, @floatFromInt(z)) / segments_f;
-
+                const u = @as(f32, @floatFromInt(x)) / seg_f;
+                const v = @as(f32, @floatFromInt(z)) / seg_f;
                 const world_x = (u - 0.5) * self.size_x;
                 const world_z = (v - 0.5) * self.size_z;
                 const world_y = self.getActualHeight(self.heights[idx]);
 
-                const color = self.colors[idx];
-                const normal = self.normals[idx];
-
                 vertices[idx] = .{
                     .position = Vec3.new(world_x, world_y, world_z),
-                    .normal = normal,
+                    .normal = self.normals[idx],
                     .tangent = Vec4.new(1, 0, 0, 1),
                     .texcoord = Vec2.new(u, v),
-                    .color = Vec4.new(color.x, color.y, color.z, 1.0),
+                    .color = Vec4.new(self.colors[idx].x, self.colors[idx].y, self.colors[idx].z, 1.0),
                     .joint_indices = .{ 0, 0, 0, 0 },
                     .joint_weights = .{ 1, 0, 0, 0 },
                 };
             }
         }
-
         return vertices;
     }
 
     fn generateIndices(self: *Terrain) ![]u32 {
         const num_quads = self.segments * self.segments;
         const indices = try self.allocator.alloc(u32, num_quads * 6);
-
         var idx: u32 = 0;
         for (0..self.segments) |z| {
             for (0..self.segments) |x| {
-                const top_left = @as(u32, @intCast(self.getIndex(x, z)));
-                const top_right = @as(u32, @intCast(self.getIndex(x + 1, z)));
-                const bottom_left = @as(u32, @intCast(self.getIndex(x, z + 1)));
-                const bottom_right = @as(u32, @intCast(self.getIndex(x + 1, z + 1)));
-
-                indices[idx] = top_left;
-                indices[idx + 1] = bottom_left;
-                indices[idx + 2] = top_right;
-                indices[idx + 3] = top_right;
-                indices[idx + 4] = bottom_left;
-                indices[idx + 5] = bottom_right;
+                const tl = @as(u32, @intCast(self.getIndex(x, z)));
+                const tr = @as(u32, @intCast(self.getIndex(x + 1, z)));
+                const bl = @as(u32, @intCast(self.getIndex(x, z + 1)));
+                const br = @as(u32, @intCast(self.getIndex(x + 1, z + 1)));
+                indices[idx] = tl;
+                indices[idx + 1] = bl;
+                indices[idx + 2] = tr;
+                indices[idx + 3] = tr;
+                indices[idx + 4] = bl;
+                indices[idx + 5] = br;
                 idx += 6;
             }
         }
-
         return indices;
     }
 
     fn createBuffers(self: *Terrain, gctx: *Gctx) !void {
         const vertices = try self.generateVertices();
         defer self.allocator.free(vertices);
-
         const indices = try self.generateIndices();
         defer self.allocator.free(indices);
 
         self.vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = @sizeOf(VertexAttribute) * vertices.len,
             .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
         });
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.vertex_buffer, 0, vertices.ptr, @sizeOf(VertexAttribute) * vertices.len);
 
         self.index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = @sizeOf(u32) * indices.len,
             .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
         });
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.index_buffer, 0, indices.ptr, @sizeOf(u32) * indices.len);
         self.index_count = @intCast(indices.len);
@@ -250,25 +288,20 @@ pub const Terrain = struct {
     fn updateBuffers(self: *Terrain) !void {
         const vertices = try self.generateVertices();
         defer self.allocator.free(vertices);
-
         Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.vertex_buffer, 0, vertices.ptr, @sizeOf(VertexAttribute) * vertices.len);
     }
 
     fn createMaterial(self: *Terrain, gctx: *Gctx, render_pipeline: *RenderPipeline) !void {
-        const default_texture = try RendCTX.createDefaultTexture(gctx);
-
+        const default_tex = try RendCTX.createDefaultTexture(gctx);
         const material_constants = MaterialConstants{
             .has_base_color = 1,
             .has_normal = 0,
             ._padding = .{ 0, 0 },
         };
-
         const uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = @sizeOf(MaterialConstants),
             .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
         });
-
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &material_constants, @sizeOf(MaterialConstants));
 
         const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
@@ -276,19 +309,19 @@ pub const Terrain = struct {
             .entryCount = 3,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .size = Wgpu.wgpuBufferGetSize(uniform_buffer) },
-                .{ .binding = 1, .textureView = default_texture.view },
-                .{ .binding = 2, .textureView = default_texture.view },
+                .{ .binding = 1, .textureView = default_tex.view },
+                .{ .binding = 2, .textureView = default_tex.view },
             },
         });
-
         self.material = .{
-            .color_texture = default_texture,
-            .normal_texture = default_texture,
+            .color_texture = default_tex,
+            .normal_texture = default_tex,
             .uniform_buffer = uniform_buffer,
             .bind_group = bind_group,
         };
     }
 
+    // ---------- 公共 API ----------
     pub fn draw(self: *Terrain, pass: Wgpu.WGPURenderPassEncoder, instance_idx: u32) void {
         Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, self.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(self.vertex_buffer));
         Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, self.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(self.index_buffer));
@@ -302,40 +335,89 @@ pub const Terrain = struct {
         self.allocator.free(self.colors);
         Wgpu.wgpuBufferRelease(self.vertex_buffer);
         Wgpu.wgpuBufferRelease(self.index_buffer);
-
-        if (self.material.color_texture.texture) |tex| Wgpu.wgpuTextureRelease(tex);
-        if (self.material.color_texture.view) |view| Wgpu.wgpuTextureViewRelease(view);
-        if (self.material.normal_texture.texture) |tex| Wgpu.wgpuTextureRelease(tex);
-        if (self.material.normal_texture.view) |view| Wgpu.wgpuTextureViewRelease(view);
-        if (self.material.uniform_buffer) |buffer| Wgpu.wgpuBufferRelease(buffer);
-        if (self.material.bind_group) |bind_group| Wgpu.wgpuBindGroupRelease(bind_group);
+        // 释放材质资源
+        if (self.material.color_texture.texture) |t| Wgpu.wgpuTextureRelease(t);
+        if (self.material.color_texture.view) |v| Wgpu.wgpuTextureViewRelease(v);
+        if (self.material.normal_texture.texture) |t| Wgpu.wgpuTextureRelease(t);
+        if (self.material.normal_texture.view) |v| Wgpu.wgpuTextureViewRelease(v);
+        if (self.material.uniform_buffer) |b| Wgpu.wgpuBufferRelease(b);
+        if (self.material.bind_group) |g| Wgpu.wgpuBindGroupRelease(g);
     }
 
-    fn generateColors(self: *Terrain) void {
-        const height_range = self.height_max - self.height_min;
-
-        for (0..self.segments + 1) |z| {
-            for (0..self.segments + 1) |x| {
-                const idx = self.getIndex(x, z);
-                const actual = self.getActualHeight(self.heights[idx]);
-                const t = (actual - self.height_min) / height_range;
-
-                var color: Vec3 = undefined;
-                if (t < 0.3) {
-                    const t2 = t / 0.3;
-                    color = Vec3.new(0.2, 0.4 + t2 * 0.3, 0.2);
-                } else if (t < 0.6) {
-                    const t2 = (t - 0.3) / 0.3;
-                    color = Vec3.new(0.5 + t2 * 0.2, 0.4 + t2 * 0.1, 0.2);
-                } else {
-                    const t2 = (t - 0.6) / 0.4;
-                    color = Vec3.new(0.7 + t2 * 0.3, 0.7 + t2 * 0.3, 0.7 + t2 * 0.3);
-                }
-                self.colors[idx] = color;
-            }
-        }
+    // ---------- 坐标转换 ----------
+    pub fn worldToLocal(self: *Terrain, world_x: f32, world_z: f32) struct { x: f32, z: f32 } {
+        const dx = world_x - self.position.x;
+        const dz = world_z - self.position.z;
+        const cos = @cos(self.rotation_y);
+        const sin = @sin(self.rotation_y);
+        return .{
+            .x = dx * cos - dz * sin,
+            .z = dx * sin + dz * cos,
+        };
     }
 
+    pub fn localToWorld(self: *Terrain, local_x: f32, local_z: f32) struct { x: f32, z: f32 } {
+        const cos = @cos(self.rotation_y);
+        const sin = @sin(self.rotation_y);
+        const world_dx = local_x * cos + local_z * sin;
+        const world_dz = -local_x * sin + local_z * cos;
+        return .{
+            .x = self.position.x + world_dx,
+            .z = self.position.z + world_dz,
+        };
+    }
+
+    pub fn getUV(self: *Terrain, local_x: f32, local_z: f32) struct { u: f32, v: f32 } {
+        return .{
+            .u = (local_x + self.size_x * 0.5) / self.size_x,
+            .v = (local_z + self.size_z * 0.5) / self.size_z,
+        };
+    }
+
+    pub fn getHeightLocal(self: *Terrain, local_x: f32, local_z: f32) f32 {
+        const uv = self.getUV(local_x, local_z);
+        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return self.height_min;
+        const norm = self.interpolateHeight(uv.u, uv.v);
+        return self.getActualHeight(norm);
+    }
+
+    pub fn getHeightAt(self: *Terrain, world_x: f32, world_z: f32) f32 {
+        const local = self.worldToLocal(world_x, world_z);
+        return self.position.y + self.getHeightLocal(local.x, local.z);
+    }
+
+    pub fn getNormalLocal(self: *Terrain, local_x: f32, local_z: f32) Vec3 {
+        const uv = self.getUV(local_x, local_z);
+        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return Vec3.new(0, 1, 0);
+        return self.interpolateNormal(uv.u, uv.v);
+    }
+
+    pub fn setPosition(self: *Terrain, new_pos: Vec3) void {
+        self.position = new_pos;
+    }
+    pub fn setRotation(self: *Terrain, radians: f32) void {
+        self.rotation_y = radians;
+    }
+    pub fn setRotationDegrees(self: *Terrain, degrees: f32) void {
+        self.rotation_y = degrees * std.math.pi / 180.0;
+    }
+
+    pub fn getTransformMatrix(self: *Terrain) Mat4 {
+        const cos = @cos(self.rotation_y);
+        const sin = @sin(self.rotation_y);
+        const rot = Mat4{
+            .m = .{
+                .{ cos, 0, sin, 0 },
+                .{ 0, 1, 0, 0 },
+                .{ -sin, 0, cos, 0 },
+                .{ 0, 0, 0, 1 },
+            },
+        };
+        const trans = Mat4.fromTranslate(self.position);
+        return trans.mul(rot);
+    }
+
+    // ---------- 构造函数 ----------
     pub fn init(
         allocator: std.mem.Allocator,
         gctx: *Gctx,
@@ -349,225 +431,29 @@ pub const Terrain = struct {
         render_pipeline: *RenderPipeline,
     ) !Terrain {
         const vertex_count = (segments + 1) * (segments + 1);
-
-        var terrain: Terrain = undefined;
-        terrain.allocator = allocator;
-        terrain.gctx = gctx;
-        terrain.position = position;
-        terrain.rotation_y = rotation_y;
-        terrain.size_x = size_x;
-        terrain.size_z = size_z;
-        terrain.segments = segments;
-        terrain.height_min = height_min;
-        terrain.height_max = height_max;
-
-        // 分配数据
-        terrain.heights = try allocator.alloc(f32, vertex_count);
-        terrain.normals = try allocator.alloc(Vec3, vertex_count);
-        terrain.colors = try allocator.alloc(Vec3, vertex_count);
-
-        // 初始化为平面
+        var terrain = Terrain{
+            .allocator = allocator,
+            .gctx = gctx,
+            .position = position,
+            .rotation_y = rotation_y,
+            .size_x = size_x,
+            .size_z = size_z,
+            .segments = segments,
+            .height_min = height_min,
+            .height_max = height_max,
+            .heights = try allocator.alloc(f32, vertex_count),
+            .normals = try allocator.alloc(Vec3, vertex_count),
+            .colors = try allocator.alloc(Vec3, vertex_count),
+            .vertex_buffer = undefined,
+            .index_buffer = undefined,
+            .index_count = 0,
+            .material = undefined,
+        };
         @memset(terrain.heights, 0.5);
-
-        // 计算法线和颜色
         terrain.calculateNormals();
         terrain.generateColors();
-
-        // 创建GPU资源（使用局部坐标，不考虑变换）
         try terrain.createBuffers(gctx);
         try terrain.createMaterial(gctx, render_pipeline);
-
         return terrain;
-    }
-
-    // ========== 坐标转换函数 ==========
-
-    /// 将世界坐标转换为地形局部坐标（考虑位置和旋转）
-    pub fn worldToLocal(self: *Terrain, world_x: f32, world_z: f32) struct { x: f32, z: f32 } {
-        // 1. 平移到地形原点
-        const dx = world_x - self.position.x;
-        const dz = world_z - self.position.z;
-
-        // 2. 反向旋转（绕 Y 轴），这里使用正角度，因为旋转矩阵是正交的，逆矩阵即转置
-        const cos = @cos(self.rotation_y);
-        const sin = @sin(self.rotation_y);
-        const local_x = dx * cos - dz * sin;
-        const local_z = dx * sin + dz * cos;
-
-        return .{ .x = local_x, .z = local_z };
-    }
-
-    /// 将地形局部坐标转换为世界坐标
-    pub fn localToWorld(self: *Terrain, local_x: f32, local_z: f32) struct { x: f32, z: f32 } {
-        const cos = @cos(self.rotation_y);
-        const sin = @sin(self.rotation_y);
-        // 使用 R(-θ) 矩阵: [ cos,  sin; -sin, cos ]
-        const world_dx = local_x * cos + local_z * sin;
-        const world_dz = -local_x * sin + local_z * cos;
-        return .{
-            .x = self.position.x + world_dx,
-            .z = self.position.z + world_dz,
-        };
-    }
-
-    /// 获取局部坐标下的 UV 坐标 (u, v)
-    pub fn getUV(self: *Terrain, local_x: f32, local_z: f32) struct { u: f32, v: f32 } {
-        // 局部坐标范围：[-size_x/2, size_x/2] -> [0, 1]
-        const u = (local_x + self.size_x * 0.5) / self.size_x;
-        const v = (local_z + self.size_z * 0.5) / self.size_z;
-        return .{ .u = u, .v = v };
-    }
-
-    /// 获取地形局部坐标系中的高度（输入：局部坐标）
-    pub fn getHeightLocal(self: *Terrain, local_x: f32, local_z: f32) f32 {
-        const uv = self.getUV(local_x, local_z);
-        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return self.height_min;
-
-        const segments_f = @as(f32, @floatFromInt(self.segments));
-        const x = uv.u * segments_f;
-        const z = uv.v * segments_f;
-
-        const x0 = @as(u32, @intFromFloat(@floor(x)));
-        const x1 = @min(x0 + 1, self.segments);
-        const z0 = @as(u32, @intFromFloat(@floor(z)));
-        const z1 = @min(z0 + 1, self.segments);
-
-        const fx = x - @as(f32, @floatFromInt(x0));
-        const fz = z - @as(f32, @floatFromInt(z0));
-
-        const h00 = self.heights[self.getIndex(x0, z0)];
-        const h10 = self.heights[self.getIndex(x1, z0)];
-        const h01 = self.heights[self.getIndex(x0, z1)];
-        const h11 = self.heights[self.getIndex(x1, z1)];
-
-        const h0 = h00 * (1 - fx) + h10 * fx;
-        const h1 = h01 * (1 - fx) + h11 * fx;
-        const normalized_height = h0 * (1 - fz) + h1 * fz;
-
-        return self.height_min + normalized_height * (self.height_max - self.height_min);
-    }
-
-    // ========== 公共 API ==========
-
-    /// 获取世界坐标下的地形高度
-    pub fn getHeightAt(self: *Terrain, world_x: f32, world_z: f32) f32 {
-        const local = self.worldToLocal(world_x, world_z);
-        const local_height = self.getHeightLocal(local.x, local.z);
-        return self.position.y + local_height;
-    }
-
-    /// 提升区域（世界坐标）
-    pub fn raiseAreaWorld(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
-        const center_local = self.worldToLocal(center_x, center_z);
-        self.raiseAreaLocal(center_local.x, center_local.z, radius, strength);
-    }
-
-    /// 提升区域（局部坐标）
-    pub fn raiseAreaLocal(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
-        const segments_f = @as(f32, @floatFromInt(self.segments));
-
-        for (0..self.segments + 1) |z| {
-            for (0..self.segments + 1) |x| {
-                // 计算顶点在局部坐标系中的位置
-                const u = @as(f32, @floatFromInt(x)) / segments_f;
-                const v = @as(f32, @floatFromInt(z)) / segments_f;
-                const local_x = (u - 0.5) * self.size_x;
-                const local_z = (v - 0.5) * self.size_z;
-
-                const dx = local_x - center_x;
-                const dz = local_z - center_z;
-                const dist = @sqrt(dx * dx + dz * dz);
-
-                if (dist < radius) {
-                    const factor = (1.0 - dist / radius) * strength;
-                    const idx = self.getIndex(x, z);
-                    var new_height = self.heights[idx] + factor;
-                    if (new_height < 0) new_height = 0;
-                    if (new_height > 1) new_height = 1;
-                    self.heights[idx] = new_height;
-                }
-            }
-        }
-
-        self.calculateNormals();
-        self.generateColors();
-        self.updateBuffers() catch {};
-    }
-
-    /// 设置地形位置
-    pub fn setPosition(self: *Terrain, new_pos: Vec3) void {
-        self.position = new_pos;
-        // 位置改变不需要重建网格，只需要更新渲染时的 model matrix
-        // 但渲染时地形是通过 instance matrix 变换的，所以这里只是存储位置
-    }
-
-    /// 设置地形旋转（弧度）
-    pub fn setRotation(self: *Terrain, radians: f32) void {
-        self.rotation_y = radians;
-    }
-
-    /// 设置地形旋转（角度）
-    pub fn setRotationDegrees(self: *Terrain, degrees: f32) void {
-        self.rotation_y = degrees * std.math.pi / 180.0;
-    }
-
-    /// 获取地形的变换矩阵（用于渲染）
-    pub fn getTransformMatrix(self: *Terrain) Mat4 {
-        // 先旋转，再平移
-        const cos = @cos(self.rotation_y);
-        const sin = @sin(self.rotation_y);
-
-        // 旋转矩阵（绕 Y 轴）
-        const rot = Mat4{
-            .m = .{
-                .{ cos, 0, sin, 0 },
-                .{ 0, 1, 0, 0 },
-                .{ -sin, 0, cos, 0 },
-                .{ 0, 0, 0, 1 },
-            },
-        };
-
-        // 平移矩阵
-        const trans = Mat4.fromTranslate(self.position);
-
-        return trans.mul(rot);
-    }
-
-    // terrain.zig - 添加获取局部法线的函数
-    pub fn getNormalLocal(self: *Terrain, local_x: f32, local_z: f32) Vec3 {
-        const uv = self.getUV(local_x, local_z);
-        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return Vec3.new(0, 1, 0);
-
-        const segments_f = @as(f32, @floatFromInt(self.segments));
-        const x = uv.u * segments_f;
-        const z = uv.v * segments_f;
-
-        const x0 = @as(u32, @intFromFloat(@floor(x)));
-        const x1 = @min(x0 + 1, self.segments);
-        const z0 = @as(u32, @intFromFloat(@floor(z)));
-        const z1 = @min(z0 + 1, self.segments);
-
-        const fx = x - @as(f32, @floatFromInt(x0));
-        const fz = z - @as(f32, @floatFromInt(z0));
-
-        // 双线性插值法线
-        const n00 = self.normals[self.getIndex(x0, z0)];
-        const n10 = self.normals[self.getIndex(x1, z0)];
-        const n01 = self.normals[self.getIndex(x0, z1)];
-        const n11 = self.normals[self.getIndex(x1, z1)];
-
-        const nx0 = n00.x * (1 - fx) + n10.x * fx;
-        const nx1 = n01.x * (1 - fx) + n11.x * fx;
-        const nx = nx0 * (1 - fz) + nx1 * fz;
-
-        const ny0 = n00.y * (1 - fx) + n10.y * fx;
-        const ny1 = n01.y * (1 - fx) + n11.y * fx;
-        const ny = ny0 * (1 - fz) + ny1 * fz;
-
-        const nz0 = n00.z * (1 - fx) + n10.z * fx;
-        const nz1 = n01.z * (1 - fx) + n11.z * fx;
-        const nz = nz0 * (1 - fz) + nz1 * fz;
-
-        return Vec3.new(nx, ny, nz).norm();
     }
 };

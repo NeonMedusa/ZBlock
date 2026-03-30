@@ -20,7 +20,7 @@ vertex_buffer: Wgpu.WGPUBuffer,
 index_buffer: Wgpu.WGPUBuffer,
 // 最基本的按钮
 pub fn button(self: *UiSystem, x: f32, y: f32) bool {
-    const input = self.game_ptr.input;
+    var input = self.game_ptr.input;
     const width: f32 = 100;
     const height: f32 = 30;
     // 根据鼠标位置调整状态

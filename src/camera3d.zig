@@ -22,14 +22,15 @@ pub fn init(game: *Game) @This() {
         .game = game,
     };
 }
+
 pub fn update(self: *@This(), game: *Game) void {
-    const input = game.input;
+    var input = game.input;
     const window = game.window;
     //鼠标控制方向
     const mousePos = input.getCursorPos(); // 获取鼠标位置
     input.setCursorToCenter(); // 重置鼠标位置到窗口中心
-    self.yaw += @as(f32, @floatCast(mousePos.x - window.center_x)) * self.sensitivity; // 更新相机角度
-    self.pitch -= @as(f32, @floatCast(mousePos.y - window.center_y)) * self.sensitivity;
+    self.yaw += (mousePos.x - window.center_x) * self.sensitivity; // 更新相机角度
+    self.pitch -= (mousePos.y - window.center_y) * self.sensitivity;
     if (self.pitch > 89.0) self.pitch = 89.0; // 限制俯仰角
     if (self.pitch < -89.0) self.pitch = -89.0;
     self.updateVectors(); // 更新相机方向向量
