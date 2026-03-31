@@ -55,10 +55,10 @@ fn updateVectors(self: *@This()) void {
     self.front = Vec3.new(@cos(yawRad) * @cos(pitchRad), @sin(pitchRad), @sin(yawRad) * @cos(pitchRad)).norm();
     self.up = self.front.cross(self.world_up).norm().cross(self.front).norm();
 }
-
-pub fn getScreenRay(self: *@This(), screen_x: f32, screen_y: f32) Raycast.Ray {
-    const ndc_x = screen_x * 2.0 - 1.0;
-    const ndc_y = (1.0 - screen_y) * 2.0 - 1.0;
+/// 根据屏幕 UV 坐标生成射线（u,v ∈ [0,1]）
+pub fn getRayFromScreenUV(self: *@This(), u: f32, v: f32) Raycast.Ray {
+    const ndc_x = u * 2.0 - 1.0;
+    const ndc_y = (1.0 - v) * 2.0 - 1.0;
 
     const inv_proj = self.game.ubo.proj_matrix.inverse();
     const inv_view = self.game.ubo.view_matrix.inverse();
@@ -83,7 +83,20 @@ pub fn getScreenRay(self: *@This(), screen_x: f32, screen_y: f32) Raycast.Ray {
 
     return .{ .origin = origin, .direction = direction };
 }
+/// 从当前鼠标光标位置发射射线（自动获取鼠标位置）
+pub fn getCursorRay(self: *@This()) Raycast.Ray {
+    const mouse_pos = self.game.input.getCursorPos();
+    const window = self.game.window;
 
+    const mouse_x = mouse_pos.x / window.width;
+    const mouse_y = mouse_pos.y / window.height;
+
+    return self.getRayFromScreenUV(mouse_x, mouse_y);
+}
+/// 从相机前方发射射线（屏幕中心）
+pub fn getForwardRay(self: *@This()) Raycast.Ray {
+    return self.getRayFromScreenUV(0.5, 0.5);
+}
 // 引用
 const Imports = @import("imports.zig");
 const Algebra = Imports.Algebra;
