@@ -13,7 +13,7 @@ pub const PlayerSystem = struct {
         var view = game.registry.view(.{
             Comps.Player,
             Comps.Position,
-            Comps.Velocity, // 使用 Velocity 组件而不是 Speed
+            Comps.Velocity,
             Comps.Speed,
         }, .{});
         var iter = view.entityIterator();
@@ -45,7 +45,7 @@ pub const PlayerSystem = struct {
                 // 跳跃检测
                 if (game.input.isKeyPressed(.j)) {
                     // 检查是否在地面上
-                    const terrain_height = game.terrain.getHeightAt(position.vec.x, position.vec.z);
+                    const terrain_height = game.rts_map.terrain.getHeightAt(position.vec.x, position.vec.z);
                     const GROUND_OFFSET: f32 = 0.5;
 
                     if (position.vec.y - GROUND_OFFSET <= terrain_height + 0.1) {

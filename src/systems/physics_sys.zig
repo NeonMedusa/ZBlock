@@ -27,7 +27,7 @@ pub const PhysicsSystem = struct {
             var new_pos = pos.vec.add(vel.vec.scale(dt));
 
             // 获取地形高度
-            const terrain_height = game.terrain.getHeightAt(new_pos.x, new_pos.z);
+            const terrain_height = game.rts_map.terrain.getHeightAt(new_pos.x, new_pos.z);
 
             // 地面碰撞检测
             if (new_pos.y - GROUND_OFFSET <= terrain_height) {

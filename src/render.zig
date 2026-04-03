@@ -1,6 +1,6 @@
 // render.zig
-// 需要为新的模型资源结构重构渲染代码:
 pub fn draw(game: *Game) void {
+    // 每帧开始时重置模型的引用计数，每帧结束时卸载引用计数为0的模型
     game.res_manager.resetRefCount();
     defer game.res_manager.removeZeroRefModel();
 
@@ -52,8 +52,8 @@ pub fn draw(game: *Game) void {
 
     // ！！！！！为地形分配数据（使用记录的索引）
     game.res_manager.entities_data[entity_idx] = .{ .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)) };
-    const terrain_translate = Mat4.fromTranslate(game.terrain.position);
-    const terrain_rotation = Quat.fromAxisAngle(Vec3.unit_y, game.terrain.rotation_y).toMat4();
+    const terrain_translate = Mat4.fromTranslate(game.rts_map.terrain.position);
+    const terrain_rotation = Quat.fromAxisAngle(Vec3.unit_y, game.rts_map.terrain.rotation_y).toMat4();
     const terrain_transform = terrain_translate.mul(terrain_rotation);
     game.res_manager.instances_data[ins_idx] = .{
         .transform = terrain_transform,
@@ -152,12 +152,12 @@ pub fn draw(game: *Game) void {
     }
 
     // ！！！绘制地形！！！！
-    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.terrain.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.terrain.vertex_buffer));
-    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.terrain.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.terrain.index_buffer));
-    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, game.terrain.material.bind_group, 0, null);
+    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.rts_map.terrain.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.rts_map.terrain.vertex_buffer));
+    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.rts_map.terrain.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.rts_map.terrain.index_buffer));
+    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, game.rts_map.terrain.material.bind_group, 0, null);
     Wgpu.wgpuRenderPassEncoderDrawIndexed(
         pass,
-        game.terrain.index_count,
+        game.rts_map.terrain.index_count,
         1,
         0,
         0,

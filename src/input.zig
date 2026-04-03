@@ -100,7 +100,7 @@ pub fn isMouseButtonReleased(self: *Input, mouse_button: MouseButton) bool {
 pub fn getCursorPos(self: *Input) Vec2 {
     return self.cursor_pos;
 }
-///以轮询的方式获取的鼠标位置，或许相较于getCursorPos函数的延迟更高，不推荐使用
+/// 以轮询的方式获取的鼠标位置，或许相较于getCursorPos函数的延迟更高，不推荐使用
 pub fn getCursorPosThroughPolling(self: *Input) Vec2 {
     var x: f64 = 0;
     var y: f64 = 0;
@@ -115,7 +115,7 @@ pub fn getCursorDelta(self: *Input) Vec2 {
 pub fn getScrollDelta(self: *Input) Vec2 {
     return self.scroll_delta;
 }
-///注意：调用此数会触发cursorPosCallback，从而影响到getMouseDelta函数的返回结果
+/// 注意：调用此数会触发cursorPosCallback，从而影响到getMouseDelta函数的返回结果
 pub fn setCursorPos(self: *Input, xpos: f64, ypos: f64) void {
     Glfw.glfwSetCursorPos(self.game_ptr.window.handle, xpos, ypos);
 }

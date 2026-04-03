@@ -69,7 +69,7 @@ pub fn init(window: Window) !@This() {
     // 创建设备
     const required_features = &[_]Wgpu.WGPUFeatureName{
         Wgpu.WGPUFeatureName_IndirectFirstInstance,
-            // wgpu.WGPUFeatureName_TextureCompressionBC,
+            // Wgpu.WGPUFeatureName_TextureCompressionBC,
     };
     var device: Wgpu.WGPUDevice = undefined;
     const device_desc = Wgpu.WGPUDeviceDescriptor{
@@ -256,7 +256,6 @@ pub fn generateVertexAttributes(comptime VertexType: type) [std.meta.fields(Vert
     }
     return attributes;
 }
-
 const std = @import("std");
 
 const Window = @import("window.zig");

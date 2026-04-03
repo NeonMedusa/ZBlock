@@ -42,9 +42,9 @@ pub fn raycastTerrain(terrain: *Terrain, ray: Ray, max_distance: f32) RaycastHit
     const local_dir = worldToLocalDirection(terrain, ray.direction);
     const local_ray = Ray.init(local_origin, local_dir);
 
-    // 2. 计算与包围盒的交点范围
-    const bounds_min = Vec3.new(-terrain.size_x / 2, terrain.height_min, -terrain.size_z / 2);
-    const bounds_max = Vec3.new(terrain.size_x / 2, terrain.height_max, terrain.size_z / 2);
+    // 2. 计算与包围盒的交点范围（最低高度为0，最高为 max_height）
+    const bounds_min = Vec3.new(-terrain.size_x / 2, 0.0, -terrain.size_z / 2);
+    const bounds_max = Vec3.new(terrain.size_x / 2, terrain.max_height, terrain.size_z / 2);
 
     var t_min: f32 = 0;
     var t_max: f32 = max_distance;
@@ -62,7 +62,7 @@ pub fn raycastTerrain(terrain: *Terrain, ray: Ray, max_distance: f32) RaycastHit
     var low = t_min;
     var high = t_max;
 
-    for (0..40) |_| { // 40次迭代足够达到浮点精度
+    for (0..32) |_| { // 32次迭代足够达到浮点精度
         const mid = (low + high) * 0.5;
         const point = local_ray.pointAt(mid);
         const terrain_height = terrain.getHeightLocal(point.x, point.z);

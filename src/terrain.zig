@@ -1,3 +1,4 @@
+// terrain.zig (简化版本，height_min 固定为0)
 const std = @import("std");
 const Imports = @import("imports.zig");
 const Wgpu = Imports.Wgpu;
@@ -11,7 +12,6 @@ const Vec2 = Imports.Vec2;
 const Vec3 = Imports.Vec3;
 const Vec4 = Imports.Vec4;
 const Mat4 = Imports.Mat4;
-
 pub const Terrain = struct {
     allocator: std.mem.Allocator,
     position: Vec3,
@@ -19,8 +19,7 @@ pub const Terrain = struct {
     size_x: f32,
     size_z: f32,
     segments: u32,
-    height_min: f32,
-    height_max: f32,
+    max_height: f32, // 最大高度（最小高度固定为0）
     gctx: *Gctx,
     vertex_buffer: Wgpu.WGPUBuffer,
     index_buffer: Wgpu.WGPUBuffer,
@@ -30,6 +29,7 @@ pub const Terrain = struct {
     colors: []Vec3,
     material: Material,
 
+    pub const MAX_LAYER = 10;
     const EPS = 1e-6;
 
     // ---------- 辅助方法 ----------
@@ -38,11 +38,11 @@ pub const Terrain = struct {
     }
 
     inline fn getActualHeight(self: *Terrain, normalized: f32) f32 {
-        return self.height_min + normalized * (self.height_max - self.height_min);
+        return normalized * self.max_height;
     }
 
     inline fn getNormalizedHeight(self: *Terrain, actual: f32) f32 {
-        return (actual - self.height_min) / (self.height_max - self.height_min);
+        return actual / self.max_height;
     }
 
     // ---------- 插值工具 ----------
@@ -124,7 +124,7 @@ pub const Terrain = struct {
         self.updateBuffers() catch {};
     }
 
-    pub fn raiseAreaLocal(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
+    pub fn modifyHeightLocal(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
         const seg_f = @as(f32, @floatFromInt(self.segments));
         for (0..self.segments + 1) |z| {
             for (0..self.segments + 1) |x| {
@@ -148,13 +148,13 @@ pub const Terrain = struct {
         self.updateBuffers() catch {};
     }
 
-    pub fn raiseAreaWorld(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
+    pub fn modifyHeightWorld(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
         const local = self.worldToLocal(center_x, center_z);
-        self.raiseAreaLocal(local.x, local.z, radius, strength);
+        self.modifyHeightLocal(local.x, local.z, radius, strength);
     }
 
     // ---------- 法线计算 ----------
-    fn calculateNormals(self: *Terrain) void {
+    pub fn calculateNormals(self: *Terrain) void {
         const seg = self.segments;
         const seg_f = @as(f32, @floatFromInt(seg));
         for (0..seg + 1) |z| {
@@ -192,13 +192,12 @@ pub const Terrain = struct {
         }
     }
 
-    fn generateColors(self: *Terrain) void {
-        const range = self.height_max - self.height_min;
+    pub fn generateColors(self: *Terrain) void {
         for (0..self.segments + 1) |z| {
             for (0..self.segments + 1) |x| {
                 const idx = self.getIndex(x, z);
                 const actual = self.getActualHeight(self.heights[idx]);
-                const t = (actual - self.height_min) / range;
+                const t = actual / self.max_height; // 相对高度 [0,1]
                 const color = if (t < 0.3) blk: {
                     const t2 = t / 0.3;
                     break :blk Vec3.new(0.2, 0.4 + t2 * 0.3, 0.2);
@@ -285,7 +284,7 @@ pub const Terrain = struct {
         self.index_count = @intCast(indices.len);
     }
 
-    fn updateBuffers(self: *Terrain) !void {
+    pub fn updateBuffers(self: *Terrain) !void {
         const vertices = try self.generateVertices();
         defer self.allocator.free(vertices);
         Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.vertex_buffer, 0, vertices.ptr, @sizeOf(VertexAttribute) * vertices.len);
@@ -335,7 +334,6 @@ pub const Terrain = struct {
         self.allocator.free(self.colors);
         Wgpu.wgpuBufferRelease(self.vertex_buffer);
         Wgpu.wgpuBufferRelease(self.index_buffer);
-        // 释放材质资源
         if (self.material.color_texture.texture) |t| Wgpu.wgpuTextureRelease(t);
         if (self.material.color_texture.view) |v| Wgpu.wgpuTextureViewRelease(v);
         if (self.material.normal_texture.texture) |t| Wgpu.wgpuTextureRelease(t);
@@ -376,7 +374,7 @@ pub const Terrain = struct {
 
     pub fn getHeightLocal(self: *Terrain, local_x: f32, local_z: f32) f32 {
         const uv = self.getUV(local_x, local_z);
-        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return self.height_min;
+        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return 0.0; // 边界外返回最低高度0
         const norm = self.interpolateHeight(uv.u, uv.v);
         return self.getActualHeight(norm);
     }
@@ -395,9 +393,11 @@ pub const Terrain = struct {
     pub fn setPosition(self: *Terrain, new_pos: Vec3) void {
         self.position = new_pos;
     }
+
     pub fn setRotation(self: *Terrain, radians: f32) void {
         self.rotation_y = radians;
     }
+
     pub fn setRotationDegrees(self: *Terrain, degrees: f32) void {
         self.rotation_y = degrees * std.math.pi / 180.0;
     }
@@ -426,8 +426,7 @@ pub const Terrain = struct {
         size_x: f32,
         size_z: f32,
         segments: u32,
-        height_min: f32,
-        height_max: f32,
+        max_height: f32, // 最大高度（最小高度固定为0）
         render_pipeline: *RenderPipeline,
     ) !Terrain {
         const vertex_count = (segments + 1) * (segments + 1);
@@ -439,8 +438,7 @@ pub const Terrain = struct {
             .size_x = size_x,
             .size_z = size_z,
             .segments = segments,
-            .height_min = height_min,
-            .height_max = height_max,
+            .max_height = max_height,
             .heights = try allocator.alloc(f32, vertex_count),
             .normals = try allocator.alloc(Vec3, vertex_count),
             .colors = try allocator.alloc(Vec3, vertex_count),
@@ -454,6 +452,7 @@ pub const Terrain = struct {
         terrain.generateColors();
         try terrain.createBuffers(gctx);
         try terrain.createMaterial(gctx, render_pipeline);
+
         return terrain;
     }
 };

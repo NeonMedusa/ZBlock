@@ -9,7 +9,7 @@ res_manager: ResManager,
 render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
-terrain: Terrain,
+rts_map: RTSMap,
 player_id: u32 = 0,
 pub fn deinit(self: *@This()) void {
     self.window.deinit();
@@ -18,7 +18,7 @@ pub fn deinit(self: *@This()) void {
     self.render_pipeline.deinit();
     self.registry.deinit();
     self.ui_system.deinit();
-    self.terrain.deinit();
+    self.rts_map.deinit();
     self.allocator.destroy(self);
 }
 pub fn init(allocator: std.mem.Allocator) !*@This() {
@@ -53,20 +53,17 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const ui_system = try UiSystem.init(allocator, &self.gctx, self);
     self.ui_system = ui_system;
 
-    var terrain = try Terrain.init(
+    const rts_map = try RTSMap.init(
         self.allocator,
         &self.gctx,
-        Vec3.new(4, 4, 4),
-        45.0 * std.math.pi / 180.0,
-        32.0,
-        32.0,
-        64,
-        -2.0,
-        2.0,
+        32,
+        32,
+        1,
+        20,
         &self.render_pipeline,
     );
-    terrain.generateRandom(1);
-    self.terrain = terrain;
+    // rts_map.terrain.generateRandom(1);
+    self.rts_map = rts_map;
 
     // 返回实例
     return self;
@@ -119,26 +116,45 @@ pub fn start(self: *Game) !void {
             PlayerMoveSys.update(self);
 
             if (self.input.isKeyPressed(.equal)) {
-                self.terrain.rotation_y += self.window.delta_time;
+                self.rts_map.terrain.rotation_y += self.window.delta_time;
             }
             if (self.input.isKeyPressed(.minus)) {
-                self.terrain.rotation_y -= self.window.delta_time;
+                self.rts_map.terrain.rotation_y -= self.window.delta_time;
             }
 
             // 地形编辑
             if (self.input.isMouseButtonPressed(.mouse_left)) {
                 const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.terrain);
+                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
                 if (hit.hit and hit.hit_type == .terrain) {
-                    self.terrain.raiseAreaWorld(hit.point.x, hit.point.z, 2.0, 0.05);
+                    self.rts_map.terrain.modifyHeightWorld(hit.point.x, hit.point.z, 2.0, 0.01);
                 }
             }
             if (self.input.isMouseButtonPressed(.mouse_right)) {
                 const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.terrain);
+                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
                 if (hit.hit and hit.hit_type == .terrain) {
-                    self.terrain.raiseAreaWorld(hit.point.x, hit.point.z, 2.0, -0.05);
+                    self.rts_map.terrain.modifyHeightWorld(hit.point.x, hit.point.z, 2.0, -0.01);
                 }
+            }
+            // 设置层级
+            if (self.input.isKeyPressed(.num1)) {
+                const ray = self.camera.getForwardRay();
+                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
+                if (hit.hit and hit.hit_type == .terrain)
+                    self.rts_map.setLayer(hit.point.x, hit.point.z, 3.0, 1);
+            }
+            if (self.input.isKeyPressed(.num2)) {
+                const ray = self.camera.getForwardRay();
+                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
+                if (hit.hit and hit.hit_type == .terrain)
+                    self.rts_map.setLayer(hit.point.x, hit.point.z, 3.0, 2);
+            }
+            if (self.input.isKeyPressed(.num3)) {
+                const ray = self.camera.getForwardRay();
+                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
+                if (hit.hit and hit.hit_type == .terrain)
+                    self.rts_map.setLayer(hit.point.x, hit.point.z, 3.0, 3);
             }
         }
         // UI开始新帧
@@ -184,6 +200,6 @@ const SceneUniform = RendCTX.SceneUniform;
 
 const Comps = Imports.Comps;
 
-const Terrain = Imports.Terrain;
-
 const Raycast = @import("raycast.zig");
+
+const RTSMap = Imports.RTSMap;
