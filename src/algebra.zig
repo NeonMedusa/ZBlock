@@ -5,43 +5,43 @@ pub const EPS = 1e-6;
 
 pub const Vec2 = struct {
     x: f32,
-    y: f32,
+    z: f32,
 
-    pub const zero = Vec2{ .x = 0, .y = 0 };
-    pub const one = Vec2{ .x = 1, .y = 1 };
-    pub const unit_x = Vec2{ .x = 1, .y = 0 };
-    pub const unit_y = Vec2{ .x = 0, .y = 1 };
+    pub const zero = Vec2{ .x = 0, .z = 0 };
+    pub const one = Vec2{ .x = 1, .z = 1 };
+    pub const unit_x = Vec2{ .x = 1, .z = 0 };
+    pub const unit_y = Vec2{ .x = 0, .z = 1 };
 
     pub fn new(x: f32, y: f32) Vec2 {
-        return .{ .x = x, .y = y };
+        return .{ .x = x, .z = y };
     }
 
     pub fn add(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x + b.x, .y = a.y + b.y };
+        return .{ .x = a.x + b.x, .z = a.z + b.z };
     }
 
     pub fn sub(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x - b.x, .y = a.y - b.y };
+        return .{ .x = a.x - b.x, .z = a.z - b.z };
     }
 
     pub fn mul(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x * b.x, .y = a.y * b.y };
+        return .{ .x = a.x * b.x, .z = a.z * b.z };
     }
 
     pub fn div(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x / b.x, .y = a.y / b.y };
+        return .{ .x = a.x / b.x, .z = a.z / b.z };
     }
 
     pub fn scale(v: Vec2, s: f32) Vec2 {
-        return .{ .x = v.x * s, .y = v.y * s };
+        return .{ .x = v.x * s, .z = v.z * s };
     }
 
     pub fn neg(v: Vec2) Vec2 {
-        return .{ .x = -v.x, .y = -v.y };
+        return .{ .x = -v.x, .z = -v.z };
     }
 
     pub fn dot(a: Vec2, b: Vec2) f32 {
-        return a.x * b.x + a.y * b.y;
+        return a.x * b.x + a.z * b.z;
     }
 
     pub fn len2(v: Vec2) f32 {
@@ -63,19 +63,19 @@ pub const Vec2 = struct {
     }
 
     pub fn min(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = @min(a.x, b.x), .y = @min(a.y, b.y) };
+        return .{ .x = @min(a.x, b.x), .z = @min(a.z, b.z) };
     }
 
     pub fn max(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = @max(a.x, b.x), .y = @max(a.y, b.y) };
+        return .{ .x = @max(a.x, b.x), .z = @max(a.z, b.z) };
     }
 
     pub fn abs(v: Vec2) Vec2 {
-        return .{ .x = @abs(v.x), .y = @abs(v.y) };
+        return .{ .x = @abs(v.x), .z = @abs(v.z) };
     }
 
     pub fn eql(a: Vec2, b: Vec2) bool {
-        return a.x == b.x and a.y == b.y;
+        return a.x == b.x and a.z == b.z;
     }
 };
 

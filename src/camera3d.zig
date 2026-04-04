@@ -30,7 +30,7 @@ pub fn update(self: *@This(), game: *Game) void {
     const mousePos = input.getCursorPos(); // 获取鼠标位置
     input.setCursorToCenter(); // 重置鼠标位置到窗口中心
     self.yaw += (mousePos.x - window.center_x) * self.sensitivity; // 更新相机角度
-    self.pitch -= (mousePos.y - window.center_y) * self.sensitivity;
+    self.pitch -= (mousePos.z - window.center_y) * self.sensitivity;
     if (self.pitch > 89.0) self.pitch = 89.0; // 限制俯仰角
     if (self.pitch < -89.0) self.pitch = -89.0;
     self.updateVectors(); // 更新相机方向向量
@@ -89,7 +89,7 @@ pub fn getCursorRay(self: *@This()) Raycast.Ray {
     const window = self.game.window;
 
     const mouse_x = mouse_pos.x / window.width;
-    const mouse_y = mouse_pos.y / window.height;
+    const mouse_y = mouse_pos.z / window.height;
 
     return self.getRayFromScreenUV(mouse_x, mouse_y);
 }

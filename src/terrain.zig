@@ -1,4 +1,4 @@
-// terrain.zig (简化版本，height_min 固定为0)
+// terrain.zig (简化版本，height_min 固定为0，使用 Vec2)
 const std = @import("std");
 const Imports = @import("imports.zig");
 const Wgpu = Imports.Wgpu;
@@ -12,6 +12,7 @@ const Vec2 = Imports.Vec2;
 const Vec3 = Imports.Vec3;
 const Vec4 = Imports.Vec4;
 const Mat4 = Imports.Mat4;
+
 pub const Terrain = struct {
     allocator: std.mem.Allocator,
     position: Vec3,
@@ -124,7 +125,7 @@ pub const Terrain = struct {
         self.updateBuffers() catch {};
     }
 
-    pub fn modifyHeightLocal(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
+    pub fn modifyHeightLocal(self: *Terrain, center: Vec2, radius: f32, strength: f32) void {
         const seg_f = @as(f32, @floatFromInt(self.segments));
         for (0..self.segments + 1) |z| {
             for (0..self.segments + 1) |x| {
@@ -132,8 +133,8 @@ pub const Terrain = struct {
                 const v = @as(f32, @floatFromInt(z)) / seg_f;
                 const local_x = (u - 0.5) * self.size_x;
                 const local_z = (v - 0.5) * self.size_z;
-                const dx = local_x - center_x;
-                const dz = local_z - center_z;
+                const dx = local_x - center.x;
+                const dz = local_z - center.z;
                 const dist = @sqrt(dx * dx + dz * dz);
                 if (dist < radius) {
                     const factor = (1.0 - dist / radius) * strength;
@@ -148,9 +149,9 @@ pub const Terrain = struct {
         self.updateBuffers() catch {};
     }
 
-    pub fn modifyHeightWorld(self: *Terrain, center_x: f32, center_z: f32, radius: f32, strength: f32) void {
-        const local = self.worldToLocal(center_x, center_z);
-        self.modifyHeightLocal(local.x, local.z, radius, strength);
+    pub fn modifyHeightWorld(self: *Terrain, center: Vec2, radius: f32, strength: f32) void {
+        const local = self.worldToLocal(center);
+        self.modifyHeightLocal(local, radius, strength);
     }
 
     // ---------- 法线计算 ----------
@@ -342,52 +343,52 @@ pub const Terrain = struct {
         if (self.material.bind_group) |g| Wgpu.wgpuBindGroupRelease(g);
     }
 
-    // ---------- 坐标转换 ----------
-    pub fn worldToLocal(self: *Terrain, world_x: f32, world_z: f32) struct { x: f32, z: f32 } {
-        const dx = world_x - self.position.x;
-        const dz = world_z - self.position.z;
+    // ---------- 坐标转换（使用 Vec2） ----------
+    pub fn worldToLocal(self: *Terrain, world: Vec2) Vec2 {
+        const dx = world.x - self.position.x;
+        const dz = world.z - self.position.z;
         const cos = @cos(self.rotation_y);
         const sin = @sin(self.rotation_y);
-        return .{
-            .x = dx * cos - dz * sin,
-            .z = dx * sin + dz * cos,
-        };
+        return Vec2.new(
+            dx * cos - dz * sin,
+            dx * sin + dz * cos,
+        );
     }
 
-    pub fn localToWorld(self: *Terrain, local_x: f32, local_z: f32) struct { x: f32, z: f32 } {
+    pub fn localToWorld(self: *Terrain, local: Vec2) Vec2 {
         const cos = @cos(self.rotation_y);
         const sin = @sin(self.rotation_y);
-        const world_dx = local_x * cos + local_z * sin;
-        const world_dz = -local_x * sin + local_z * cos;
-        return .{
-            .x = self.position.x + world_dx,
-            .z = self.position.z + world_dz,
-        };
+        const world_dx = local.x * cos + local.z * sin;
+        const world_dz = -local.x * sin + local.z * cos;
+        return Vec2.new(
+            self.position.x + world_dx,
+            self.position.z + world_dz,
+        );
     }
 
-    pub fn getUV(self: *Terrain, local_x: f32, local_z: f32) struct { u: f32, v: f32 } {
-        return .{
-            .u = (local_x + self.size_x * 0.5) / self.size_x,
-            .v = (local_z + self.size_z * 0.5) / self.size_z,
-        };
+    pub fn getUV(self: *Terrain, local: Vec2) Vec2 {
+        return Vec2.new(
+            (local.x + self.size_x * 0.5) / self.size_x,
+            (local.z + self.size_z * 0.5) / self.size_z,
+        );
     }
 
-    pub fn getHeightLocal(self: *Terrain, local_x: f32, local_z: f32) f32 {
-        const uv = self.getUV(local_x, local_z);
-        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return 0.0; // 边界外返回最低高度0
-        const norm = self.interpolateHeight(uv.u, uv.v);
+    pub fn getHeightLocal(self: *Terrain, local: Vec2) f32 {
+        const uv = self.getUV(local);
+        if (uv.x < 0 or uv.x > 1 or uv.z < 0 or uv.z > 1) return 0.0;
+        const norm = self.interpolateHeight(uv.x, uv.z);
         return self.getActualHeight(norm);
     }
 
-    pub fn getHeightAt(self: *Terrain, world_x: f32, world_z: f32) f32 {
-        const local = self.worldToLocal(world_x, world_z);
-        return self.position.y + self.getHeightLocal(local.x, local.z);
+    pub fn getHeightAt(self: *Terrain, world: Vec2) f32 {
+        const local = self.worldToLocal(world);
+        return self.position.y + self.getHeightLocal(local);
     }
 
-    pub fn getNormalLocal(self: *Terrain, local_x: f32, local_z: f32) Vec3 {
-        const uv = self.getUV(local_x, local_z);
-        if (uv.u < 0 or uv.u > 1 or uv.v < 0 or uv.v > 1) return Vec3.new(0, 1, 0);
-        return self.interpolateNormal(uv.u, uv.v);
+    pub fn getNormalLocal(self: *Terrain, local: Vec2) Vec3 {
+        const uv = self.getUV(local);
+        if (uv.x < 0 or uv.x > 1 or uv.z < 0 or uv.z > 1) return Vec3.new(0, 1, 0);
+        return self.interpolateNormal(uv.x, uv.z);
     }
 
     pub fn setPosition(self: *Terrain, new_pos: Vec3) void {
@@ -426,7 +427,7 @@ pub const Terrain = struct {
         size_x: f32,
         size_z: f32,
         segments: u32,
-        max_height: f32, // 最大高度（最小高度固定为0）
+        max_height: f32,
         render_pipeline: *RenderPipeline,
     ) !Terrain {
         const vertex_count = (segments + 1) * (segments + 1);

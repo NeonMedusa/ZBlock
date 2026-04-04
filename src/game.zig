@@ -12,6 +12,16 @@ ubo: SceneUniform,
 rts_map: RTSMap,
 player_id: u32 = 0,
 pub fn deinit(self: *@This()) void {
+    // 清理所有未完成的 MoveOrder 组件
+    var view = self.registry.view(.{Comps.MoveOrder}, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        var order = self.registry.get(Comps.MoveOrder, entity);
+        order.deinit();
+        self.registry.remove(Comps.MoveOrder, entity);
+    }
+
+    // 原有的清理代码
     self.window.deinit();
     self.gctx.deinit();
     self.res_manager.deinit(self.allocator);
@@ -21,6 +31,7 @@ pub fn deinit(self: *@This()) void {
     self.rts_map.deinit();
     self.allocator.destroy(self);
 }
+
 pub fn init(allocator: std.mem.Allocator) !*@This() {
     var self = try allocator.create(@This());
     self.allocator = allocator;
@@ -58,8 +69,6 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
         &self.gctx,
         32,
         32,
-        1,
-        20,
         &self.render_pipeline,
     );
     // rts_map.terrain.generateRandom(1);
@@ -73,7 +82,7 @@ pub fn start(self: *Game) !void {
     // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
 
-    // 加载一个模型并使其成为一个实体的组件
+    // 创建用于测试的实体
     const e1 = self.registry.create();
     self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
     self.registry.add(e1, Comps.Position{ .vec = .new(1, 3, 0) });
@@ -81,23 +90,6 @@ pub fn start(self: *Game) !void {
 
     self.registry.add(e1, Comps.Player{ .id = self.player_id });
     self.registry.add(e1, Comps.Speed{ .value = 3 });
-
-    // 另一个实体
-    const e2 = self.registry.create();
-    self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
-    self.registry.add(e2, Comps.Position{ .vec = .new(3, 3, 0) });
-    self.registry.add(e2, Comps.Velocity{ .vec = Vec3.zero });
-
-    // 第三个实体
-    const e3 = self.registry.create();
-    self.registry.add(e3, Comps.ModelName{ .string = "BarramundiFish" });
-    self.registry.add(e3, Comps.Position{ .vec = .new(5, 3, 0) });
-    self.registry.add(e3, Comps.Velocity{ .vec = Vec3.zero });
-    // 第四个实体
-    const e4 = self.registry.create();
-    self.registry.add(e4, Comps.ModelName{ .string = "BarramundiFish" });
-    self.registry.add(e4, Comps.Position{ .vec = .new(7, 3, 0) });
-    self.registry.add(e4, Comps.Velocity{ .vec = Vec3.zero });
 
     const Physys = @import("systems/physics_sys.zig").PhysicsSystem;
     const PlayerMoveSys = @import("systems/player_movement_system.zig").PlayerSystem;
@@ -113,7 +105,7 @@ pub fn start(self: *Game) !void {
             self.camera.update(self);
 
             Physys.update(self);
-            PlayerMoveSys.update(self);
+            try PlayerMoveSys.update(self);
 
             if (self.input.isKeyPressed(.equal)) {
                 self.rts_map.terrain.rotation_y += self.window.delta_time;
@@ -127,34 +119,53 @@ pub fn start(self: *Game) !void {
                 const ray = self.camera.getForwardRay();
                 const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
                 if (hit.hit and hit.hit_type == .terrain) {
-                    self.rts_map.terrain.modifyHeightWorld(hit.point.x, hit.point.z, 2.0, 0.01);
+                    self.rts_map.terrain.modifyHeightWorld(Vec2.new(hit.point.x, hit.point.z), 2.0, 0.01);
                 }
             }
             if (self.input.isMouseButtonPressed(.mouse_right)) {
                 const ray = self.camera.getForwardRay();
                 const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
                 if (hit.hit and hit.hit_type == .terrain) {
-                    self.rts_map.terrain.modifyHeightWorld(hit.point.x, hit.point.z, 2.0, -0.01);
+                    self.rts_map.terrain.modifyHeightWorld(Vec2.new(hit.point.x, hit.point.z), 2.0, -0.01);
                 }
             }
+
+            // 创建不可达区域
+            if (self.input.isKeyPressed(.b)) {
+                const ray = self.camera.getForwardRay();
+                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
+                if (hit.hit and hit.hit_type == .terrain) {
+                    self.rts_map.sculptAndBlock(Vec2.new(hit.point.x, hit.point.z), 3.0, 0.01);
+                }
+            }
+
             // 设置层级
             if (self.input.isKeyPressed(.num1)) {
                 const ray = self.camera.getForwardRay();
                 const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
                 if (hit.hit and hit.hit_type == .terrain)
-                    self.rts_map.setLayer(hit.point.x, hit.point.z, 3.0, 1);
+                    self.rts_map.setLayer(Vec2.new(hit.point.x, hit.point.z), 3.0, 1);
             }
+            // 创建斜坡
+            if (self.input.isKeyPressed(.r)) {
+                const ray = self.camera.getForwardRay();
+                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
+                if (hit.hit and hit.hit_type == .terrain) {
+                    self.rts_map.createRampBrush(Vec2.new(hit.point.x, hit.point.z), 3.0);
+                }
+            }
+
             if (self.input.isKeyPressed(.num2)) {
                 const ray = self.camera.getForwardRay();
                 const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
                 if (hit.hit and hit.hit_type == .terrain)
-                    self.rts_map.setLayer(hit.point.x, hit.point.z, 3.0, 2);
+                    self.rts_map.setLayer(Vec2.new(hit.point.x, hit.point.z), 3.0, 2);
             }
             if (self.input.isKeyPressed(.num3)) {
                 const ray = self.camera.getForwardRay();
                 const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
                 if (hit.hit and hit.hit_type == .terrain)
-                    self.rts_map.setLayer(hit.point.x, hit.point.z, 3.0, 3);
+                    self.rts_map.setLayer(Vec2.new(hit.point.x, hit.point.z), 3.0, 3);
             }
         }
         // UI开始新帧
@@ -178,6 +189,7 @@ const Glfw = Imports.Glfw;
 const Gltf = Imports.Gltf;
 
 const Algebra = Imports.Algebra;
+const Vec2 = Algebra.Vec2;
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 
