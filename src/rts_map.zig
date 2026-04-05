@@ -80,31 +80,28 @@ pub const RTSMap = struct {
         return @as(f32, @floatFromInt(layer)) * step + step * 0.5;
     }
 
-    // --- 地形视觉刷新 ---
-    fn refreshCell(self: *RTSMap, cx: u32, cz: u32) void {
+    // --- 地形视觉刷新：直接根据顶点世界坐标设置其所属格子的基准高度 ---
+    fn refreshArea(self: *RTSMap, min_x: u32, min_z: u32, max_x: u32, max_z: u32) void {
         const seg = self.terrain.segments;
         const seg_f = @as(f32, @floatFromInt(seg));
-        const target = layerToHeight(self.cells[cz * self.width + cx].layer);
-        const u_min = @as(f32, @floatFromInt(cx)) / @as(f32, @floatFromInt(self.width));
-        const u_max = @as(f32, @floatFromInt(cx + 1)) / @as(f32, @floatFromInt(self.width));
-        const v_min = @as(f32, @floatFromInt(cz)) / @as(f32, @floatFromInt(self.height));
-        const v_max = @as(f32, @floatFromInt(cz + 1)) / @as(f32, @floatFromInt(self.height));
+        const size_x = self.terrain.size_x;
+        const size_z = self.terrain.size_z;
+
         for (0..seg + 1) |iz| {
             for (0..seg + 1) |ix| {
                 const u = @as(f32, @floatFromInt(ix)) / seg_f;
                 const v = @as(f32, @floatFromInt(iz)) / seg_f;
-                if (u >= u_min and u <= u_max and v >= v_min and v <= v_max) {
+                const wx = (u - 0.5) * size_x;
+                const wz = (v - 0.5) * size_z;
+
+                // 找到顶点所属的格子
+                const cell = self.worldToCell(Vec2.new(wx, wz)) orelse continue;
+                if (cell.x >= min_x and cell.x <= max_x and cell.z >= min_z and cell.z <= max_z) {
+                    const layer = self.cells[cell.z * self.width + cell.x].layer;
+                    const target = layerToHeight(layer);
                     const idx = iz * (seg + 1) + ix;
                     self.terrain.heights[idx] = target;
                 }
-            }
-        }
-    }
-
-    fn refreshRect(self: *RTSMap, min_x: u32, min_z: u32, max_x: u32, max_z: u32) void {
-        for (min_z..max_z + 1) |z| {
-            for (min_x..max_x + 1) |x| {
-                self.refreshCell(@intCast(x), @intCast(z));
             }
         }
     }
@@ -124,22 +121,13 @@ pub const RTSMap = struct {
                 const dx = world.x - center.x;
                 const dz = world.z - center.z;
                 if (dx * dx + dz * dz <= radius * radius) {
-                    self.cells[z * self.width + x].layer = target_layer;
+                    const idx = z * self.width + x;
+                    self.cells[idx].layer = target_layer;
+                    self.cells[idx].slope_mask = 0;
                 }
             }
         }
-        // 清除斜坡
-        for (min_z..max_z + 1) |z| {
-            for (min_x..max_x + 1) |x| {
-                const world = self.cellToWorld(@intCast(x), @intCast(z));
-                const dx = world.x - center.x;
-                const dz = world.z - center.z;
-                if (dx * dx + dz * dz <= radius * radius) {
-                    self.cells[z * self.width + x].slope_mask = 0;
-                }
-            }
-        }
-        self.refreshRect(min_x, min_z, max_x, max_z);
+        self.refreshArea(min_x, min_z, max_x, max_z);
         self.terrain.calculateNormals();
         self.terrain.generateColors();
         self.terrain.updateBuffers() catch {};
@@ -182,18 +170,48 @@ pub const RTSMap = struct {
         self.cells[idx2].slope_mask |= @as(u4, 1) << @intCast(OPPOSITE_DIR[dir_from_1]);
     }
 
-    fn applyVisualSlope(self: *RTSMap, a: struct { x: u32, z: u32 }, b: struct { x: u32, z: u32 }, h1: f32, h2: f32) void {
-        const start = self.cellToWorld(a.x, a.z);
-        const end = self.cellToWorld(b.x, b.z);
-        const dx = end.x - start.x;
-        const dz = end.z - start.z;
-        const len = @sqrt(dx * dx + dz * dz);
-        if (len < 0.001) return;
-        const dir_x = dx / len;
-        const dir_z = dz / len;
-        const perp_x = -dir_z;
-        const perp_z = dir_x;
-        const half_width = CELL_SIZE * 1; // 斜坡宽度
+    fn applyVisualSlope(self: *RTSMap, x1: u32, z1: u32, x2: u32, z2: u32, h1: f32, h2: f32) void {
+        const cell_size = CELL_SIZE;
+        const half = cell_size * 0.5;
+        const RAMP_LENGTH_CELLS = 3;
+
+        // 确定高层和低层格子
+        var high_x = x1;
+        var high_z = z1;
+        var low_x = x2;
+        var low_z = z2;
+        var high_h = h1;
+        var low_h = h2;
+        if (h1 < h2) {
+            high_x = x2;
+            high_z = z2;
+            low_x = x1;
+            low_z = z1;
+            high_h = h2;
+            low_h = h1;
+        }
+
+        const high_center = self.cellToWorld(high_x, high_z);
+        const low_center = self.cellToWorld(low_x, low_z);
+
+        const dir_x = low_center.x - high_center.x;
+        const dir_z = low_center.z - high_center.z;
+        const len_dir = @sqrt(dir_x * dir_x + dir_z * dir_z);
+        if (len_dir < 0.001) return;
+        const norm_dir_x = dir_x / len_dir;
+        const norm_dir_z = dir_z / len_dir;
+
+        const start_x = high_center.x + norm_dir_x * half;
+        const start_z = high_center.z + norm_dir_z * half;
+
+        const ramp_length = RAMP_LENGTH_CELLS * cell_size;
+        const end_x = start_x + norm_dir_x * ramp_length;
+        const end_z = start_z + norm_dir_z * ramp_length;
+
+        const min_x = @min(high_center.x - cell_size, end_x - cell_size);
+        const max_x = @max(high_center.x + cell_size, end_x + cell_size);
+        const min_z = @min(high_center.z - cell_size, end_z - cell_size);
+        const max_z = @max(high_center.z + cell_size, end_z + cell_size);
 
         const seg = self.terrain.segments;
         const seg_f = @as(f32, @floatFromInt(seg));
@@ -206,15 +224,17 @@ pub const RTSMap = struct {
                 const v = @as(f32, @floatFromInt(iz)) / seg_f;
                 const wx = (u - 0.5) * size_x;
                 const wz = (v - 0.5) * size_z;
-                const dxw = wx - start.x;
-                const dzw = wz - start.z;
-                const t = dxw * dir_x + dzw * dir_z;
-                const perp = @abs(dxw * perp_x + dzw * perp_z);
-                if (perp < half_width and t >= 0 and t <= len) {
-                    const blend = t / len;
-                    const target = h1 + (h2 - h1) * blend;
+
+                if (wx < min_x or wx > max_x or wz < min_z or wz > max_z) continue;
+
+                const dx = wx - start_x;
+                const dz = wz - start_z;
+                const proj = dx * norm_dir_x + dz * norm_dir_z;
+                if (proj >= 0 and proj <= ramp_length) {
+                    const t = proj / ramp_length;
+                    const target_h = high_h + (low_h - high_h) * t;
                     const idx = iz * (seg + 1) + ix;
-                    self.terrain.heights[idx] = target;
+                    self.terrain.heights[idx] = target_h;
                 }
             }
         }
@@ -228,8 +248,12 @@ pub const RTSMap = struct {
         const min_z = if (center_cell.z >= cell_radius) center_cell.z - cell_radius else 0;
         const max_z = @min(center_cell.z + cell_radius, self.height - 1);
 
-        var affected = std.AutoHashMap(u32, void).init(self.allocator);
-        defer affected.deinit();
+        // 记录受影响的格子范围
+        var affected_min_x = self.width;
+        var affected_max_x: u32 = 0;
+        var affected_min_z = self.height;
+        var affected_max_z: u32 = 0;
+
         var ramps = std.ArrayList(struct { x1: u32, z1: u32, x2: u32, z2: u32, dir: u4 }){};
         defer ramps.deinit(self.allocator);
 
@@ -254,8 +278,18 @@ pub const RTSMap = struct {
                                     .z2 = @intCast(nz),
                                     .dir = @intCast(dir),
                                 }) catch unreachable;
-                                affected.put(@as(u32, @intCast(z)) * self.width + @as(u32, @intCast(x)), {}) catch unreachable;
-                                affected.put(@as(u32, @intCast(nz)) * self.width + @as(u32, @intCast(nx)), {}) catch unreachable;
+
+                                // 更新受影响格子范围
+                                if (x < affected_min_x) affected_min_x = @intCast(x);
+                                if (x > affected_max_x) affected_max_x = @intCast(x);
+                                if (z < affected_min_z) affected_min_z = @intCast(z);
+                                if (z > affected_max_z) affected_max_z = @intCast(z);
+                                const ux = @as(u32, @intCast(nx));
+                                const uz = @as(u32, @intCast(nz));
+                                if (ux < affected_min_x) affected_min_x = ux;
+                                if (ux > affected_max_x) affected_max_x = ux;
+                                if (uz < affected_min_z) affected_min_z = uz;
+                                if (uz > affected_max_z) affected_max_z = uz;
                             }
                         }
                     }
@@ -263,18 +297,16 @@ pub const RTSMap = struct {
             }
         }
 
-        var it = affected.iterator();
-        while (it.next()) |entry| {
-            const idx = entry.key_ptr.*;
-            const x = idx % self.width;
-            const z = idx / self.width;
-            self.refreshCell(x, z);
+        // 刷新受影响区域内的所有格子为基准高度
+        if (affected_min_x <= affected_max_x and affected_min_z <= affected_max_z) {
+            self.refreshArea(affected_min_x, affected_min_z, affected_max_x, affected_max_z);
         }
 
+        // 应用视觉斜坡（覆盖斜坡区域的顶点）
         for (ramps.items) |r| {
             const h1 = layerToHeight(self.cells[r.z1 * self.width + r.x1].layer);
             const h2 = layerToHeight(self.cells[r.z2 * self.width + r.x2].layer);
-            self.applyVisualSlope(.{ .x = r.x1, .z = r.z1 }, .{ .x = r.x2, .z = r.z2 }, h1, h2);
+            self.applyVisualSlope(r.x1, r.z1, r.x2, r.z2, h1, h2);
         }
 
         self.terrain.calculateNormals();
