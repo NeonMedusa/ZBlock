@@ -576,6 +576,38 @@ pub const InstanceData = struct {
     _padding: [3]f32 = undefined,
 };
 
+// 创建默认材质（has_base_color为0，表示没有基础色彩纹理）
+pub fn createDefaultMaterial(gctx: *Gctx, render_pipeline: *RenderPipeline) !Material {
+    const default_tex = try createDefaultTexture(gctx);
+    const material_constants = MaterialConstants{
+        .has_base_color = 0,
+        .has_normal = 0,
+        ._padding = .{ 0, 0 },
+    };
+    const uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+        .size = @sizeOf(MaterialConstants),
+        .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
+        .mappedAtCreation = 0,
+    });
+    Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &material_constants, @sizeOf(MaterialConstants));
+
+    const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
+        .layout = render_pipeline.material_bgl,
+        .entryCount = 3,
+        .entries = &[_]Wgpu.WGPUBindGroupEntry{
+            .{ .binding = 0, .buffer = uniform_buffer, .size = Wgpu.wgpuBufferGetSize(uniform_buffer) },
+            .{ .binding = 1, .textureView = default_tex.view },
+            .{ .binding = 2, .textureView = default_tex.view },
+        },
+    });
+    return Material{
+        .color_texture = default_tex,
+        .normal_texture = default_tex,
+        .uniform_buffer = uniform_buffer,
+        .bind_group = bind_group,
+    };
+}
+
 const std = @import("std");
 const Gctx = @import("gctx.zig");
 

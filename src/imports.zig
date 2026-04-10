@@ -18,6 +18,7 @@ pub const Gctx = @import("gctx.zig");
 
 pub const Algebra = @import("algebra.zig");
 pub const Vec2 = Algebra.Vec2;
+pub const Vec2u = Algebra.Vec2u;
 pub const Vec3 = Algebra.Vec3;
 pub const Vec4 = Algebra.Vec4;
 pub const Quat = Algebra.Quat;

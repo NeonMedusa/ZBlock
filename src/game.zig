@@ -6,30 +6,77 @@ input: Input,
 registry: ECS.Registry,
 ui_system: UiSystem,
 res_manager: ResManager,
+wireframe_pipeline: WireframePipeline,
 render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 rts_map: RTSMap,
 player_id: u32 = 0,
-pub fn deinit(self: *@This()) void {
-    // 清理所有未完成的 MoveOrder 组件
-    var view = self.registry.view(.{Comps.MoveOrder}, .{});
-    var iter = view.entityIterator();
-    while (iter.next()) |entity| {
-        var order = self.registry.get(Comps.MoveOrder, entity);
-        order.deinit();
-        self.registry.remove(Comps.MoveOrder, entity);
-    }
 
-    // 原有的清理代码
-    self.window.deinit();
-    self.gctx.deinit();
-    self.res_manager.deinit(self.allocator);
-    self.render_pipeline.deinit();
-    self.registry.deinit();
-    self.ui_system.deinit();
-    self.rts_map.deinit();
-    self.allocator.destroy(self);
+// 开始游戏
+pub fn start(self: *Game) !void {
+    // 初始化主菜单
+    var main_menu = @import("ui/main_menu.zig"){};
+
+    // 创建用于测试的实体
+    const e1 = self.registry.create();
+    self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
+    self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
+    self.registry.add(e1, Comps.Velocity{ .vec = Vec3.zero });
+    self.registry.add(e1, Comps.Player{ .id = self.player_id });
+    self.registry.add(e1, Comps.Speed{ .value = 3 });
+
+    const enable_game_loop = true;
+    // 主循环
+    while (!self.window.shouldClose() and enable_game_loop) {
+        // 先重置输入状态
+        self.input.beginFrame();
+        // 再更新窗口事件
+        self.window.pollEvents();
+        // 如果主菜单不可见，则更新世界和摄像头
+        if (!main_menu.visible) {
+            // 更新摄像头
+            self.camera.update(self);
+
+            // 鼠标点击插入点
+            if (self.input.isMouseButtonDown(.mouse_left)) {
+                const ray = self.camera.getForwardRay();
+                if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
+                    const pt = Vec2.new(hit.point.x, hit.point.z);
+                    const v_idx = try self.rts_map.cdt.addVertex(pt);
+                    try self.rts_map.cdt.insertVertex(v_idx);
+                    try self.rts_map.updateMeshBuffers();
+                }
+            }
+
+            // // 处理鼠标点击获取路径起点和终点
+            // if (self.input.isMouseButtonDown(.mouse_left)) {
+            //     const ray = self.camera.getForwardRay();
+            //     if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
+            //         self.rts_map.setPathStart(hit.point.x, hit.point.z) catch |err| {
+            //             std.debug.print("设置路径起点失败: {}\n", .{err});
+            //         };
+            //     }
+            // }
+
+            // if (self.input.isMouseButtonDown(.mouse_right)) {
+            //     const ray = self.camera.getForwardRay();
+            //     if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
+            //         self.rts_map.setPathEnd(hit.point.x, hit.point.z) catch |err| {
+            //             std.debug.print("设置路径终点失败: {}\n", .{err});
+            //         };
+            //     }
+            // }
+        }
+        // UI开始新帧
+        self.ui_system.beginFrame();
+        // 如果主菜单可见，则渲染主菜单
+        main_menu.update(self);
+        // UI帧结束
+        try self.ui_system.endFrame(&self.gctx);
+        // 渲染
+        Render.draw(self);
+    }
 }
 
 pub fn init(allocator: std.mem.Allocator) !*@This() {
@@ -47,12 +94,18 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 初始化资源管理器
     const res_manager = try ResManager.init(allocator, &self.gctx, &self.render_pipeline);
     self.res_manager = res_manager;
+
     // 创建渲染管线
-    const render_pipeline = try RenderPipeline.init(
+    self.render_pipeline = try RenderPipeline.init(
         self,
         "resources/shaders/render_shader.wgsl",
     );
-    self.render_pipeline = render_pipeline;
+    // 线框管线（调试用）
+    self.wireframe_pipeline = try WireframePipeline.init(
+        self,
+        "resources/shaders/wireframe_shader.wgsl",
+    );
+
     // 初始化摄像头
     self.camera = Camera3D.init(self);
     // 初始化ubo
@@ -77,106 +130,25 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 返回实例
     return self;
 }
-// 开始游戏
-pub fn start(self: *Game) !void {
-    // 初始化主菜单
-    var main_menu = @import("ui/main_menu.zig"){};
 
-    // 创建用于测试的实体
-    const e1 = self.registry.create();
-    self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
-    self.registry.add(e1, Comps.Position{ .vec = .new(1, 3, 0) });
-    self.registry.add(e1, Comps.Velocity{ .vec = Vec3.zero });
-
-    self.registry.add(e1, Comps.Player{ .id = self.player_id });
-    self.registry.add(e1, Comps.Speed{ .value = 3 });
-
-    const Physys = @import("systems/physics_sys.zig").PhysicsSystem;
-    const PlayerMoveSys = @import("systems/player_movement_system.zig").PlayerSystem;
-    // 主循环
-    while (!self.window.shouldClose()) {
-        // 先重置输入状态
-        self.input.beginFrame();
-        // 再更新窗口事件
-        self.window.pollEvents();
-        // 如果主菜单不可见，则更新世界和摄像头
-        if (!main_menu.visible) {
-            // 更新摄像头
-            self.camera.update(self);
-
-            Physys.update(self);
-            try PlayerMoveSys.update(self);
-
-            if (self.input.isKeyPressed(.equal)) {
-                self.rts_map.terrain.rotation_y += self.window.delta_time;
-            }
-            if (self.input.isKeyPressed(.minus)) {
-                self.rts_map.terrain.rotation_y -= self.window.delta_time;
-            }
-
-            // 地形编辑
-            if (self.input.isMouseButtonPressed(.mouse_left)) {
-                const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
-                if (hit.hit and hit.hit_type == .terrain) {
-                    self.rts_map.terrain.modifyHeightWorld(Vec2.new(hit.point.x, hit.point.z), 2.0, 0.01);
-                }
-            }
-            if (self.input.isMouseButtonPressed(.mouse_right)) {
-                const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
-                if (hit.hit and hit.hit_type == .terrain) {
-                    self.rts_map.terrain.modifyHeightWorld(Vec2.new(hit.point.x, hit.point.z), 2.0, -0.01);
-                }
-            }
-
-            // 创建不可达区域
-            if (self.input.isKeyPressed(.b)) {
-                const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
-                if (hit.hit and hit.hit_type == .terrain) {
-                    self.rts_map.sculptAndBlock(Vec2.new(hit.point.x, hit.point.z), 3.0, 0.01);
-                }
-            }
-
-            // 设置层级
-            if (self.input.isKeyPressed(.num1)) {
-                const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
-                if (hit.hit and hit.hit_type == .terrain)
-                    self.rts_map.setLayer(Vec2.new(hit.point.x, hit.point.z), 3.0, 1);
-            }
-            // 创建斜坡
-            if (self.input.isKeyPressed(.r)) {
-                const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
-                if (hit.hit and hit.hit_type == .terrain) {
-                    self.rts_map.createRampBrush(Vec2.new(hit.point.x, hit.point.z), 3.0);
-                }
-            }
-
-            if (self.input.isKeyPressed(.num2)) {
-                const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
-                if (hit.hit and hit.hit_type == .terrain)
-                    self.rts_map.setLayer(Vec2.new(hit.point.x, hit.point.z), 3.0, 2);
-            }
-            if (self.input.isKeyPressed(.num3)) {
-                const ray = self.camera.getForwardRay();
-                const hit = Raycast.raycast(ray, 100.0, &self.rts_map.terrain);
-                if (hit.hit and hit.hit_type == .terrain)
-                    self.rts_map.setLayer(Vec2.new(hit.point.x, hit.point.z), 3.0, 3);
-            }
-        }
-        // UI开始新帧
-        self.ui_system.beginFrame();
-        // 如果主菜单可见，则渲染主菜单
-        main_menu.update(self);
-        // UI帧结束
-        try self.ui_system.endFrame(&self.gctx);
-        // 渲染
-        Render.draw(self);
+pub fn deinit(self: *@This()) void {
+    // 清理所有未完成的 MoveOrder 组件
+    var view = self.registry.view(.{Comps.MoveOrder}, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        var order = self.registry.get(Comps.MoveOrder, entity);
+        order.deinit();
+        self.registry.remove(Comps.MoveOrder, entity);
     }
+    self.window.deinit();
+    self.gctx.deinit();
+    self.res_manager.deinit(self.allocator);
+    self.render_pipeline.deinit();
+    self.render_pipeline.deinit();
+    self.registry.deinit();
+    self.ui_system.deinit();
+    self.rts_map.deinit();
+    self.allocator.destroy(self);
 }
 
 const Game = @This();
@@ -214,4 +186,6 @@ const Comps = Imports.Comps;
 
 const Raycast = @import("raycast.zig");
 
-const RTSMap = Imports.RTSMap;
+const RTSMap = @import("rts_map.zig").RTSMap;
+
+const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;

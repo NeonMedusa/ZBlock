@@ -132,12 +132,12 @@ fn rayAABBIntersect(ray: Ray, min: Vec3, max: Vec3, t_min: *f32, t_max: *f32) bo
 
 fn worldToLocal(terrain: *Terrain, world: Vec3) Vec3 {
     const local_xz = terrain.worldToLocal(Vec2.new(world.x, world.z));
-    return Vec3.new(local_xz.x, world.y - terrain.position.y, local_xz.z);
+    return Vec3.new(local_xz.x, world.y - terrain.position.y, local_xz.y);
 }
 
 fn localToWorld(terrain: *Terrain, local: Vec3) Vec3 {
     const world_xz = terrain.localToWorld(Vec2.new(local.x, local.z));
-    return Vec3.new(world_xz.x, terrain.position.y + local.y, world_xz.z);
+    return Vec3.new(world_xz.x, terrain.position.y + local.y, world_xz.y);
 }
 
 fn worldToLocalDirection(terrain: *Terrain, world_dir: Vec3) Vec3 {

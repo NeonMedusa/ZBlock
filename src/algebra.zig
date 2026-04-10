@@ -5,43 +5,43 @@ pub const EPS = 1e-6;
 
 pub const Vec2 = struct {
     x: f32,
-    z: f32,
+    y: f32,
 
-    pub const zero = Vec2{ .x = 0, .z = 0 };
-    pub const one = Vec2{ .x = 1, .z = 1 };
-    pub const unit_x = Vec2{ .x = 1, .z = 0 };
-    pub const unit_y = Vec2{ .x = 0, .z = 1 };
+    pub const zero = Vec2{ .x = 0, .y = 0 };
+    pub const one = Vec2{ .x = 1, .y = 1 };
+    pub const unit_x = Vec2{ .x = 1, .y = 0 };
+    pub const unit_y = Vec2{ .x = 0, .y = 1 };
 
     pub fn new(x: f32, y: f32) Vec2 {
-        return .{ .x = x, .z = y };
+        return .{ .x = x, .y = y };
     }
 
     pub fn add(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x + b.x, .z = a.z + b.z };
+        return .{ .x = a.x + b.x, .y = a.y + b.y };
     }
 
     pub fn sub(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x - b.x, .z = a.z - b.z };
+        return .{ .x = a.x - b.x, .y = a.y - b.y };
     }
 
     pub fn mul(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x * b.x, .z = a.z * b.z };
+        return .{ .x = a.x * b.x, .y = a.y * b.y };
     }
 
     pub fn div(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = a.x / b.x, .z = a.z / b.z };
+        return .{ .x = a.x / b.x, .y = a.y / b.y };
     }
 
     pub fn scale(v: Vec2, s: f32) Vec2 {
-        return .{ .x = v.x * s, .z = v.z * s };
+        return .{ .x = v.x * s, .y = v.y * s };
     }
 
     pub fn neg(v: Vec2) Vec2 {
-        return .{ .x = -v.x, .z = -v.z };
+        return .{ .x = -v.x, .y = -v.y };
     }
 
     pub fn dot(a: Vec2, b: Vec2) f32 {
-        return a.x * b.x + a.z * b.z;
+        return a.x * b.x + a.y * b.y;
     }
 
     pub fn len2(v: Vec2) f32 {
@@ -63,19 +63,85 @@ pub const Vec2 = struct {
     }
 
     pub fn min(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = @min(a.x, b.x), .z = @min(a.z, b.z) };
+        return .{ .x = @min(a.x, b.x), .y = @min(a.y, b.y) };
     }
 
     pub fn max(a: Vec2, b: Vec2) Vec2 {
-        return .{ .x = @max(a.x, b.x), .z = @max(a.z, b.z) };
+        return .{ .x = @max(a.x, b.x), .y = @max(a.y, b.y) };
     }
 
     pub fn abs(v: Vec2) Vec2 {
-        return .{ .x = @abs(v.x), .z = @abs(v.z) };
+        return .{ .x = @abs(v.x), .y = @abs(v.y) };
     }
 
     pub fn eql(a: Vec2, b: Vec2) bool {
+        return a.x == b.x and a.y == b.y;
+    }
+
+    /// 2D 叉积，返回标量 (a.x * b.z - a.z * b.x)
+    pub fn cross(a: Vec2, b: Vec2) f32 {
+        return a.x * b.y - a.y * b.x;
+    }
+
+    /// 计算从 a 到 b 再到 c 的有向面积（三角形面积的两倍）
+    /// 正值表示 a→b→c 为逆时针顺序，负值为顺时针，零表示共线
+    pub fn signedArea2(a: Vec2, b: Vec2, c: Vec2) f32 {
+        return cross(sub(b, a), sub(c, a));
+    }
+
+    /// 返回当前向量逆时针旋转 90° 的结果 ( -z, x )
+    pub fn perp(v: Vec2) Vec2 {
+        return .{ .x = -v.y, .y = v.x };
+    }
+};
+
+pub const Vec2u = struct {
+    x: u32,
+    z: u32,
+
+    pub const zero = Vec2u{ .x = 0, .z = 0 };
+    pub const one = Vec2u{ .x = 1, .z = 1 };
+
+    pub fn new(x: u32, z: u32) Vec2u {
+        return .{ .x = x, .z = z };
+    }
+
+    pub fn add(a: Vec2u, b: Vec2u) Vec2u {
+        return .{ .x = a.x + b.x, .z = a.z + b.z };
+    }
+
+    pub fn sub(a: Vec2u, b: Vec2u) Vec2u {
+        return .{ .x = a.x - b.x, .z = a.z - b.z };
+    }
+
+    pub fn eql(a: Vec2u, b: Vec2u) bool {
         return a.x == b.x and a.z == b.z;
+    }
+
+    pub fn toVec2(self: Vec2u) Vec2 {
+        return Vec2.new(@floatFromInt(self.x), @floatFromInt(self.z));
+    }
+
+    pub fn fromVec2(v: Vec2) Vec2u {
+        return Vec2u.new(@intFromFloat(@round(v.x)), @intFromFloat(@round(v.y)));
+    }
+
+    pub fn cross(a: Vec2u, b: Vec2u, c: Vec2u) i64 {
+        const abx = @as(i64, b.x) - @as(i64, a.x);
+        const abz = @as(i64, b.z) - @as(i64, a.z);
+        const acx = @as(i64, c.x) - @as(i64, a.x);
+        const acz = @as(i64, c.z) - @as(i64, a.z);
+        return abx * acz - abz * acx;
+    }
+
+    pub fn dot(a: Vec2u, b: Vec2u) u64 {
+        return @as(u64, a.x) * @as(u64, b.x) + @as(u64, a.z) * @as(u64, b.z);
+    }
+
+    pub fn distSq(a: Vec2u, b: Vec2u) u64 {
+        const dx = @as(i64, a.x) - @as(i64, b.x);
+        const dz = @as(i64, a.z) - @as(i64, b.z);
+        return @intCast(dx * dx + dz * dz);
     }
 };
 

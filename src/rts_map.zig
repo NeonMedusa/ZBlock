@@ -1,541 +1,304 @@
 const std = @import("std");
 const Imports = @import("imports.zig");
-const Vec2 = Imports.Vec2;
-const Vec3 = Imports.Vec3;
-const Terrain = Imports.Terrain;
+const Wgpu = Imports.Wgpu;
 const Gctx = Imports.Gctx;
+const Vec2 = Imports.Vec2;
+const Vec2u = Imports.Vec2u;
+const Vec3 = Imports.Vec3;
+const Vec4 = Imports.Vec4;
+const RendCTX = Imports.RendCTX;
+const VertexAttribute = RendCTX.VertexAttribute;
 const RenderPipeline = Imports.RenderPipeline;
+const CDT = @import("cdt.zig").CDT;
 
 pub const RTSMap = struct {
     allocator: std.mem.Allocator,
-    width: u32,
-    height: u32,
-    cells: []Cell,
-    terrain: Terrain,
+    // ---------- 渲染相关字段 ----------
+    gctx: *Gctx,
+    width: u32, // 地图宽度（格点数）
+    height: u32, // 地图高度（格点数）
+    vertex_buffer: Wgpu.WGPUBuffer,
+    index_buffer: Wgpu.WGPUBuffer,
+    index_count: u32,
+    wireframe_index_buffer: Wgpu.WGPUBuffer,
+    wireframe_index_count: u32,
+    material: RendCTX.Material,
+    position: Vec3 = Vec3.zero,
+    rotation_y: f32 = 0,
+    // ---------- 路径显示缓冲区 ----------
+    path_vertex_buffer: Wgpu.WGPUBuffer,
+    path_index_buffer: Wgpu.WGPUBuffer,
+    path_vertex_count: u32 = 0,
+    path_index_count: u32 = 0,
+    path_vertices: std.ArrayList(VertexAttribute),
+    path_indices: std.ArrayList(u32),
 
-    pub const MAX_HEIGHT = 20;
-    pub const MAX_LAYER = 10;
-    pub const CELL_SIZE: f32 = 1.0;
+    // --------- 边界线框缓冲区（蓝色）----------
+    boundary_vertex_buffer: Wgpu.WGPUBuffer,
+    boundary_index_buffer: Wgpu.WGPUBuffer,
+    boundary_vertex_count: u32 = 0,
+    boundary_index_count: u32 = 0,
 
-    pub const Cell = struct {
-        passable: bool = true,
-        layer: u32 = 0,
-        slope_mask: u4 = 0, // bit0:上, bit1:右, bit2:下, bit3:左
-    };
+    path_start: ?Vec2u = null,
+    path_end: ?Vec2u = null,
 
-    const DIR_UP = 0;
-    const DIR_RIGHT = 1;
-    const DIR_DOWN = 2;
-    const DIR_LEFT = 3;
-    const DIR_DX = [_]i32{ 0, 1, 0, -1 };
-    const DIR_DZ = [_]i32{ -1, 0, 1, 0 };
-    const OPPOSITE_DIR = [_]u4{ 2, 3, 0, 1 };
+    // ---------- CDT 核心数据 ----------
+    cdt: CDT,
 
-    // --- 初始化与销毁 ---
-    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, width: u32, height: u32, pipeline: *RenderPipeline) !RTSMap {
-        const terrain_size_x = @as(f32, @floatFromInt(width)) * CELL_SIZE;
-        const terrain_size_z = @as(f32, @floatFromInt(height)) * CELL_SIZE;
-        const segments = width * 4; // 每个格子4x4细分，可调
-        const terrain = try Terrain.init(allocator, gctx, Vec3.zero, 0, terrain_size_x, terrain_size_z, segments, MAX_HEIGHT, pipeline);
-        const cells = try allocator.alloc(Cell, width * height);
-        for (cells) |*c| c.* = .{};
-        return .{
-            .allocator = allocator,
-            .width = width,
-            .height = height,
-            .cells = cells,
-            .terrain = terrain,
-        };
+    /// 初始化地图
+    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, width: u32, height: u32, render_pipeline: *RenderPipeline) !RTSMap {
+        var self: RTSMap = undefined;
+        self.allocator = allocator;
+
+        self.cdt = try CDT.init(allocator, width, height);
+
+        self.gctx = gctx;
+        self.width = width;
+        self.height = height;
+        self.index_count = 0;
+        self.wireframe_index_count = 0;
+        self.path_vertex_count = 0;
+        self.path_index_count = 0;
+        self.path_start = null;
+        self.path_end = null;
+
+        try self.initBoundaryBuffers();
+
+        self.path_vertices = try std.ArrayList(VertexAttribute).initCapacity(allocator, 256);
+        self.path_indices = try std.ArrayList(u32).initCapacity(allocator, 256);
+
+        self.material = try RendCTX.createDefaultMaterial(gctx, render_pipeline);
+
+        self.vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = 0,
+            .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
+        });
+        self.index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = 0,
+            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+        });
+        self.wireframe_index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = 0,
+            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+        });
+
+        const max_path_vertices = 1024;
+        const max_path_indices = 2048;
+        self.path_vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = @sizeOf(VertexAttribute) * max_path_vertices,
+            .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
+        });
+        self.path_index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = @sizeOf(u32) * max_path_indices,
+            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+        });
+
+        try self.updateMeshBuffers();
+
+        return self;
     }
 
+    // ---------- 资源释放 ----------
     pub fn deinit(self: *RTSMap) void {
-        self.terrain.deinit();
-        self.allocator.free(self.cells);
+        // 释放渲染资源
+        if (self.material.color_texture.texture) |t| Wgpu.wgpuTextureRelease(t);
+        if (self.material.color_texture.view) |v| Wgpu.wgpuTextureViewRelease(v);
+        if (self.material.normal_texture.texture) |t| Wgpu.wgpuTextureRelease(t);
+        if (self.material.normal_texture.view) |v| Wgpu.wgpuTextureViewRelease(v);
+        if (self.material.uniform_buffer) |b| Wgpu.wgpuBufferRelease(b);
+        if (self.material.bind_group) |g| Wgpu.wgpuBindGroupRelease(g);
+        if (self.vertex_buffer) |vb| Wgpu.wgpuBufferRelease(vb);
+        if (self.index_buffer) |ib| Wgpu.wgpuBufferRelease(ib);
+        if (self.wireframe_index_buffer) |ib| Wgpu.wgpuBufferRelease(ib);
+        if (self.path_vertex_buffer) |vb| Wgpu.wgpuBufferRelease(vb);
+        if (self.path_index_buffer) |ib| Wgpu.wgpuBufferRelease(ib);
+        self.path_vertices.deinit(self.allocator);
+        self.path_indices.deinit(self.allocator);
+
+        self.cdt.deinit();
     }
 
-    // --- 坐标转换 ---
-    pub fn worldToCell(self: *RTSMap, world: Vec2) ?struct { x: u32, z: u32 } {
-        const half_x = @as(f32, @floatFromInt(self.width)) * CELL_SIZE * 0.5;
-        const half_z = @as(f32, @floatFromInt(self.height)) * CELL_SIZE * 0.5;
-        const local_x = world.x + half_x;
-        const local_z = world.z + half_z; // 注意：world.y 是世界 Z 轴
-        if (local_x < 0 or local_z < 0) return null;
-        const x = @as(u32, @intFromFloat(@floor(local_x / CELL_SIZE)));
-        const z = @as(u32, @intFromFloat(@floor(local_z / CELL_SIZE)));
-        if (x >= self.width or z >= self.height) return null;
-        return .{ .x = x, .z = z };
+    pub fn raycast(self: *RTSMap, origin: Vec3, direction: Vec3) ?struct { point: Vec3 } {
+        const widht_f: f32 = @floatFromInt(self.width);
+        const height_f: f32 = @floatFromInt(self.height);
+        // 简单的射线投射到Y=0的平面
+        if (direction.y == 0) return null; // 射线平行于平面
+        const t = -origin.y / direction.y;
+        if (t < 0) return null; // 交点在射线后面
+        const hit_x = origin.x + t * direction.x;
+        const hit_z = origin.z + t * direction.z;
+        // 检查是否在地图范围内
+        if (hit_x >= 0 and hit_x <= widht_f and hit_z >= 0 and hit_z <= height_f)
+            return .{ .point = Vec3.new(hit_x, 0, hit_z) };
+        return null;
     }
 
-    pub fn cellToWorld(self: *RTSMap, x: u32, z: u32) Vec2 {
-        const half_x = @as(f32, @floatFromInt(self.width)) * CELL_SIZE * 0.5;
-        const half_z = @as(f32, @floatFromInt(self.height)) * CELL_SIZE * 0.5;
-        const cx = -half_x + (@as(f32, @floatFromInt(x)) + 0.5) * CELL_SIZE;
-        const cz = -half_z + (@as(f32, @floatFromInt(z)) + 0.5) * CELL_SIZE;
-        return Vec2.new(cx, cz);
-    }
+    /// 从 CDT 网格重建渲染缓冲区（顶点、填充索引、线框索引）
+    pub fn updateMeshBuffers(self: *RTSMap) !void {
+        const cdt = &self.cdt;
+        // 临时顶点和索引列表
+        var vertex_list = std.ArrayList(VertexAttribute){};
+        defer vertex_list.deinit(self.allocator);
+        var index_list = std.ArrayList(u32){};
+        defer index_list.deinit(self.allocator);
+        var wireframe_index_list = std.ArrayList(u32){};
+        defer wireframe_index_list.deinit(self.allocator);
+        // 遍历所有三角形
+        for (cdt.triangles.items) |tri| {
+            const vertex0 = cdt.vertices.items[tri.vertices[0]];
+            const vertex1 = cdt.vertices.items[tri.vertices[1]];
+            const vertex2 = cdt.vertices.items[tri.vertices[2]];
+            // 默认颜色：半透明绿色（可通行区域）
+            const color = Vec4.new(0.2, 0.8, 0.2, 1.0);
 
-    // --- 层级与高度转换 ---
-    fn layerToHeight(layer: u32) f32 {
-        const step = 1.0 / @as(f32, @floatFromInt(MAX_LAYER));
-        return @as(f32, @floatFromInt(layer)) * step + step * 0.5;
-    }
+            const normal = Vec3.new(0, 1, 0);
+            const tangent = Vec4.new(1, 0, 0, 1);
+            const texcoord = Vec2.new(0, 0);
 
-    // --- 地形视觉刷新：直接根据顶点世界坐标设置其所属格子的基准高度 ---
-    fn refreshArea(self: *RTSMap, min_x: u32, min_z: u32, max_x: u32, max_z: u32) void {
-        const seg = self.terrain.segments;
-        const seg_f = @as(f32, @floatFromInt(seg));
-        const size_x = self.terrain.size_x;
-        const size_z = self.terrain.size_z;
+            const base_idx = @as(u32, @intCast(vertex_list.items.len));
 
-        for (0..seg + 1) |iz| {
-            for (0..seg + 1) |ix| {
-                const u = @as(f32, @floatFromInt(ix)) / seg_f;
-                const v = @as(f32, @floatFromInt(iz)) / seg_f;
-                const wx = (u - 0.5) * size_x;
-                const wz = (v - 0.5) * size_z;
+            // 添加三个顶点（Y轴向上，CDT的2D坐标放在XZ平面）
+            try vertex_list.append(self.allocator, .{
+                .position = Vec3.new(vertex0.x, 0, vertex0.y),
+                .normal = normal,
+                .tangent = tangent,
+                .color = color,
+                .texcoord = texcoord,
+            });
+            try vertex_list.append(self.allocator, .{
+                .position = Vec3.new(vertex1.x, 0, vertex1.y),
+                .normal = normal,
+                .tangent = tangent,
+                .color = color,
+                .texcoord = texcoord,
+            });
+            try vertex_list.append(self.allocator, .{
+                .position = Vec3.new(vertex2.x, 0, vertex2.y),
+                .normal = normal,
+                .tangent = tangent,
+                .color = color,
+                .texcoord = texcoord,
+            });
 
-                // 找到顶点所属的格子
-                const cell = self.worldToCell(Vec2.new(wx, wz)) orelse continue;
-                if (cell.x >= min_x and cell.x <= max_x and cell.z >= min_z and cell.z <= max_z) {
-                    const layer = self.cells[cell.z * self.width + cell.x].layer;
-                    const target = layerToHeight(layer);
-                    const idx = iz * (seg + 1) + ix;
-                    self.terrain.heights[idx] = target;
-                }
-            }
+            // 填充三角形索引（逆时针顺序，与CDT保持一致）
+            try index_list.append(self.allocator, base_idx);
+            try index_list.append(self.allocator, base_idx + 1);
+            try index_list.append(self.allocator, base_idx + 2);
+
+            // 线框索引：三条边
+            try wireframe_index_list.append(self.allocator, base_idx);
+            try wireframe_index_list.append(self.allocator, base_idx + 1);
+            try wireframe_index_list.append(self.allocator, base_idx + 1);
+            try wireframe_index_list.append(self.allocator, base_idx + 2);
+            try wireframe_index_list.append(self.allocator, base_idx + 2);
+            try wireframe_index_list.append(self.allocator, base_idx);
+        }
+
+        self.index_count = @intCast(index_list.items.len);
+        self.wireframe_index_count = @intCast(wireframe_index_list.items.len);
+
+        // 更新顶点缓冲区
+        if (vertex_list.items.len > 0) {
+            const vert_size = vertex_list.items.len * @sizeOf(VertexAttribute);
+            if (self.vertex_buffer) |vb| Wgpu.wgpuBufferRelease(vb);
+            self.vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(self.gctx.device, &.{
+                .size = vert_size,
+                .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
+            });
+            Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.vertex_buffer, 0, @ptrCast(vertex_list.items.ptr), vert_size);
+        }
+
+        // 更新填充索引缓冲区
+        if (index_list.items.len > 0) {
+            const idx_size = index_list.items.len * @sizeOf(u32);
+            if (self.index_buffer) |ib| Wgpu.wgpuBufferRelease(ib);
+            self.index_buffer = Wgpu.wgpuDeviceCreateBuffer(self.gctx.device, &.{
+                .size = idx_size,
+                .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+            });
+            Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.index_buffer, 0, @ptrCast(index_list.items.ptr), idx_size);
+        }
+
+        // 更新线框索引缓冲区
+        if (wireframe_index_list.items.len > 0) {
+            const wireframe_idx_size = wireframe_index_list.items.len * @sizeOf(u32);
+            if (self.wireframe_index_buffer) |ib| Wgpu.wgpuBufferRelease(ib);
+            self.wireframe_index_buffer = Wgpu.wgpuDeviceCreateBuffer(self.gctx.device, &.{
+                .size = wireframe_idx_size,
+                .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+            });
+            Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.wireframe_index_buffer, 0, @ptrCast(wireframe_index_list.items.ptr), wireframe_idx_size);
         }
     }
 
-    // --- 逻辑层操作 ---
-    pub fn setLayer(self: *RTSMap, center: Vec2, radius: f32, target_layer: u32) void {
-        const cell_radius = @as(u32, @intFromFloat(@ceil(radius / CELL_SIZE)));
-        const center_cell = self.worldToCell(center) orelse return;
-        const min_x = if (center_cell.x >= cell_radius) center_cell.x - cell_radius else 0;
-        const max_x = @min(center_cell.x + cell_radius, self.width - 1);
-        const min_z = if (center_cell.z >= cell_radius) center_cell.z - cell_radius else 0;
-        const max_z = @min(center_cell.z + cell_radius, self.height - 1);
+    fn initBoundaryBuffers(self: *RTSMap) !void {
+        const w: f32 = @floatFromInt(self.width);
+        const h: f32 = @floatFromInt(self.height);
 
-        for (min_z..max_z + 1) |z| {
-            for (min_x..max_x + 1) |x| {
-                const world = self.cellToWorld(@intCast(x), @intCast(z));
-                const dx = world.x - center.x;
-                const dz = world.z - center.z;
-                if (dx * dx + dz * dz <= radius * radius) {
-                    const idx = z * self.width + x;
-                    self.cells[idx].layer = target_layer;
-                    self.cells[idx].slope_mask = 0;
-                }
-            }
-        }
-        self.refreshArea(min_x, min_z, max_x, max_z);
-        self.terrain.calculateNormals();
-        self.terrain.generateColors();
-        self.terrain.updateBuffers() catch {};
-    }
+        const color = Vec4.new(0.0, 0.4, 1.0, 1.0); // 蓝色
+        const normal = Vec3.new(0, 1, 0);
+        const tangent = Vec4.new(1, 0, 0, 1);
+        const texcoord = Vec2.new(0, 0);
 
-    pub fn markUnreachable(self: *RTSMap, center: Vec2, radius: f32) void {
-        const cell_radius = @ceil(radius / CELL_SIZE);
-        const center_cell = self.worldToCell(center) orelse return;
-        const r = @as(usize, @intFromFloat(cell_radius));
-        for (0..r) |dz| {
-            for (0..r) |dx| {
-                for (0..2) |sz| {
-                    for (0..2) |sx| {
-                        const z = if (sz == 0) center_cell.z - dz else center_cell.z + dz;
-                        const x = if (sx == 0) center_cell.x - dx else center_cell.x + dx;
-                        if (x < self.width and z < self.height) {
-                            const world = self.cellToWorld(@intCast(x), @intCast(z));
-                            const dxw = world.x - center.x;
-                            const dzw = world.z - center.z;
-                            if (dxw * dxw + dzw * dzw <= radius * radius) {
-                                self.cells[z * self.width + x].passable = false;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub fn sculptAndBlock(self: *RTSMap, center: Vec2, radius: f32, strength: f32) void {
-        self.terrain.modifyHeightWorld(center, radius, strength);
-        self.markUnreachable(center, radius);
-    }
-
-    // --- 斜坡系统 ---
-    fn setRampBetween(self: *RTSMap, x1: u32, z1: u32, x2: u32, z2: u32, dir_from_1: u4) void {
-        const idx1 = z1 * self.width + x1;
-        const idx2 = z2 * self.width + x2;
-        self.cells[idx1].slope_mask |= @as(u4, 1) << @intCast(dir_from_1);
-        self.cells[idx2].slope_mask |= @as(u4, 1) << @intCast(OPPOSITE_DIR[dir_from_1]);
-    }
-
-    fn applyVisualSlope(self: *RTSMap, x1: u32, z1: u32, x2: u32, z2: u32, h1: f32, h2: f32) void {
-        const cell_size = CELL_SIZE;
-        const half = cell_size * 0.5;
-        const RAMP_LENGTH_CELLS = 3;
-
-        // 确定高层和低层格子
-        var high_x = x1;
-        var high_z = z1;
-        var low_x = x2;
-        var low_z = z2;
-        var high_h = h1;
-        var low_h = h2;
-        if (h1 < h2) {
-            high_x = x2;
-            high_z = z2;
-            low_x = x1;
-            low_z = z1;
-            high_h = h2;
-            low_h = h1;
-        }
-
-        const high_center = self.cellToWorld(high_x, high_z);
-        const low_center = self.cellToWorld(low_x, low_z);
-
-        const dir_x = low_center.x - high_center.x;
-        const dir_z = low_center.z - high_center.z;
-        const len_dir = @sqrt(dir_x * dir_x + dir_z * dir_z);
-        if (len_dir < 0.001) return;
-        const norm_dir_x = dir_x / len_dir;
-        const norm_dir_z = dir_z / len_dir;
-
-        const start_x = high_center.x + norm_dir_x * half;
-        const start_z = high_center.z + norm_dir_z * half;
-
-        const ramp_length = RAMP_LENGTH_CELLS * cell_size;
-        const end_x = start_x + norm_dir_x * ramp_length;
-        const end_z = start_z + norm_dir_z * ramp_length;
-
-        const min_x = @min(high_center.x - cell_size, end_x - cell_size);
-        const max_x = @max(high_center.x + cell_size, end_x + cell_size);
-        const min_z = @min(high_center.z - cell_size, end_z - cell_size);
-        const max_z = @max(high_center.z + cell_size, end_z + cell_size);
-
-        const seg = self.terrain.segments;
-        const seg_f = @as(f32, @floatFromInt(seg));
-        const size_x = self.terrain.size_x;
-        const size_z = self.terrain.size_z;
-
-        for (0..seg + 1) |iz| {
-            for (0..seg + 1) |ix| {
-                const u = @as(f32, @floatFromInt(ix)) / seg_f;
-                const v = @as(f32, @floatFromInt(iz)) / seg_f;
-                const wx = (u - 0.5) * size_x;
-                const wz = (v - 0.5) * size_z;
-
-                if (wx < min_x or wx > max_x or wz < min_z or wz > max_z) continue;
-
-                const dx = wx - start_x;
-                const dz = wz - start_z;
-                const proj = dx * norm_dir_x + dz * norm_dir_z;
-                if (proj >= 0 and proj <= ramp_length) {
-                    const t = proj / ramp_length;
-                    const target_h = high_h + (low_h - high_h) * t;
-                    const idx = iz * (seg + 1) + ix;
-                    self.terrain.heights[idx] = target_h;
-                }
-            }
-        }
-    }
-
-    pub fn createRampBrush(self: *RTSMap, center: Vec2, radius: f32) void {
-        const cell_radius = @as(u32, @intFromFloat(@ceil(radius / CELL_SIZE)));
-        const center_cell = self.worldToCell(center) orelse return;
-        const min_x = if (center_cell.x >= cell_radius) center_cell.x - cell_radius else 0;
-        const max_x = @min(center_cell.x + cell_radius, self.width - 1);
-        const min_z = if (center_cell.z >= cell_radius) center_cell.z - cell_radius else 0;
-        const max_z = @min(center_cell.z + cell_radius, self.height - 1);
-
-        // 记录受影响的格子范围
-        var affected_min_x = self.width;
-        var affected_max_x: u32 = 0;
-        var affected_min_z = self.height;
-        var affected_max_z: u32 = 0;
-
-        var ramps = std.ArrayList(struct { x1: u32, z1: u32, x2: u32, z2: u32, dir: u4 }){};
-        defer ramps.deinit(self.allocator);
-
-        for (min_z..max_z + 1) |z| {
-            for (min_x..max_x + 1) |x| {
-                const world = self.cellToWorld(@intCast(x), @intCast(z));
-                const dx = world.x - center.x;
-                const dz = world.z - center.z;
-                if (dx * dx + dz * dz <= radius * radius) {
-                    const cur_layer = self.cells[z * self.width + x].layer;
-                    for (0..4) |dir| {
-                        const nx = @as(i32, @intCast(x)) + DIR_DX[dir];
-                        const nz = @as(i32, @intCast(z)) + DIR_DZ[dir];
-                        if (nx >= 0 and nx < self.width and nz >= 0 and nz < self.height) {
-                            const neigh_layer = self.cells[@as(usize, @intCast(nz)) * self.width + @as(usize, @intCast(nx))].layer;
-                            if (neigh_layer != cur_layer) {
-                                self.setRampBetween(@intCast(x), @intCast(z), @intCast(nx), @intCast(nz), @intCast(dir));
-                                ramps.append(self.allocator, .{
-                                    .x1 = @intCast(x),
-                                    .z1 = @intCast(z),
-                                    .x2 = @intCast(nx),
-                                    .z2 = @intCast(nz),
-                                    .dir = @intCast(dir),
-                                }) catch unreachable;
-
-                                // 更新受影响格子范围
-                                if (x < affected_min_x) affected_min_x = @intCast(x);
-                                if (x > affected_max_x) affected_max_x = @intCast(x);
-                                if (z < affected_min_z) affected_min_z = @intCast(z);
-                                if (z > affected_max_z) affected_max_z = @intCast(z);
-                                const ux = @as(u32, @intCast(nx));
-                                const uz = @as(u32, @intCast(nz));
-                                if (ux < affected_min_x) affected_min_x = ux;
-                                if (ux > affected_max_x) affected_max_x = ux;
-                                if (uz < affected_min_z) affected_min_z = uz;
-                                if (uz > affected_max_z) affected_max_z = uz;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // 刷新受影响区域内的所有格子为基准高度
-        if (affected_min_x <= affected_max_x and affected_min_z <= affected_max_z) {
-            self.refreshArea(affected_min_x, affected_min_z, affected_max_x, affected_max_z);
-        }
-
-        // 应用视觉斜坡（覆盖斜坡区域的顶点）
-        for (ramps.items) |r| {
-            const h1 = layerToHeight(self.cells[r.z1 * self.width + r.x1].layer);
-            const h2 = layerToHeight(self.cells[r.z2 * self.width + r.x2].layer);
-            self.applyVisualSlope(r.x1, r.z1, r.x2, r.z2, h1, h2);
-        }
-
-        self.terrain.calculateNormals();
-        self.terrain.generateColors();
-        self.terrain.updateBuffers() catch {};
-    }
-
-    // --- 寻路系统 ---
-    const neighbors_4 = [_][2]i32{ .{ 0, -1 }, .{ 1, 0 }, .{ 0, 1 }, .{ -1, 0 } };
-
-    fn heuristic(self: *RTSMap, a: usize, b: usize) f32 {
-        const ax = @as(f32, @floatFromInt(a % self.width));
-        const az = @as(f32, @floatFromInt(a / self.width));
-        const bx = @as(f32, @floatFromInt(b % self.width));
-        const bz = @as(f32, @floatFromInt(b / self.width));
-        const dx = ax - bx;
-        const dz = az - bz;
-        return @sqrt(dx * dx + dz * dz);
-    }
-
-    fn getNeighbors(self: *RTSMap, idx: usize, alloc: std.mem.Allocator) ![]usize {
-        const x = idx % self.width;
-        const z = idx / self.width;
-        var list = std.ArrayList(usize){};
-        errdefer list.deinit(alloc);
-        for (neighbors_4, 0..) |delta, dir| {
-            const nx = @as(i32, @intCast(x)) + delta[0];
-            const nz = @as(i32, @intCast(z)) + delta[1];
-            if (nx >= 0 and nx < self.width and nz >= 0 and nz < self.height) {
-                const nidx = @as(usize, @intCast(nz)) * self.width + @as(usize, @intCast(nx));
-                if (!self.cells[nidx].passable) continue;
-                const cur_layer = self.cells[idx].layer;
-                const neigh_layer = self.cells[nidx].layer;
-                if (cur_layer == neigh_layer) {
-                    try list.append(alloc, nidx);
-                } else {
-                    const mask = @as(u4, 1) << @intCast(dir);
-                    if ((self.cells[idx].slope_mask & mask) != 0) {
-                        try list.append(alloc, nidx);
-                    }
-                }
-            }
-        }
-        return list.toOwnedSlice(alloc);
-    }
-
-    fn reconstructPath(self: *RTSMap, came_from: std.AutoHashMap(u32, u32), start_idx: u32, goal_idx: u32, alloc: std.mem.Allocator) ![]Vec2 {
-        var path = std.ArrayList(Vec2){};
-        defer {
-            if (path.items.len == 0) path.deinit(alloc);
-        }
-        var idx = goal_idx;
-        while (came_from.get(idx)) |parent| {
-            const world = self.cellToWorld(@intCast(idx % self.width), @intCast(idx / self.width));
-            try path.append(alloc, world);
-            idx = parent;
-        }
-        // 添加起点
-        const start_world = self.cellToWorld(@intCast(start_idx % self.width), @intCast(start_idx / self.width));
-        try path.append(alloc, start_world);
-        // 反转
-        var rev = std.ArrayList(Vec2){};
-        for (path.items) |p| try rev.insert(alloc, 0, p);
-        path.deinit(alloc);
-        return rev.toOwnedSlice(alloc);
-    }
-
-    pub fn findPath(self: *RTSMap, start: Vec2, goal: Vec2, alloc: std.mem.Allocator) ![]Vec2 {
-        const start_cell = self.worldToCell(start) orelse return error.OutOfBounds;
-        const goal_cell = self.worldToCell(goal) orelse return error.OutOfBounds;
-        const start_idx = start_cell.z * self.width + start_cell.x;
-        const goal_idx = goal_cell.z * self.width + goal_cell.x;
-        if (!self.cells[start_idx].passable or !self.cells[goal_idx].passable) return error.Unreachable;
-
-        var open_set = PriorityQueue.init(alloc);
-        defer open_set.deinit();
-        var closed_set = std.AutoHashMap(u32, void).init(alloc);
-        defer closed_set.deinit();
-        var came_from = std.AutoHashMap(u32, u32).init(alloc);
-        defer came_from.deinit();
-        var g_score = std.AutoHashMap(u32, f32).init(alloc);
-        defer g_score.deinit();
-
-        try g_score.put(start_idx, 0);
-        try open_set.push(PathNode{ .index = start_idx, .g = 0, .h = self.heuristic(start_idx, goal_idx), .parent = null });
-
-        while (open_set.pop()) |current| {
-            if (current.index == goal_idx) {
-                return self.reconstructPath(came_from, start_idx, goal_idx, alloc);
-            }
-            try closed_set.put(current.index, {});
-            const neighbors = try self.getNeighbors(current.index, alloc);
-            defer alloc.free(neighbors);
-            for (neighbors) |n| {
-                const nb = @as(u32, @intCast(n));
-                if (closed_set.contains(nb)) continue;
-                const tentative = current.g + self.cellDistance(current.index, nb);
-                const cur_g = g_score.get(nb) orelse std.math.floatMax(f32);
-                if (tentative < cur_g) {
-                    try came_from.put(nb, current.index);
-                    try g_score.put(nb, tentative);
-                    const h = self.heuristic(nb, goal_idx);
-                    const node = PathNode{ .index = nb, .g = tentative, .h = h, .parent = current.index };
-                    if (open_set.contains(nb)) {
-                        open_set.update(node);
-                    } else {
-                        try open_set.push(node);
-                    }
-                }
-            }
-        }
-        return error.NoPath;
-    }
-
-    pub fn findPathOrClosest(self: *RTSMap, start: Vec2, goal: Vec2, alloc: std.mem.Allocator) ![]Vec2 {
-        return self.findPath(start, goal, alloc) catch |err| {
-            if (err == error.Unreachable or err == error.NoPath) {
-                const goal_cell = self.worldToCell(goal) orelse return error.OutOfBounds;
-                var queue = std.ArrayList([2]u32){};
-                defer queue.deinit(alloc);
-                var visited = std.AutoHashMap(u32, void).init(alloc);
-                defer visited.deinit();
-                try queue.append(alloc, [2]u32{ goal_cell.x, goal_cell.z });
-                while (queue.items.len > 0) {
-                    const cell = queue.orderedRemove(0);
-                    const idx = cell[1] * self.width + cell[0];
-                    if (self.cells[idx].passable) {
-                        const nearest = self.cellToWorld(cell[0], cell[1]);
-                        return self.findPath(start, nearest, alloc);
-                    }
-                    for (neighbors_4) |delta| {
-                        const nx = @as(i32, @intCast(cell[0])) + delta[0];
-                        const nz = @as(i32, @intCast(cell[1])) + delta[1];
-                        if (nx >= 0 and nx < self.width and nz >= 0 and nz < self.height) {
-                            const nidx = @as(u32, @intCast(nz)) * self.width + @as(u32, @intCast(nx));
-                            if (!visited.contains(nidx)) {
-                                try visited.put(nidx, {});
-                                try queue.append(alloc, [2]u32{ @intCast(nx), @intCast(nz) });
-                            }
-                        }
-                    }
-                }
-                return error.NoReachableCell;
-            }
-            return err;
+        // 四个顶点（顺序：左下 → 右下 → 右上 → 左上）
+        const vertices = [_]VertexAttribute{
+            .{ .position = Vec3.new(0, 0.01, 0), .normal = normal, .tangent = tangent, .color = color, .texcoord = texcoord },
+            .{ .position = Vec3.new(w, 0.01, 0), .normal = normal, .tangent = tangent, .color = color, .texcoord = texcoord },
+            .{ .position = Vec3.new(w, 0.01, h), .normal = normal, .tangent = tangent, .color = color, .texcoord = texcoord },
+            .{ .position = Vec3.new(0, 0.01, h), .normal = normal, .tangent = tangent, .color = color, .texcoord = texcoord },
         };
+
+        // 四条边的索引（LineList 每段 2 个索引）
+        const indices = [_]u32{
+            0, 1, // 下边
+            1, 2, // 右边
+            2, 3, // 上边
+            3, 0, // 左边
+        };
+
+        // 创建顶点缓冲区
+        const vert_size = vertices.len * @sizeOf(VertexAttribute);
+        self.boundary_vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(self.gctx.device, &.{
+            .size = vert_size,
+            .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
+        });
+        Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.boundary_vertex_buffer, 0, &vertices, vert_size);
+        self.boundary_vertex_count = vertices.len;
+
+        // 创建索引缓冲区
+        const idx_size = indices.len * @sizeOf(u32);
+        self.boundary_index_buffer = Wgpu.wgpuDeviceCreateBuffer(self.gctx.device, &.{
+            .size = idx_size,
+            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+        });
+        Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.boundary_index_buffer, 0, &indices, idx_size);
+        self.boundary_index_count = indices.len;
     }
 
-    fn cellDistance(self: *RTSMap, a: usize, b: usize) f32 {
-        const ax = @as(f32, @floatFromInt(a % self.width));
-        const az = @as(f32, @floatFromInt(a / self.width));
-        const bx = @as(f32, @floatFromInt(b % self.width));
-        const bz = @as(f32, @floatFromInt(b / self.width));
-        const dx = ax - bx;
-        const dz = az - bz;
-        return @sqrt(dx * dx + dz * dz) * CELL_SIZE;
-    }
-};
+    /// 放置新建筑（添加约束边）
+    pub fn placeBuilding(self: *RTSMap, footprint: []const Vec2) !void {
+        // 1. 为建筑角点创建顶点
+        var verts = std.ArrayList(u32).init(self.allocator);
+        defer verts.deinit();
+        for (footprint) |pt| {
+            const v = try self.cdt.addVertex(pt);
+            try self.cdt.insertVertex(v);
+            try verts.append(v);
+        }
 
-// --- 辅助结构 ---
-const PathNode = struct {
-    index: u32,
-    g: f32,
-    h: f32,
-    parent: ?u32,
-};
-
-const PriorityQueue = struct {
-    items: std.ArrayList(PathNode),
-    allocator: std.mem.Allocator,
-
-    fn init(alloc: std.mem.Allocator) PriorityQueue {
-        return .{ .items = std.ArrayList(PathNode){}, .allocator = alloc };
-    }
-    fn deinit(self: *PriorityQueue) void {
-        self.items.deinit(self.allocator);
-    }
-    fn push(self: *PriorityQueue, node: PathNode) !void {
-        try self.items.append(self.allocator, node);
-        var i = self.items.items.len - 1;
-        while (i > 0) {
-            const p = (i - 1) / 2;
-            if (self.items.items[p].g + self.items.items[p].h <= node.g + node.h) break;
-            const tmp = self.items.items[p];
-            self.items.items[p] = self.items.items[i];
-            self.items.items[i] = tmp;
-            i = p;
+        // 2. 插入建筑边缘作为约束边
+        for (0..verts.items.len) |i| {
+            const v1 = verts.items[i];
+            const v2 = verts.items[(i + 1) % verts.items.len];
+            try self.cdt.insertConstraintEdge(v1, v2);
         }
     }
-    fn pop(self: *PriorityQueue) ?PathNode {
-        if (self.items.items.len == 0) return null;
-        const ret = self.items.items[0];
-        self.items.items[0] = self.items.items[self.items.items.len - 1];
-        _ = self.items.pop();
-        var i: usize = 0;
-        const len = self.items.items.len;
-        while (true) {
-            const left = i * 2 + 1;
-            const right = i * 2 + 2;
-            var smallest = i;
-            if (left < len and (self.items.items[left].g + self.items.items[left].h) < (self.items.items[smallest].g + self.items.items[smallest].h)) smallest = left;
-            if (right < len and (self.items.items[right].g + self.items.items[right].h) < (self.items.items[smallest].g + self.items.items[smallest].h)) smallest = right;
-            if (smallest == i) break;
-            const tmp = self.items.items[i];
-            self.items.items[i] = self.items.items[smallest];
-            self.items.items[smallest] = tmp;
-            i = smallest;
-        }
-        return ret;
-    }
-    fn contains(self: *PriorityQueue, idx: u32) bool {
-        for (self.items.items) |n| if (n.index == idx) return true;
-        return false;
-    }
-    fn update(self: *PriorityQueue, node: PathNode) void {
-        for (self.items.items, 0..) |*n, i| {
-            if (n.index == node.index) {
-                n.* = node;
-                var j = i;
-                while (j > 0) {
-                    const p = (j - 1) / 2;
-                    if (self.items.items[p].g + self.items.items[p].h <= node.g + node.h) break;
-                    const tmp = self.items.items[p];
-                    self.items.items[p] = self.items.items[j];
-                    self.items.items[j] = tmp;
-                    j = p;
-                }
-                break;
-            }
-        }
+
+    /// 移除建筑（可选实现，较复杂）
+    pub fn removeBuilding(self: *RTSMap, building_id: u32) !void {
+        _ = self;
+        _ = building_id;
+        // 通常RTS中只需标记为可通行，无需真正删除约束边
+        // 若需实现，参考论文中的约束边删除算法
     }
 };

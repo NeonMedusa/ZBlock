@@ -44,7 +44,8 @@ struct VertexOutput {
     @location(0) texcoord: vec2f,
     @location(1) world_normal: vec3f,
     @location(2) world_position: vec3f,
-};
+    @location(3) color: vec4f,
+}
 
 // 硬编码的光照参数（方便调试）
 const LIGHT_DIRECTION = vec3f(1.0, 2.0, 1.0);  // 光源方向
@@ -109,7 +110,7 @@ fn vs_main(in: VertexInput, @builtin(instance_index) ins_idx: u32) -> VertexOutp
     out.texcoord = in.texcoord;
     out.world_normal = world_normal;
     out.world_position = world_pos.xyz;
-    
+    out.color = in.color;   // 传递顶点颜色
     return out;
 }
 
@@ -127,8 +128,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         );
         base_color = textureLoad(color_texture, texel_coords, 0);
     } else {
-        // 没有纹理时使用白色
-        base_color = vec4f(1.0, 1.0, 1.0, 1.0);
+        // 使用顶点颜色
+        base_color = in.color;
     }
     
     // 获取法线（暂时只使用顶点法线）

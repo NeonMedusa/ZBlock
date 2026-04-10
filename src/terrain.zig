@@ -134,7 +134,7 @@ pub const Terrain = struct {
                 const local_x = (u - 0.5) * self.size_x;
                 const local_z = (v - 0.5) * self.size_z;
                 const dx = local_x - center.x;
-                const dz = local_z - center.z;
+                const dz = local_z - center.y;
                 const dist = @sqrt(dx * dx + dz * dz);
                 if (dist < radius) {
                     const factor = (1.0 - dist / radius) * strength;
@@ -346,7 +346,7 @@ pub const Terrain = struct {
     // ---------- 坐标转换（使用 Vec2） ----------
     pub fn worldToLocal(self: *Terrain, world: Vec2) Vec2 {
         const dx = world.x - self.position.x;
-        const dz = world.z - self.position.z;
+        const dz = world.y - self.position.z;
         const cos = @cos(self.rotation_y);
         const sin = @sin(self.rotation_y);
         return Vec2.new(
@@ -358,8 +358,8 @@ pub const Terrain = struct {
     pub fn localToWorld(self: *Terrain, local: Vec2) Vec2 {
         const cos = @cos(self.rotation_y);
         const sin = @sin(self.rotation_y);
-        const world_dx = local.x * cos + local.z * sin;
-        const world_dz = -local.x * sin + local.z * cos;
+        const world_dx = local.x * cos + local.y * sin;
+        const world_dz = -local.x * sin + local.y * cos;
         return Vec2.new(
             self.position.x + world_dx,
             self.position.z + world_dz,
@@ -369,14 +369,14 @@ pub const Terrain = struct {
     pub fn getUV(self: *Terrain, local: Vec2) Vec2 {
         return Vec2.new(
             (local.x + self.size_x * 0.5) / self.size_x,
-            (local.z + self.size_z * 0.5) / self.size_z,
+            (local.y + self.size_z * 0.5) / self.size_z,
         );
     }
 
     pub fn getHeightLocal(self: *Terrain, local: Vec2) f32 {
         const uv = self.getUV(local);
-        if (uv.x < 0 or uv.x > 1 or uv.z < 0 or uv.z > 1) return 0.0;
-        const norm = self.interpolateHeight(uv.x, uv.z);
+        if (uv.x < 0 or uv.x > 1 or uv.y < 0 or uv.y > 1) return 0.0;
+        const norm = self.interpolateHeight(uv.x, uv.y);
         return self.getActualHeight(norm);
     }
 
@@ -387,8 +387,8 @@ pub const Terrain = struct {
 
     pub fn getNormalLocal(self: *Terrain, local: Vec2) Vec3 {
         const uv = self.getUV(local);
-        if (uv.x < 0 or uv.x > 1 or uv.z < 0 or uv.z > 1) return Vec3.new(0, 1, 0);
-        return self.interpolateNormal(uv.x, uv.z);
+        if (uv.x < 0 or uv.x > 1 or uv.y < 0 or uv.y > 1) return Vec3.new(0, 1, 0);
+        return self.interpolateNormal(uv.x, uv.y);
     }
 
     pub fn setPosition(self: *Terrain, new_pos: Vec3) void {
