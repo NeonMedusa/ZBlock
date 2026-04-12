@@ -10,6 +10,7 @@ const RendCTX = Imports.RendCTX;
 const VertexAttribute = RendCTX.VertexAttribute;
 const RenderPipeline = Imports.RenderPipeline;
 const CDT = @import("cdt.zig").CDT;
+const Edge = @import("cdt.zig").Edge;
 
 pub const RTSMap = struct {
     allocator: std.mem.Allocator,
@@ -145,42 +146,62 @@ pub const RTSMap = struct {
         defer wireframe_index_list.deinit(self.allocator);
         // 遍历所有三角形
         for (cdt.triangles.items) |tri| {
-            const vertex0 = cdt.vertices.items[tri.vertices[0]];
-            const vertex1 = cdt.vertices.items[tri.vertices[1]];
-            const vertex2 = cdt.vertices.items[tri.vertices[2]];
-            // 默认颜色：半透明绿色（可通行区域）
-            const color = Vec4.new(0.2, 0.8, 0.2, 1.0);
+            const v0 = tri.vertices[0];
+            const v1 = tri.vertices[1];
+            const v2 = tri.vertices[2];
+            const pos0 = cdt.vertices.items[v0];
+            const pos1 = cdt.vertices.items[v1];
+            const pos2 = cdt.vertices.items[v2];
 
-            const normal = Vec3.new(0, 1, 0);
-            const tangent = Vec4.new(1, 0, 0, 1);
-            const texcoord = Vec2.new(0, 0);
+            // 检查三条边是否为约束边
+            const edge01 = Edge{ .v1 = v0, .v2 = v1 };
+            const edge12 = Edge{ .v1 = v1, .v2 = v2 };
+            const edge20 = Edge{ .v1 = v2, .v2 = v0 };
+
+            const is_edge01_fixed = cdt.fixed_edges.contains(edge01) or cdt.fixed_edges.contains(.{ .v1 = v1, .v2 = v0 });
+            const is_edge12_fixed = cdt.fixed_edges.contains(edge12) or cdt.fixed_edges.contains(.{ .v1 = v2, .v2 = v1 });
+            const is_edge20_fixed = cdt.fixed_edges.contains(edge20) or cdt.fixed_edges.contains(.{ .v1 = v0, .v2 = v2 });
+
+            // 默认颜色：半透明绿色（可通行区域）
+            const default_color = Vec4.new(0.2, 0.8, 0.2, 1.0);
+            const fixed_color = Vec4.new(1.0, 0.0, 0.0, 1.0); // 红色
+
+            // 为三个顶点分别决定颜色：若该顶点属于任意约束边，则设为红色，否则为默认绿色
+            const color0 = if (is_edge01_fixed or is_edge20_fixed) fixed_color else default_color;
+            const color1 = if (is_edge01_fixed or is_edge12_fixed) fixed_color else default_color;
+            const color2 = if (is_edge12_fixed or is_edge20_fixed) fixed_color else default_color;
+
+            // 通用顶点属性（Y轴向上，CDT的2D坐标放在XZ平面）
+            const normal = Vec3.new(0.0, 1.0, 0.0);
+            const tangent = Vec4.new(1.0, 0.0, 0.0, 1.0);
+            const texcoord = Vec2.new(0.0, 0.0);
 
             const base_idx = @as(u32, @intCast(vertex_list.items.len));
 
-            // 添加三个顶点（Y轴向上，CDT的2D坐标放在XZ平面）
+            // 添加三个顶点
             try vertex_list.append(self.allocator, .{
-                .position = Vec3.new(vertex0.x, 0, vertex0.y),
+                .position = Vec3.new(pos0.x, 0.0, pos0.y),
                 .normal = normal,
                 .tangent = tangent,
-                .color = color,
+                .color = color0,
                 .texcoord = texcoord,
             });
             try vertex_list.append(self.allocator, .{
-                .position = Vec3.new(vertex1.x, 0, vertex1.y),
+                .position = Vec3.new(pos1.x, 0.0, pos1.y),
                 .normal = normal,
                 .tangent = tangent,
-                .color = color,
+                .color = color1,
                 .texcoord = texcoord,
             });
             try vertex_list.append(self.allocator, .{
-                .position = Vec3.new(vertex2.x, 0, vertex2.y),
+                .position = Vec3.new(pos2.x, 0.0, pos2.y),
                 .normal = normal,
                 .tangent = tangent,
-                .color = color,
+                .color = color2,
                 .texcoord = texcoord,
             });
 
-            // 填充三角形索引（逆时针顺序，与CDT保持一致）
+            // 填充三角形索引（逆时针顺序）
             try index_list.append(self.allocator, base_idx);
             try index_list.append(self.allocator, base_idx + 1);
             try index_list.append(self.allocator, base_idx + 2);
@@ -300,5 +321,26 @@ pub const RTSMap = struct {
         _ = building_id;
         // 通常RTS中只需标记为可通行，无需真正删除约束边
         // 若需实现，参考论文中的约束边删除算法
+    }
+
+    /// 放置一个凸多边形障碍物（顶点按逆时针顺序给出）
+    pub fn placeObstacle(self: *RTSMap, footprint: []const Vec2) !void {
+        if (footprint.len < 3) return;
+        // 添加所有顶点并插入 CDT
+        var verts = std.ArrayList(u32){};
+        defer verts.deinit(self.allocator);
+        for (footprint) |pt| {
+            const v = try self.cdt.addVertex(pt);
+            try self.cdt.insertVertex(v);
+            try verts.append(self.allocator, v);
+        }
+        // 插入约束边（闭合多边形）
+        for (0..verts.items.len) |i| {
+            const v1 = verts.items[i];
+            const v2 = verts.items[(i + 1) % verts.items.len];
+            try self.cdt.insertConstraintEdge(v1, v2);
+        }
+        // 更新渲染缓冲区
+        try self.updateMeshBuffers();
     }
 };

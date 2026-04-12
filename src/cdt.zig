@@ -87,6 +87,27 @@ pub const CDT = struct {
         cdt.vert_tris.items[super_verts[1]] = 0;
         cdt.vert_tris.items[super_verts[2]] = 0;
 
+        // --- 添加地图边界约束边 ---
+        // 边界矩形的四个角点
+        const corners = [_]Vec2{
+            .{ .x = 0.0, .y = 0.0 },
+            .{ .x = width_f, .y = 0.0 },
+            .{ .x = width_f, .y = height_f },
+            .{ .x = 0.0, .y = height_f },
+        };
+        var corner_verts: [4]u32 = undefined;
+        for (corners, 0..) |pt, i| {
+            // 边界点直接作为普通顶点插入（先 addVertex 再 insertVertex）
+            corner_verts[i] = try cdt.addVertex(pt);
+            try cdt.insertVertex(corner_verts[i]);
+        }
+
+        // 插入四条约束边（矩形边界）
+        try cdt.insertConstraintEdge(corner_verts[0], corner_verts[1]); // 下边
+        try cdt.insertConstraintEdge(corner_verts[1], corner_verts[2]); // 右边
+        try cdt.insertConstraintEdge(corner_verts[2], corner_verts[3]); // 上边
+        try cdt.insertConstraintEdge(corner_verts[3], corner_verts[0]); // 左边
+
         return cdt;
     }
 
@@ -369,61 +390,423 @@ pub const CDT = struct {
     }
 
     // ---------- 约束边操作 ----------
-    /// 插入约束边（障碍物边界），若与已有约束边相交则自动拆分
+
+    /// 查找或添加顶点：若存在距离小于容差的顶点则返回其索引，否则新增。
+    pub fn findOrAddVertex(self: *CDT, pt: Vec2, tolerance: f32) !u32 {
+        const nearest = self.findNearestVertex(pt);
+        const dist = self.vertices.items[nearest].sub(pt).len();
+        if (dist <= tolerance)
+            return nearest;
+        const idx = try self.addVertex(pt);
+        try self.insertVertex(idx);
+        return idx;
+    }
+
+    /// 插入约束边
     pub fn insertConstraintEdge(self: *CDT, v1: u32, v2: u32) !void {
-        _ = v1;
-        _ = v2;
-        _ = self;
-        @compileError("Not implemented");
+        if (v1 == v2) return;
+        if (try self.edgeExists(v1, v2)) {
+            try self.fixEdge(.{ .v1 = v1, .v2 = v2 });
+            return;
+        }
+        try self.insertEdgeIteration(.{ .v1 = v1, .v2 = v2 });
     }
 
-    /// 约束边插入迭代主逻辑（处理单条边，可能拆分为多段）
+    /// 约束边插入迭代主逻辑：处理单条边，可能因相交而拆分为多段。
+    /// 算法采用栈式处理：将待插入边压入 remaining 栈，循环处理直到栈空。
     fn insertEdgeIteration(self: *CDT, edge: Edge) !void {
-        _ = edge;
-        _ = self;
-        @compileError("Not implemented");
+        var remaining = std.ArrayList(Edge){};
+        defer remaining.deinit(self.allocator);
+        try remaining.append(self.allocator, edge);
+
+        var iter_count: u32 = 0;
+        const max_iter = self.triangles.items.len * 2;
+
+        while (remaining.items.len > 0) : (iter_count += 1) {
+            if (iter_count > max_iter) return error.InfiniteLoopInInsert;
+            const cur_edge = remaining.pop().?;
+            const iA = cur_edge.v1;
+            var iB = cur_edge.v2;
+
+            // 1. 收集相交三角形与伪多边形
+            var intersected = std.ArrayList(u32){};
+            defer intersected.deinit(self.allocator);
+            var polyL = std.ArrayList(u32){};
+            defer polyL.deinit(self.allocator);
+            var polyR = std.ArrayList(u32){};
+            defer polyR.deinit(self.allocator);
+            var outerTris = std.AutoHashMap(Edge, i32).init(self.allocator);
+            defer outerTris.deinit();
+
+            try self.collectIntersectedTriangles(iA, &iB, &intersected, &polyL, &polyR, &outerTris);
+
+            // 如果 intersected 为空，说明边已存在或完全在三角形内部，只需固定
+            if (intersected.items.len == 0) {
+                try self.fixEdge(.{ .v1 = iA, .v2 = iB });
+                continue;
+            }
+
+            // 2. 如果终点被截断（例如与顶点共线），将剩余段压入栈
+            if (iB != cur_edge.v2) {
+                try self.fixEdge(.{ .v1 = iA, .v2 = iB });
+                try remaining.append(self.allocator, .{ .v1 = iB, .v2 = cur_edge.v2 });
+                continue;
+            }
+
+            // 3. 准备重三角化（iTL、iTR 为与外部相连的两个三角形）
+            const iTL = intersected.items[0]; // 第一个相交三角形
+            const iTR = intersected.items[intersected.items.len - 1]; // 最后一个
+
+            // 反转 polyR 使其变为逆时针（便于统一处理）
+            std.mem.reverse(u32, polyR.items);
+
+            // 收集可重用的三角形索引（即被删除的相交三角形）
+            var trianglesToReuse = std.ArrayList(u32){};
+            defer trianglesToReuse.deinit(self.allocator);
+            try trianglesToReuse.appendSlice(self.allocator, intersected.items);
+
+            var iterations = std.ArrayList(TriangulatePseudoPolygonTask){};
+            defer iterations.deinit(self.allocator);
+
+            // 4. 对两侧伪多边形分别重三角化
+            try self.triangulatePseudoPolygon(&polyL, &outerTris, iTL, iTR, &trianglesToReuse, &iterations);
+            try self.triangulatePseudoPolygon(&polyR, &outerTris, iTR, iTL, &trianglesToReuse, &iterations);
+
+            // 5. 标记整条边为固定边
+            try self.fixEdge(.{ .v1 = iA, .v2 = iB });
+        }
     }
 
-    /// 标记已存在的约束边（内部使用）
+    /// 收集与约束边 (iA, iB) 相交的所有三角形，并构建两侧伪多边形。
+    /// 参数：
+    ///   - iA: 约束边起点索引
+    ///   - iB: 约束边终点索引（作为可修改指针，若边经过现有顶点则更新为该顶点）
+    ///   - intersected: 输出参数，存储相交三角形的索引序列
+    ///   - polyL: 输出参数，存储左侧伪多边形的顶点索引（逆时针顺序）
+    ///   - polyR: 输出参数，存储右侧伪多边形的顶点索引（逆时针顺序）
+    ///   - outerTris: 输出参数，存储伪多边形边界边对应的外部三角形索引（Edge -> 邻居三角形）
+    /// 注意：调用前需确保传入的容器已清空。
+    fn collectIntersectedTriangles(
+        self: *CDT,
+        iA: u32,
+        iB: *u32,
+        intersected: *std.ArrayList(u32),
+        polyL: *std.ArrayList(u32),
+        polyR: *std.ArrayList(u32),
+        outerTris: *std.AutoHashMap(Edge, i32),
+    ) !void {
+        const a = self.vertices.items[iA];
+        const b = self.vertices.items[iB.*];
+
+        var first = try self.intersectedTriangle(iA, a, b);
+        var start_from_a = true;
+
+        if (first.tri_idx == -1) {
+            const first_rev = try self.intersectedTriangle(iB.*, b, a);
+            if (first_rev.tri_idx == -1) {
+                // 双向均未找到穿出
+                if (try self.edgeExists(iA, iB.*)) {
+                    return; // 边已存在，无需处理
+                }
+                // 线段完全在某个三角形内部，可视为成功（无需重三角化）
+                return;
+            }
+            first = first_rev;
+            start_from_a = false;
+        }
+
+        // 根据实际行走方向确定起点、终点及左右多边形对应关系
+        const start_pt = if (start_from_a) a else b;
+        const end_pt = if (start_from_a) b else a;
+        const start_idx = if (start_from_a) iA else iB.*;
+        var end_idx = if (start_from_a) iB.* else iA;
+
+        var iT = @as(u32, @intCast(first.tri_idx));
+        const iVL = first.vL;
+        const iVR = first.vR;
+
+        try intersected.append(self.allocator, iT);
+
+        // 初始化伪多边形
+        try polyL.append(self.allocator, start_idx);
+        try polyL.append(self.allocator, iVL);
+        try polyR.append(self.allocator, start_idx);
+        try polyR.append(self.allocator, iVR);
+
+        var tri = &self.triangles.items[iT];
+        try outerTris.put(.{ .v1 = start_idx, .v2 = iVL }, self.edgeNeighbor(tri, start_idx, iVL));
+        try outerTris.put(.{ .v1 = start_idx, .v2 = iVR }, self.edgeNeighbor(tri, start_idx, iVR));
+
+        const iV = start_idx;
+
+        var iter_count: u32 = 0;
+        const max_iter = self.triangles.items.len * 2;
+        while (!self.triangleContainsVertex(iT, end_idx)) : (iter_count += 1) {
+            if (iter_count > max_iter) return error.InfiniteLoopInCollect;
+
+            const iTopo = self.getOpposedTriangle(&self.triangles.items[iT], iV);
+            if (iTopo == -1) return error.EdgeHasNoNeighbor;
+
+            const topo = &self.triangles.items[@intCast(iTopo)];
+            const iVopo = self.opposedVertex(topo, iT);
+
+            // 冲突检测：与已有固定边相交
+            if (self.fixed_edges.contains(.{ .v1 = iVL, .v2 = iVR }) or
+                self.fixed_edges.contains(.{ .v1 = iVR, .v2 = iVL }))
+            {
+                const newPos = self.lineIntersection(start_pt, end_pt, self.vertices.items[iVL], self.vertices.items[iVR]);
+                const iNewVert = try self.splitFixedEdgeAt(.{ .v1 = iVL, .v2 = iVR }, newPos, iT, @intCast(iTopo));
+                iB.* = iNewVert;
+                return;
+            }
+
+            const loc = self.lineSide(self.vertices.items[iVopo], start_pt, end_pt);
+            if (loc == .Left) {
+                try polyL.append(self.allocator, iVopo);
+                try outerTris.put(.{ .v1 = iVL, .v2 = iVopo }, self.edgeNeighbor(topo, iVL, iVopo));
+            } else if (loc == .Right) {
+                try polyR.append(self.allocator, iVopo);
+                try outerTris.put(.{ .v1 = iVR, .v2 = iVopo }, self.edgeNeighbor(topo, iVR, iVopo));
+            } else {
+                // 共线：更新终点为当前顶点
+                end_idx = iVopo;
+                iB.* = iVopo;
+                return;
+            }
+
+            try intersected.append(self.allocator, @intCast(iTopo));
+            iT = @intCast(iTopo);
+        }
+
+        // 记录最后的外部三角形
+        tri = &self.triangles.items[iT];
+        try outerTris.put(.{ .v1 = polyL.getLast(), .v2 = end_idx }, self.edgeNeighbor(tri, polyL.getLast(), end_idx));
+        try outerTris.put(.{ .v1 = polyR.getLast(), .v2 = end_idx }, self.edgeNeighbor(tri, polyR.getLast(), end_idx));
+        try polyL.append(self.allocator, end_idx);
+        try polyR.append(self.allocator, end_idx);
+    }
+
+    /// 辅助：判断三角形是否包含指定顶点
+    fn triangleContainsVertex(self: *CDT, tri_idx: u32, v: u32) bool {
+        const tri = self.triangles.items[tri_idx];
+        return tri.vertices[0] == v or tri.vertices[1] == v or tri.vertices[2] == v;
+    }
+
+    /// 计算两条线段 (a,b) 和 (c,d) 的交点（假设它们不平行且必定相交）
+    fn lineIntersection(self: *CDT, a: Vec2, b: Vec2, c: Vec2, d: Vec2) Vec2 {
+        _ = self;
+        const ab = b.sub(a);
+        const cd = d.sub(c);
+        const ac = c.sub(a);
+        const t = Vec2.cross(ac, cd) / Vec2.cross(ab, cd);
+        return a.add(ab.scale(t));
+    }
+
+    /// 标记约束边（加入 fixed_edges 集合）
     fn fixEdge(self: *CDT, edge: Edge) !void {
-        _ = edge;
-        _ = self;
-        @compileError("Not implemented");
+        try self.fixed_edges.put(self.allocator, edge, {});
     }
 
-    /// 检查约束边是否已存在于网格中
+    /// 检查连接顶点 v1 和 v2 的边是否作为三角形边存在于当前网格中。
+    /// 实现：从 v1 的某个关联三角形出发，通过邻居关系遍历 v1 周围的三角形，
+    ///       检查是否有三角形同时包含 v1 和 v2。
     fn edgeExists(self: *CDT, v1: u32, v2: u32) !bool {
-        _ = v1;
-        _ = v2;
-        _ = self;
-        @compileError("Not implemented");
+        if (v1 >= self.vertices.items.len or v2 >= self.vertices.items.len) return false;
+        const start_tri = self.vert_tris.items[v1];
+        if (start_tri >= self.triangles.items.len) return false;
+
+        var visited = std.AutoHashMap(u32, void).init(self.allocator);
+        defer visited.deinit();
+
+        var stack = std.ArrayList(u32){};
+        defer stack.deinit(self.allocator);
+        try stack.append(self.allocator, start_tri);
+
+        while (stack.items.len > 0) {
+            const cur = stack.pop().?;
+            if (visited.contains(cur)) continue;
+            try visited.put(cur, {});
+
+            const tri = self.triangles.items[cur];
+            // 检查是否包含 v2
+            if (tri.vertices[0] == v2 or tri.vertices[1] == v2 or tri.vertices[2] == v2) {
+                // 进一步检查 (v1, v2) 是否是一条边（即它们共享的边）
+                const has_edge = (tri.vertices[0] == v1 and tri.vertices[1] == v2) or
+                    (tri.vertices[1] == v1 and tri.vertices[2] == v2) or
+                    (tri.vertices[2] == v1 and tri.vertices[0] == v2) or
+                    (tri.vertices[0] == v2 and tri.vertices[1] == v1) or
+                    (tri.vertices[1] == v2 and tri.vertices[2] == v1) or
+                    (tri.vertices[2] == v2 and tri.vertices[0] == v1);
+                if (has_edge) return true;
+            }
+
+            // 将包含 v1 的邻居三角形压入栈
+            for (tri.neighbors) |n| {
+                if (n != -1) {
+                    const neighbor_idx = @as(u32, @intCast(n));
+                    const neighbor = self.triangles.items[neighbor_idx];
+                    if (neighbor.vertices[0] == v1 or neighbor.vertices[1] == v1 or neighbor.vertices[2] == v1) {
+                        try stack.append(self.allocator, neighbor_idx);
+                    }
+                }
+            }
+        }
+        return false;
     }
 
-    /// 在交点处拆分约束边，并重新插入网格
-    fn splitFixedEdgeAt(self: *CDT, edge: Edge, pos: Vec2, t1: u32, t2: u32) !u32 {
-        _ = edge;
-        _ = pos;
-        _ = t1;
-        _ = t2;
+    /// 辅助：围绕顶点 v 旋转到下一个三角形（逆时针方向）
+    /// 参数 cur: 当前三角形索引
+    /// 参数 v: 中心顶点索引
+    /// 参数 prev: 前一个三角形索引（用于确定旋转方向，首次调用可为 null）
+    /// 返回下一个包含 v 的三角形索引，若无则返回 null
+    fn nextTriangleAroundVertex(self: *CDT, cur: u32, v: u32, prev: ?u32) ?u32 {
+        const tri = self.triangles.items[cur];
+        const idx = blk: {
+            for (tri.vertices, 0..) |vertex, i| {
+                if (vertex == v) break :blk @as(u32, @intCast(i));
+            }
+            return null;
+        };
+
+        if (prev == null) {
+            const n = tri.neighbors[(idx + 2) % 3];
+            return if (n != -1) @intCast(n) else null;
+        } else {
+            for (tri.neighbors, 0..) |n, i| {
+                if (n != -1 and @as(u32, @intCast(n)) == prev.?) {
+                    const next_n = tri.neighbors[(i + 2) % 3];
+                    return if (next_n != -1) @intCast(next_n) else null;
+                }
+            }
+            return null;
+        }
+    }
+
+    /// 查找线段 AB 首次穿出的三角形。支持起点为顶点的情况。
+    /// 返回值：
+    ///   tri_idx = -1：未找到穿出（可能边已存在或线段完全在内部）
+    ///   tri_idx = -2：线段完全位于某个三角形内部（起点和终点在同一三角形）
+    ///   否则返回穿入边的邻居三角形及边端点。
+    fn intersectedTriangle(self: *CDT, iA: u32, a: Vec2, b: Vec2) !struct { tri_idx: i32, vL: u32, vR: u32 } {
+        const start_tri = self.vert_tris.items[iA];
+        var cur_tri = start_tri;
+        var prev_tri: ?u32 = null;
+
+        const max_iter = self.triangles.items.len * 2;
+        var iter: u32 = 0;
+
+        while (iter < max_iter) : (iter += 1) {
+            const tri = self.triangles.items[cur_tri];
+
+            // 如果终点在当前三角形内部，则线段完全在内部
+            if (self.pointInTriangle(b, tri)) {
+                return .{ .tri_idx = -2, .vL = 0, .vR = 0 };
+            }
+
+            // 找到起点 iA 在当前三角形中的索引
+            const local_idx = blk: {
+                for (tri.vertices, 0..) |v, idx| {
+                    if (v == iA) break :blk @as(u32, @intCast(idx));
+                }
+                // 如果 iA 不在该三角形中，说明 vert_tris 可能未及时更新，跳出循环
+                break;
+            };
+
+            // 对边索引（不包含起点的边）
+            const opp_edge_idx = (local_idx + 1) % 3;
+            const v_start = tri.vertices[opp_edge_idx];
+            const v_end = tri.vertices[(opp_edge_idx + 1) % 3];
+            const p1 = self.vertices.items[v_start];
+            const p2 = self.vertices.items[v_end];
+            const neighbor = tri.neighbors[opp_edge_idx];
+
+            // 检查线段 AB 是否与对边严格相交
+            if (self.segmentsIntersect(a, b, p1, p2) and
+                !self.pointOnSegment(a, p1, p2) and
+                !self.pointOnSegment(b, p1, p2))
+            {
+                if (neighbor != -1) {
+                    return .{ .tri_idx = neighbor, .vL = v_start, .vR = v_end };
+                } else {
+                    return .{ .tri_idx = -1, .vL = 0, .vR = 0 };
+                }
+            }
+
+            // 处理起点恰好在边上的情况（例如线段沿边方向）
+            if (self.pointOnSegment(a, p1, p2)) {
+                const side = Vec2.signedArea2(p1, p2, b);
+                if (side < 0 and neighbor != -1) {
+                    return .{ .tri_idx = neighbor, .vL = v_start, .vR = v_end };
+                }
+            }
+
+            // 移动到下一个包含 iA 的三角形
+            const next = self.nextTriangleAroundVertex(cur_tri, iA, prev_tri);
+            if (next == null or next.? == start_tri) break;
+            prev_tri = cur_tri;
+            cur_tri = next.?;
+        }
+
+        return .{ .tri_idx = -1, .vL = 0, .vR = 0 };
+    }
+
+    /// 判断两条线段 AB 和 CD 是否相交（包括端点接触，但可通过容差调整）
+    fn segmentsIntersect(self: *CDT, a: Vec2, b: Vec2, c: Vec2, d: Vec2) bool {
         _ = self;
-        @compileError("Not implemented");
+        const o1 = Vec2.signedArea2(a, b, c);
+        const o2 = Vec2.signedArea2(a, b, d);
+        const o3 = Vec2.signedArea2(c, d, a);
+        const o4 = Vec2.signedArea2(c, d, b);
+
+        // 一般情况：跨立
+        if (o1 * o2 < 0 and o3 * o4 < 0) return true;
+
+        // 共线情况：检查投影重叠（这里简化，可忽略，因为我们的线段是约束边，通常不会与网格边共线）
+        return false;
+    }
+
+    /// 在交点处拆分固定边，并返回新顶点的索引
+    /// 参数 edge: 需要拆分的固定边
+    /// 参数 pos: 交点的坐标
+    /// 参数 t1, t2: 共享该边的两个三角形（与 insertVertexOnEdge 类似）
+    fn splitFixedEdgeAt(self: *CDT, edge: Edge, pos: Vec2, t1: u32, t2: u32) !u32 {
+        // 1. 在交点处插入新顶点
+        const split_vert = try self.addSplitEdgeVertex(pos, t1, t2);
+        // 2. 将原固定边拆分为两段
+        try self.splitFixedEdge(edge, split_vert);
+        return split_vert;
     }
 
     /// 在交点处添加新顶点（内部调用）
+    /// 参数 pos: 交点坐标
+    /// 参数 t1, t2: 共享该边的两个三角形
+    /// 流程：添加顶点 → 在边上插入 → 恢复 Delaunay
     fn addSplitEdgeVertex(self: *CDT, pos: Vec2, t1: u32, t2: u32) !u32 {
-        _ = pos;
-        _ = t1;
-        _ = t2;
-        _ = self;
-        @compileError("Not implemented");
+        const new_v = try self.addVertex(pos);
+        // 从 t1 和 t2 中找到共享边的两个端点
+        const tri1 = &self.triangles.items[t1];
+        // 遍历 tri1 的边，找到邻居为 t2 的那条边
+        for (0..3) |i| {
+            if (tri1.neighbors[i] == t2) {
+                const v1 = tri1.vertices[i];
+                const v2 = tri1.vertices[(i + 1) % 3];
+                try self.insertVertexOnEdge(new_v, v1, v2, t1, t2);
+                break;
+            }
+        } else {
+            return error.EdgeNotFoundInTriangle;
+        }
+        try self.ensureDelaunayByEdgeFlip(new_v);
+        return new_v;
     }
 
-    /// 将固定边拆分为两段
+    /// 将固定边拆分为两段，并更新 fixed_edges 集合
     fn splitFixedEdge(self: *CDT, edge: Edge, split_vert: u32) !void {
-        _ = edge;
-        _ = split_vert;
-        _ = self;
-        @compileError("Not implemented");
+        // 移除原固定边
+        _ = self.fixed_edges.remove(edge);
+        // 添加两段新固定边
+        try self.fixEdge(.{ .v1 = edge.v1, .v2 = split_vert });
+        try self.fixEdge(.{ .v1 = split_vert, .v2 = edge.v2 });
     }
 
     // ---------- Delaunay维护与边翻转 ----------
@@ -433,20 +816,18 @@ pub const CDT = struct {
     /// 算法：循环处理 temp_stack 中的每个三角形，检查其与邻居的公共边是否需要进行翻转，
     ///       若翻转，则将新形成的三角形也加入栈中，直到栈空。
     fn ensureDelaunayByEdgeFlip(self: *CDT, v: u32) !void {
-        while (self.temp_stack.items.len > 0) {
+        var flip_count: u32 = 0;
+        const max_flips = self.triangles.items.len * 5; // 经验值
+        while (self.temp_stack.items.len > 0) : (flip_count += 1) {
+            if (flip_count > max_flips) return error.InfiniteLoopEdgeFlip;
             const t = self.temp_stack.pop().?;
-
-            // 获取边翻转所需的几何与拓扑信息
             const info = try self.edgeFlipInfo(t, v);
-            if (info.new_t1 == -1) continue; // 该边无邻居三角形，无法翻转
-
-            // 检查是否需要翻转边
+            if (info.new_t1 == -1) continue;
             if (self.shouldFlipEdge(v, info.v2, info.v3, info.v4)) {
-                // 执行边翻转
                 try self.flipEdge(t, @intCast(info.new_t1), v, info.v2, info.v3, info.v4, info.n1, info.n2, info.n3, info.n4);
-                // 翻转后，原三角形 t 和 new_t1 的内容已被修改，需再次检查
                 try self.temp_stack.append(self.allocator, t);
                 try self.temp_stack.append(self.allocator, @intCast(info.new_t1));
+                flip_count += 1;
             }
         }
     }
@@ -619,7 +1000,8 @@ pub const CDT = struct {
     }
 
     /// 判断点在有向边的哪一侧
-    fn lineSide(pt: Vec2, a: Vec2, b: Vec2) enum { Left, Right, On } {
+    fn lineSide(self: *CDT, pt: Vec2, a: Vec2, b: Vec2) enum { Left, Right, On } {
+        _ = self;
         const ab = b.sub(a);
         const ap = pt.sub(a);
         const cross_val = Vec2.cross(ab, ap);
@@ -630,27 +1012,49 @@ pub const CDT = struct {
 
     /// 判断三角形是否包含指定边（顶点顺序无关）
     fn triangleHasEdge(self: *CDT, tri: Triangle, v1: u32, v2: u32) bool {
-        _ = tri;
-        _ = v1;
-        _ = v2;
         _ = self;
-        @compileError("Not implemented");
+        const a = tri.vertices[0];
+        const b = tri.vertices[1];
+        const c = tri.vertices[2];
+        return (a == v1 and b == v2) or (a == v2 and b == v1) or
+            (b == v1 and c == v2) or (b == v2 and c == v1) or
+            (c == v1 and a == v2) or (c == v2 and a == v1);
     }
 
-    /// 获取三角形中与给定顶点对边相邻的邻居三角形
+    /// 获取三角形 tri 中与顶点 v 相对的边所邻接的三角形索引。
+    /// 即：若 v 是 tri 的一个顶点，则返回该顶点对边上的邻居三角形。
+    /// 若该边无邻居（边界），则返回 -1。
     fn getOpposedTriangle(self: *CDT, tri: *Triangle, v: u32) i32 {
-        _ = tri;
-        _ = v;
         _ = self;
-        @compileError("Not implemented");
+        // 找到顶点 v 在三角形顶点数组中的位置
+        const idx = blk: {
+            for (tri.vertices, 0..) |vertex, i| {
+                if (vertex == v) break :blk @as(u32, @intCast(i));
+            } // 若顶点不在三角形中，返回 -1（调用者应保证 v 在 tri 内）
+            return -1;
+        };
+        // 对边是 (idx+1) 和 (idx+2) 构成的边，其邻居在 neighbors 中的索引为 (idx+1)%3
+        return tri.neighbors[(idx + 1) % 3];
     }
 
-    /// 获取相邻三角形中远离当前三角形的远端顶点
-    fn opposedVertex(self: *CDT, tri: *Triangle, t_neighbor: u32) u32 {
-        _ = tri;
-        _ = t_neighbor;
-        _ = self;
-        @compileError("Not implemented");
+    /// 获取邻居三角形 neighbor_tri 中不与当前三角形共享的远端顶点索引。
+    /// 参数 tri: 当前三角形的指针（用于确定共享边）
+    /// 参数 neighbor_tri: 邻居三角形的索引
+    fn opposedVertex(self: *CDT, tri: *Triangle, neighbor_tri: u32) u32 {
+        const neighbor = &self.triangles.items[neighbor_tri];
+        // 遍历 neighbor 的顶点，找出不在 tri 中的那个顶点
+        for (neighbor.vertices) |v| {
+            var found = false;
+            for (tri.vertices) |tv| {
+                if (v == tv) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return v;
+        }
+        // 理论上不应执行到这里，因为两个相邻三角形共享两个顶点
+        return 0;
     }
 
     /// 获取共享边 (v1, v2) 的邻居三角形索引
@@ -713,35 +1117,153 @@ pub const CDT = struct {
         iInParent: u32,
     };
 
-    /// 对伪多边形进行重新三角剖分
-    fn triangulatePseudoPolygon(self: *CDT, poly: *std.ArrayListUnmanaged(u32), outer_tris: *std.AutoHashMapUnmanaged(Edge, i32), iTL: u32, iTR: u32, triangles_to_reuse: *std.ArrayListUnmanaged(u32), iterations: *std.ArrayListUnmanaged(TriangulatePseudoPolygonTask)) !void {
-        _ = poly;
-        _ = outer_tris;
-        _ = iTL;
-        _ = iTR;
-        _ = triangles_to_reuse;
-        _ = iterations;
-        _ = self;
-        @compileError("Not implemented");
+    /// 对伪多边形进行重新三角剖分（入口函数）
+    /// 参数 poly: 多边形顶点索引列表（逆时针顺序）
+    /// 参数 outerTris: 边界边对应的外部三角形映射
+    /// 参数 iTL, iTR: 与外部相连的两个三角形索引（用于确定起始父三角形）
+    /// 参数 trianglesToReuse: 可重用的三角形索引栈（即被删除的相交三角形）
+    /// 参数 iterations: 任务栈
+    fn triangulatePseudoPolygon(
+        self: *CDT,
+        poly: *std.ArrayListUnmanaged(u32),
+        outerTris: *std.AutoHashMap(Edge, i32),
+        iTL: u32,
+        iTR: u32,
+        trianglesToReuse: *std.ArrayListUnmanaged(u32),
+        iterations: *std.ArrayListUnmanaged(TriangulatePseudoPolygonTask),
+    ) !void {
+        iterations.clearRetainingCapacity();
+        // 初始任务：整个多边形范围 (0, len-1)，使用 iTL 作为起始三角形
+        try iterations.append(self.allocator, .{
+            .iA = 0,
+            .iB = @intCast(poly.items.len - 1),
+            .iT = iTL,
+            .iParent = iTR,
+            .iInParent = 0,
+        });
+
+        var iter_count: u32 = 0;
+        const max_iter = poly.items.len * 2;
+        while (iterations.items.len > 0) : (iter_count += 1) {
+            if (iter_count > max_iter) return error.InfiniteLoopTriangulation;
+            try self.triangulatePseudoPolygonIteration(poly, outerTris, trianglesToReuse, iterations);
+        }
     }
 
-    /// 单次三角化迭代（处理一个固定边）
-    fn triangulatePseudoPolygonIteration(self: *CDT, poly: *std.ArrayListUnmanaged(u32), outer_tris: *std.AutoHashMapUnmanaged(Edge, i32), triangles_to_reuse: *std.ArrayListUnmanaged(u32), iterations: *std.ArrayListUnmanaged(TriangulatePseudoPolygonTask)) !void {
-        _ = poly;
-        _ = outer_tris;
-        _ = triangles_to_reuse;
-        _ = iterations;
-        _ = self;
-        @compileError("Not implemented");
+    /// 单次三角化迭代：处理一个固定边 (poly[iA], poly[iB])
+    fn triangulatePseudoPolygonIteration(
+        self: *CDT,
+        poly: *std.ArrayListUnmanaged(u32),
+        outerTris: *std.AutoHashMap(Edge, i32), // 改为托管版本
+        trianglesToReuse: *std.ArrayListUnmanaged(u32),
+        iterations: *std.ArrayListUnmanaged(TriangulatePseudoPolygonTask),
+    ) !void {
+        const task = iterations.pop().?;
+        const iA = task.iA;
+        const iB = task.iB;
+        var iT = task.iT;
+        const iParent = task.iParent;
+        const iInParent = task.iInParent;
+
+        // 如果任务区间无效，直接返回
+        if (iB - iA < 1) return;
+
+        // 1. 寻找最佳第三点 iC（使三角形 (a,b,c) 最符合 Delaunay 规则）
+        const iC = self.findDelaunayPoint(poly, iA, iB);
+        const a = poly.items[iA];
+        const b = poly.items[iB];
+        const c = poly.items[iC];
+
+        // 2. 如果没有可重用的三角形，分配一个新的
+        if (trianglesToReuse.items.len == 0) {
+            iT = try self.addNewTriangle();
+        } else {
+            iT = trianglesToReuse.pop().?;
+        }
+
+        const tri = &self.triangles.items[iT];
+
+        // 3. 设置当前三角形的顶点
+        tri.vertices = .{ a, b, c };
+
+        // 4. 处理右子区间 (iC, iB)
+        if (iB - iC > 1) {
+            // 需要递归处理
+            const iNext = if (trianglesToReuse.items.len > 0) trianglesToReuse.pop().? else try self.addNewTriangle();
+            try iterations.append(self.allocator, .{
+                .iA = iC,
+                .iB = iB,
+                .iT = iNext,
+                .iParent = iT,
+                .iInParent = 1,
+            });
+        } else {
+            // 边界边，连接外部三角形
+            const outerEdge = Edge{ .v1 = b, .v2 = c };
+            const outerTri = outerTris.get(outerEdge) orelse -1;
+            if (outerTri != -1) {
+                tri.neighbors[1] = outerTri;
+                try self.setNewNeighbor(@intCast(outerTri), c, b, iT);
+            } else {
+                tri.neighbors[1] = -1;
+                // 若不存在，记录以便后续使用
+                try outerTris.put(outerEdge, @intCast(iT));
+            }
+        }
+
+        // 5. 处理左子区间 (iA, iC)
+        if (iC - iA > 1) {
+            const iNext = if (trianglesToReuse.items.len > 0) trianglesToReuse.pop().? else try self.addNewTriangle();
+            try iterations.append(self.allocator, .{
+                .iA = iA,
+                .iB = iC,
+                .iT = iNext,
+                .iParent = iT,
+                .iInParent = 2,
+            });
+        } else {
+            const outerEdge = Edge{ .v1 = c, .v2 = a };
+            const outerTri = outerTris.get(outerEdge) orelse -1;
+            if (outerTri != -1) {
+                tri.neighbors[2] = outerTri;
+                try self.setNewNeighbor(@intCast(outerTri), a, c, iT);
+            } else {
+                tri.neighbors[2] = -1;
+                try outerTris.put(outerEdge, @intCast(iT));
+            }
+        }
+
+        // 6. 连接父三角形
+        if (iParent != iT) {
+            const parentTri = &self.triangles.items[iParent];
+            parentTri.neighbors[iInParent] = @intCast(iT);
+            tri.neighbors[0] = @intCast(iParent);
+        } else {
+            tri.neighbors[0] = -1;
+        }
+
+        // 7. 维护顶点关联三角形
+        try self.setVertTri(c, iT);
     }
 
-    /// 在伪多边形中寻找最佳第三点（使外接圆不包含其他顶点）
+    /// 在伪多边形顶点子区间 (iA, iB) 中寻找最佳第三点 iC
+    /// 最佳意味着点 c 与 a,b 构成的外接圆不包含其他顶点，即最符合 Delaunay 规则。
+    /// 实现：遍历区间内所有点，选择第一个满足空圆条件的点。
     fn findDelaunayPoint(self: *CDT, poly: *std.ArrayListUnmanaged(u32), iA: u32, iB: u32) u32 {
-        _ = poly;
-        _ = iA;
-        _ = iB;
-        _ = self;
-        @compileError("Not implemented");
+        const a = self.vertices.items[poly.items[iA]];
+        const b = self.vertices.items[poly.items[iB]];
+        var best = iA + 1;
+        var best_c = self.vertices.items[poly.items[best]];
+
+        for (iA + 1..iB) |i| {
+            const v = self.vertices.items[poly.items[i]];
+            // 如果 v 在三角形 (a, b, best_c) 的外接圆内，则更新 best
+            if (pointInCircumcircle(v, a, b, best_c)) {
+                best = @intCast(i);
+                best_c = v;
+            }
+        }
+        return best;
     }
 
     // ---------- 寻路相关 ----------
@@ -803,3 +1325,206 @@ pub const CDT = struct {
         @compileError("Not implemented");
     }
 };
+
+// ---------- 测试 ----------
+const testing = std.testing;
+const expect = testing.expect;
+const expectEqual = testing.expectEqual;
+
+/// 综合拓扑验证（合并版）：一次遍历完成邻居双向性 + 边匹配检查
+pub fn validateTopology(cdt: *CDT) !void {
+    // 1. 三角形边检查（双向性 + 边匹配）
+    for (cdt.triangles.items, 0..) |tri, i| {
+        for (tri.neighbors, 0..) |n, edge_idx| {
+            if (n == -1) continue;
+
+            const neighbor_idx = @as(usize, @intCast(n));
+            if (neighbor_idx >= cdt.triangles.items.len) {
+                std.debug.print("Triangle {} edge {} out-of-range neighbor {}\n", .{ i, edge_idx, n });
+                return error.NeighborOutOfRange;
+            }
+
+            const neighbor = cdt.triangles.items[neighbor_idx];
+            const v1 = tri.vertices[edge_idx];
+            const v2 = tri.vertices[(edge_idx + 1) % 3];
+
+            // 检查邻居是否共享该边
+            if (!cdt.triangleHasEdge(neighbor, v1, v2)) {
+                std.debug.print("Triangle {} edge {}-{} neighbor {} does not share edge\n", .{ i, v1, v2, n });
+                return error.EdgeNeighborMismatch;
+            }
+
+            // 检查双向性（邻居是否指回）
+            var reciprocal = false;
+            for (neighbor.neighbors) |nn| {
+                if (nn == @as(i32, @intCast(i))) {
+                    reciprocal = true;
+                    break;
+                }
+            }
+            if (!reciprocal) {
+                std.debug.print("Triangle {} edge {} neighbor {} not reciprocal\n", .{ i, edge_idx, n });
+                return error.NeighborNotReciprocal;
+            }
+        }
+    }
+
+    // 2. vert_tris 有效性检查（独立遍历）
+    for (cdt.vert_tris.items, 0..) |tri_idx, v| {
+        if (tri_idx >= cdt.triangles.items.len) {
+            std.debug.print("Vertex {} vert_tris {} out of range\n", .{ v, tri_idx });
+            return error.InvalidVertTri;
+        }
+        const tri = cdt.triangles.items[tri_idx];
+        const contains = tri.vertices[0] == v or tri.vertices[1] == v or tri.vertices[2] == v;
+        if (!contains) {
+            std.debug.print("Vertex {} vert_tris {} does not contain vertex\n", .{ v, tri_idx });
+            return error.VertTriMismatch;
+        }
+    }
+}
+
+fn runInsertionTest(points: []const Vec2) !void {
+    var cdt = try CDT.init(testing.allocator, 100, 100);
+    defer cdt.deinit();
+
+    for (points) |pt| {
+        const v = try cdt.addVertex(pt);
+        try cdt.insertVertex(v);
+        try validateTopology(&cdt); // 每一步都验证
+    }
+}
+
+test "CDT basic insertions" {
+    const points = [_]Vec2{
+        .{ .x = 30, .y = 40 },
+        .{ .x = 60, .y = 20 },
+        .{ .x = 50, .y = 70 },
+        .{ .x = 20, .y = 80 },
+        .{ .x = 80, .y = 50 },
+    };
+    try runInsertionTest(&points);
+}
+
+test "CDT edge flip scenario" {
+    const points = [_]Vec2{
+        .{ .x = 10, .y = 10 },
+        .{ .x = 90, .y = 10 },
+        .{ .x = 90, .y = 90 },
+        .{ .x = 10, .y = 90 },
+        .{ .x = 50, .y = 50 }, // 触发翻转
+    };
+    try runInsertionTest(&points);
+}
+
+test "CDT random insertions" {
+    var cdt = try CDT.init(testing.allocator, 100, 100);
+    defer cdt.deinit();
+
+    var rand = std.Random.DefaultPrng.init(42);
+    const random = rand.random();
+
+    for (0..50) |_| {
+        const x = random.float(f32) * 100;
+        const y = random.float(f32) * 100;
+        const v = try cdt.addVertex(.{ .x = x, .y = y });
+        try cdt.insertVertex(v);
+        try validateTopology(&cdt);
+    }
+}
+
+test "intersecting constraint edges" {
+    const allocator = std.testing.allocator;
+
+    // 创建一个小型 CDT，地图尺寸 100x100
+    var cdt = try CDT.init(allocator, 100, 100);
+    defer cdt.deinit();
+
+    // 第一条约束边的两个端点
+    const a1 = Vec2.new(20, 20);
+    const b1 = Vec2.new(80, 80);
+
+    // 第二条约束边的两个端点（与第一条相交）
+    const a2 = Vec2.new(20, 80);
+    const b2 = Vec2.new(80, 20);
+
+    // 添加顶点（去重容差设为 0.1）
+    const tol = 0.1;
+    const v_a1 = try cdt.findOrAddVertex(a1, tol);
+    const v_b1 = try cdt.findOrAddVertex(b1, tol);
+    const v_a2 = try cdt.findOrAddVertex(a2, tol);
+    const v_b2 = try cdt.findOrAddVertex(b2, tol);
+
+    // 插入第二条约束边（相交）
+    try cdt.insertConstraintEdge(v_a2, v_b2);
+    // 插入第一条约束边
+    try cdt.insertConstraintEdge(v_a1, v_b1);
+
+    // 验证：两条边都应被标记为固定边
+    try std.testing.expect(cdt.fixed_edges.contains(.{ .v1 = v_a1, .v2 = v_b1 }) or
+        cdt.fixed_edges.contains(.{ .v1 = v_b1, .v2 = v_a1 }));
+    try std.testing.expect(cdt.fixed_edges.contains(.{ .v1 = v_a2, .v2 = v_b2 }) or
+        cdt.fixed_edges.contains(.{ .v1 = v_b2, .v2 = v_a2 }));
+
+    // 可选：检查交点是否被正确插入（网格顶点数应增加）
+    // 这里不强制要求，仅作为观察点
+    std.debug.print("Total vertices after insertion: {}\n", .{cdt.vertices.items.len});
+}
+
+test "CDT constraint edge insertion" {
+    // 构建一个简单四边形加中心点的基础网格
+    var cdt = try CDT.init(testing.allocator, 100, 100);
+    defer cdt.deinit();
+
+    const points = [_]Vec2{
+        .{ .x = 20, .y = 20 },
+        .{ .x = 80, .y = 20 },
+        .{ .x = 80, .y = 80 },
+        .{ .x = 20, .y = 80 },
+        .{ .x = 50, .y = 50 },
+    };
+
+    var verts = std.ArrayList(u32){};
+    defer verts.deinit(testing.allocator);
+
+    for (points) |pt| {
+        const v = try cdt.addVertex(pt);
+        try cdt.insertVertex(v);
+        try verts.append(testing.allocator, v);
+        try validateTopology(&cdt);
+    }
+
+    // 插入一条约束边：从左上(20,20)到右下(80,80)
+    const v1 = verts.items[0]; // (20,20)
+    const v2 = verts.items[2]; // (80,80)
+    try cdt.insertConstraintEdge(v1, v2);
+    try validateTopology(&cdt);
+}
+
+test "minimal intersecting constraint edges debug" {
+    const allocator = std.testing.allocator;
+    var cdt = try CDT.init(allocator, 200, 200);
+    defer cdt.deinit();
+
+    // 从你的错误日志中提取的坐标
+    const a1 = Vec2.new(16.22, 9.03);
+    const b1 = Vec2.new(10.66, 14.03);
+    const a2 = Vec2.new(15.86, 15.27);
+    const b2 = Vec2.new(10.54, 9.69);
+
+    // 插入端点
+    const v_a1 = try cdt.findOrAddVertex(a1, 0.1);
+    const v_b1 = try cdt.findOrAddVertex(b1, 0.1);
+    const v_a2 = try cdt.findOrAddVertex(a2, 0.1);
+    const v_b2 = try cdt.findOrAddVertex(b2, 0.1);
+
+    std.debug.print("\n--- Insert first edge ({}, {}) ---\n", .{ v_a1, v_b1 });
+    try cdt.insertConstraintEdge(v_a1, v_b1);
+    std.debug.print("First edge inserted. fixed_edges count: {}\n", .{cdt.fixed_edges.count()});
+
+    std.debug.print("\n--- Insert second edge ({}, {}) ---\n", .{ v_a2, v_b2 });
+    try cdt.insertConstraintEdge(v_a2, v_b2);
+    std.debug.print("Second edge inserted. fixed_edges count: {}\n", .{cdt.fixed_edges.count()});
+
+    try std.testing.expect(cdt.fixed_edges.count() >= 2);
+}

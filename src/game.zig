@@ -13,6 +13,8 @@ ubo: SceneUniform,
 rts_map: RTSMap,
 player_id: u32 = 0,
 
+constraint_start: ?Vec2 = null, // 右键按下时记录的第一个点
+
 // 开始游戏
 pub fn start(self: *Game) !void {
     // 初始化主菜单
@@ -26,9 +28,26 @@ pub fn start(self: *Game) !void {
     self.registry.add(e1, Comps.Player{ .id = self.player_id });
     self.registry.add(e1, Comps.Speed{ .value = 3 });
 
-    const enable_game_loop = true;
+    // // 第一个四边形障碍物（左下角在 (10,10)，边长 10）
+    // const quad1 = [_]Vec2{
+    //     Vec2.new(10.0, 10.0),
+    //     Vec2.new(20.0, 10.0),
+    //     Vec2.new(20.0, 20.0),
+    //     Vec2.new(10.0, 20.0),
+    // };
+    // try self.rts_map.placeObstacle(&quad1);
+
+    // // 第二个四边形障碍物，紧贴第一个的右侧（共边 (20,10)-(20,20)）
+    // const quad2 = [_]Vec2{
+    //     Vec2.new(20.0, 10.0), // 与 quad1 的右上角共用
+    //     Vec2.new(30.0, 10.0),
+    //     Vec2.new(30.0, 20.0),
+    //     Vec2.new(20.0, 20.0), // 与 quad1 的右下角共用
+    // };
+    // try self.rts_map.placeObstacle(&quad2);
+
     // 主循环
-    while (!self.window.shouldClose() and enable_game_loop) {
+    while (!self.window.shouldClose()) {
         // 先重置输入状态
         self.input.beginFrame();
         // 再更新窗口事件
@@ -43,9 +62,45 @@ pub fn start(self: *Game) !void {
                 const ray = self.camera.getForwardRay();
                 if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
                     const pt = Vec2.new(hit.point.x, hit.point.z);
-                    const v_idx = try self.rts_map.cdt.addVertex(pt);
-                    try self.rts_map.cdt.insertVertex(v_idx);
+                    const tolerance = 0.5;
+                    _ = try self.rts_map.cdt.findOrAddVertex(pt, tolerance);
                     try self.rts_map.updateMeshBuffers();
+                }
+            }
+
+            // 鼠标右键按下：记录起点
+            if (self.input.isMouseButtonDown(.mouse_right)) {
+                const ray = self.camera.getForwardRay();
+                if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
+                    const pt = Vec2.new(hit.point.x, hit.point.z);
+                    if (self.constraint_start == null) {
+                        self.constraint_start = pt;
+                        std.debug.print("Constraint edge starting point: ({d:.2}, {d:.2})\n", .{ pt.x, pt.y });
+                    }
+                } // 如果未击中，什么也不做
+            }
+
+            if (self.input.isMouseButtonReleased(.mouse_right)) {
+                if (self.constraint_start) |start_pt| {
+                    const ray = self.camera.getForwardRay();
+                    if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
+                        const end = Vec2.new(hit.point.x, hit.point.z);
+                        // 避免起点和终点相同
+                        if (!start_pt.eql(end)) {
+                            std.debug.print("Insert constraint edge: ({d:.2}, {d:.2}) -> ({d:.2}, {d:.2})\n", .{ start_pt.x, start_pt.y, end.x, end.y });
+                            // 将两个端点加入顶点列表并插入网格
+                            const tolerance = 0.5; // 根据你的地图尺度调整，例如网格间距的 1/10
+                            const v1 = try self.rts_map.cdt.findOrAddVertex(start_pt, tolerance);
+                            const v2 = try self.rts_map.cdt.findOrAddVertex(end, tolerance);
+                            try self.rts_map.cdt.insertConstraintEdge(v1, v2);
+                            // 插入约束边
+                            try self.rts_map.cdt.insertConstraintEdge(v1, v2);
+                            // 更新渲染缓冲区
+                            try self.rts_map.updateMeshBuffers();
+                        }
+                    }
+                    // 清除状态
+                    self.constraint_start = null;
                 }
             }
 
