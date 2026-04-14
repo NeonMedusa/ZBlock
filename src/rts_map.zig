@@ -52,7 +52,16 @@ pub const RTSMap = struct {
         var self: RTSMap = undefined;
         self.allocator = allocator;
 
-        self.cdt = try CDT.init(allocator, width, height);
+        self.cdt = CDT.init(allocator);
+        // 创建三个顶点，形成一个大三角形覆盖整个地图区域
+        const wf = @as(f32, @floatFromInt(width));
+        const hf = @as(f32, @floatFromInt(height));
+        // 三角形顶点：左下、右下、左上（足够大以覆盖整个区域）
+        const v0 = try self.cdt.newVertex(Vec2{ .x = -wf, .y = -hf }, std.math.maxInt(u32));
+        const v1 = try self.cdt.newVertex(Vec2{ .x = wf * 2.0, .y = -hf }, std.math.maxInt(u32));
+        const v2 = try self.cdt.newVertex(Vec2{ .x = -wf, .y = hf * 2.0 }, std.math.maxInt(u32));
+        // 创建三角形
+        _ = try self.cdt.makeTriangle(v0, v1, v2);
 
         self.gctx = gctx;
         self.width = width;
@@ -145,23 +154,31 @@ pub const RTSMap = struct {
         defer index_list.deinit(self.allocator);
         var wireframe_index_list = std.ArrayList(u32){};
         defer wireframe_index_list.deinit(self.allocator);
-        // 遍历所有三角形
-        for (cdt.triangles.items) |tri| {
-            const v0 = tri.vertices[0];
-            const v1 = tri.vertices[1];
-            const v2 = tri.vertices[2];
-            const pos0 = cdt.vertices.items[v0];
-            const pos1 = cdt.vertices.items[v1];
-            const pos2 = cdt.vertices.items[v2];
+
+        // 遍历所有面，跳过无效面（symedge == maxInt(u32)）
+        for (cdt.faces.items, 0..) |face, face_idx| {
+            if (face.symedge == std.math.maxInt(u32)) continue;
+
+            // 获取面的三个 SymEdge
+            const face_edges = cdt.getFaceSymEdges(@as(u32, @intCast(face_idx)));
+            const s0 = face_edges.s0;
+            const s1 = face_edges.s1;
+            const s2 = face_edges.s2;
+
+            // 获取三个顶点索引
+            const v0 = cdt.org(s0);
+            const v1 = cdt.org(s1);
+            const v2 = cdt.org(s2);
+
+            // 获取顶点位置
+            const pos0 = cdt.vertices.items[v0].pos;
+            const pos1 = cdt.vertices.items[v1].pos;
+            const pos2 = cdt.vertices.items[v2].pos;
 
             // 检查三条边是否为约束边
-            const edge01 = Edge{ .v1 = v0, .v2 = v1 };
-            const edge12 = Edge{ .v1 = v1, .v2 = v2 };
-            const edge20 = Edge{ .v1 = v2, .v2 = v0 };
-
-            const is_edge01_fixed = cdt.constrained_edges.contains(edge01) or cdt.constrained_edges.contains(.{ .v1 = v1, .v2 = v0 });
-            const is_edge12_fixed = cdt.constrained_edges.contains(edge12) or cdt.constrained_edges.contains(.{ .v1 = v2, .v2 = v1 });
-            const is_edge20_fixed = cdt.constrained_edges.contains(edge20) or cdt.constrained_edges.contains(.{ .v1 = v0, .v2 = v2 });
+            const is_edge01_fixed = cdt.isConstrainedEdge(s0);
+            const is_edge12_fixed = cdt.isConstrainedEdge(s1);
+            const is_edge20_fixed = cdt.isConstrainedEdge(s2);
 
             // 默认颜色：半透明绿色（可通行区域）
             const default_color = Vec4.new(0.2, 0.8, 0.2, 1.0);
@@ -250,6 +267,34 @@ pub const RTSMap = struct {
                 .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
             });
             Wgpu.wgpuQueueWriteBuffer(self.gctx.queue, self.wireframe_index_buffer, 0, @ptrCast(wireframe_index_list.items.ptr), wireframe_idx_size);
+        }
+    }
+
+    /// 在指定位置插入点（鼠标点击调用）
+    /// 返回 true 如果成功插入点
+    pub fn insertPointAt(self: *RTSMap, p: Vec2) !bool {
+        const cdt = &self.cdt;
+        const locate_result = cdt.locatePoint(p, null);
+
+        switch (locate_result) {
+            .OnVertex => {
+                // 点已经在顶点上，无需插入
+                return false;
+            },
+            .OnEdge => |edge| {
+                // 点在边上，插入点到边
+                _ = try cdt.insertPointInEdge(p, edge);
+                return true;
+            },
+            .InFace => |face| {
+                // 点在面内，插入点到面
+                _ = try cdt.insertPointInFace(p, face);
+                return true;
+            },
+            .Outside => {
+                // 点在外部，不插入
+                return false;
+            },
         }
     }
 

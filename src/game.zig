@@ -13,10 +13,6 @@ ubo: SceneUniform,
 rts_map: RTSMap,
 player_id: u32 = 0,
 
-next_constraint_id: u32 = 1, // 从1开始，0预留给地图边界
-
-constraint_start: ?Vec2 = null, // 右键按下时记录的第一个点
-
 // 开始游戏
 pub fn start(self: *Game) !void {
     // 初始化主菜单
@@ -46,45 +42,10 @@ pub fn start(self: *Game) !void {
                 const ray = self.camera.getForwardRay();
                 if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
                     const pt = Vec2.new(hit.point.x, hit.point.z);
-                    const tolerance = 0.5;
-                    _ = try self.rts_map.cdt.findOrAddVertex(pt, tolerance);
-                    try self.rts_map.updateMeshBuffers();
-                }
-            }
-
-            // 鼠标右键按下：记录起点
-            if (self.input.isMouseButtonDown(.mouse_right)) {
-                const ray = self.camera.getForwardRay();
-                if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
-                    const pt = Vec2.new(hit.point.x, hit.point.z);
-                    if (self.constraint_start == null) {
-                        self.constraint_start = pt;
-                        std.debug.print("Constraint edge starting point: ({d:.2}, {d:.2})\n", .{ pt.x, pt.y });
+                    // 插入点并更新渲染
+                    if (try self.rts_map.insertPointAt(pt)) {
+                        try self.rts_map.updateMeshBuffers();
                     }
-                } // 如果未击中，什么也不做
-            }
-
-            // 在鼠标释放逻辑中修改
-            if (self.input.isMouseButtonReleased(.mouse_right)) {
-                if (self.constraint_start) |start_pt| {
-                    const ray = self.camera.getForwardRay();
-                    if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
-                        const end = Vec2.new(hit.point.x, hit.point.z);
-                        if (!start_pt.eql(end)) {
-                            const tolerance = 0.5;
-                            const v1 = try self.rts_map.cdt.findOrAddVertex(start_pt, tolerance);
-                            const v2 = try self.rts_map.cdt.findOrAddVertex(end, tolerance);
-
-                            // 分配新约束ID
-                            const new_id = self.next_constraint_id;
-                            self.next_constraint_id += 1;
-
-                            // 使用正确的函数名
-                            try self.rts_map.cdt.insertConstraintSegment(v1, v2, new_id);
-                            try self.rts_map.updateMeshBuffers();
-                        }
-                    }
-                    self.constraint_start = null;
                 }
             }
         }
