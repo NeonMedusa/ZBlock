@@ -9,8 +9,9 @@ const Vec4 = Imports.Vec4;
 const RendCTX = Imports.RendCTX;
 const VertexAttribute = RendCTX.VertexAttribute;
 const RenderPipeline = Imports.RenderPipeline;
-const CDT = @import("cdt.zig").CDT;
-const Edge = @import("cdt.zig").Edge;
+const Foo = @import("cdt.zig");
+const CDT = Foo.CDT;
+const Edge = Foo.Edge;
 
 pub const RTSMap = struct {
     allocator: std.mem.Allocator,
@@ -158,9 +159,9 @@ pub const RTSMap = struct {
             const edge12 = Edge{ .v1 = v1, .v2 = v2 };
             const edge20 = Edge{ .v1 = v2, .v2 = v0 };
 
-            const is_edge01_fixed = cdt.fixed_edges.contains(edge01) or cdt.fixed_edges.contains(.{ .v1 = v1, .v2 = v0 });
-            const is_edge12_fixed = cdt.fixed_edges.contains(edge12) or cdt.fixed_edges.contains(.{ .v1 = v2, .v2 = v1 });
-            const is_edge20_fixed = cdt.fixed_edges.contains(edge20) or cdt.fixed_edges.contains(.{ .v1 = v0, .v2 = v2 });
+            const is_edge01_fixed = cdt.constraint_edges.contains(edge01) or cdt.constraint_edges.contains(.{ .v1 = v1, .v2 = v0 });
+            const is_edge12_fixed = cdt.constraint_edges.contains(edge12) or cdt.constraint_edges.contains(.{ .v1 = v2, .v2 = v1 });
+            const is_edge20_fixed = cdt.constraint_edges.contains(edge20) or cdt.constraint_edges.contains(.{ .v1 = v0, .v2 = v2 });
 
             // 默认颜色：半透明绿色（可通行区域）
             const default_color = Vec4.new(0.2, 0.8, 0.2, 1.0);

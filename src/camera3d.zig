@@ -27,7 +27,7 @@ pub fn update(self: *@This(), game: *Game) void {
     var input = game.input;
     const window = game.window;
     //鼠标控制方向
-    const mousePos = input.getCursorPos(); // 获取鼠标位置
+    const mousePos = input.getCursorPosThroughPolling(); // 获取鼠标位置
     input.setCursorToCenter(); // 重置鼠标位置到窗口中心
     self.yaw += (mousePos.x - window.center_x) * self.sensitivity; // 更新相机角度
     self.pitch -= (mousePos.y - window.center_y) * self.sensitivity;
