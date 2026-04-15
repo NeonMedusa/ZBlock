@@ -19,8 +19,11 @@ buildings: std.ArrayListUnmanaged(Building),
 
 const Building = struct {
     fixed_edge_ids: std.ArrayListUnmanaged(u32),
+    vertex_indices: std.ArrayListUnmanaged(u32), // 新增：记录使用的顶点
+
     pub fn deinit(self: *Building, allocator: std.mem.Allocator) void {
         self.fixed_edge_ids.deinit(allocator);
+        self.vertex_indices.deinit(allocator);
     }
 };
 
@@ -49,72 +52,71 @@ pub fn start(self: *Game) !void {
             // 更新摄像头
             self.camera.update(self);
 
-            // 鼠标左键按下：放置正方形建筑
-            if (self.input.isMouseButtonDown(.mouse_left)) {
-                const ray = self.camera.getForwardRay();
-                if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
-                    const center = Vec2.new(hit.point.x, hit.point.z);
-                    const half_size = 2.5; // 边长 5.0 的正方形
-                    // 计算四个顶点（逆时针：左下 → 右下 → 右上 → 左上）
-                    const corners = [_]Vec2{
-                        Vec2.new(center.x - half_size, center.y - half_size),
-                        Vec2.new(center.x + half_size, center.y - half_size),
-                        Vec2.new(center.x + half_size, center.y + half_size),
-                        Vec2.new(center.x - half_size, center.y + half_size),
-                    };
+            // // 鼠标左键按下：放置正方形建筑
+            // if (self.input.isMouseButtonDown(.mouse_left)) {
+            //     const ray = self.camera.getForwardRay();
+            //     if (self.rts_map.raycast(ray.origin, ray.direction)) |hit| {
+            //         const center = Vec2.new(hit.point.x, hit.point.z);
+            //         const half_size = 2.5; // 边长 5.0 的正方形
+            //         // 计算四个顶点（逆时针：左下 → 右下 → 右上 → 左上）
+            //         const corners = [_]Vec2{
+            //             Vec2.new(center.x - half_size, center.y - half_size),
+            //             Vec2.new(center.x + half_size, center.y - half_size),
+            //             Vec2.new(center.x + half_size, center.y + half_size),
+            //             Vec2.new(center.x - half_size, center.y + half_size),
+            //         };
 
-                    const tolerance = 0.5;
-                    var verts: [4]u32 = undefined;
-                    for (corners, 0..) |pt, i| {
-                        verts[i] = try self.rts_map.cdt.findOrAddVertex(pt, tolerance);
-                    }
+            //         const tolerance = 0.5;
+            //         var verts: [4]u32 = undefined;
+            //         for (corners, 0..) |pt, i| {
+            //             verts[i] = try self.rts_map.cdt.findOrAddVertex(pt, tolerance);
+            //         }
 
-                    // 创建建筑记录
-                    var building = Building{
-                        .fixed_edge_ids = .{},
-                    };
-                    errdefer building.deinit(self.allocator);
+            //         // 创建建筑记录
+            //         var building = Building{
+            //             .fixed_edge_ids = .{},
+            //         };
+            //         errdefer building.deinit(self.allocator);
 
-                    // 插入四条边（逆时针方向）
-                    const edges = [_][2]u32{
-                        .{ verts[0], verts[1] },
-                        .{ verts[1], verts[2] },
-                        .{ verts[2], verts[3] },
-                        .{ verts[3], verts[0] },
-                    };
-                    for (edges) |pair| {
-                        const id = try self.rts_map.cdt.insertConstraintEdge(pair[0], pair[1]);
-                        try building.fixed_edge_ids.append(self.allocator, id);
-                    }
+            //         // 插入四条边（逆时针方向）
+            //         const edges = [_][2]u32{
+            //             .{ verts[0], verts[1] },
+            //             .{ verts[1], verts[2] },
+            //             .{ verts[2], verts[3] },
+            //             .{ verts[3], verts[0] },
+            //         };
+            //         for (edges) |pair| {
+            //             const id = try self.rts_map.cdt.insertConstraintEdge(pair[0], pair[1]);
+            //             try building.fixed_edge_ids.append(self.allocator, id);
+            //         }
 
-                    // 保存建筑
-                    try self.buildings.append(self.allocator, building);
-                    try self.rts_map.updateMeshBuffers();
+            //         // 保存建筑
+            //         try self.buildings.append(self.allocator, building);
+            //         try self.rts_map.updateMeshBuffers();
 
-                    std.debug.print("Placed building with {} edges, total buildings: {}\n", .{
-                        building.fixed_edge_ids.items.len,
-                        self.buildings.items.len,
-                    });
-                }
-            }
+            //         std.debug.print("Placed building with {} edges, total buildings: {}\n", .{
+            //             building.fixed_edge_ids.items.len,
+            //             self.buildings.items.len,
+            //         });
+            //     }
+            // }
+            // // 鼠标右键按下：删除最后一个建筑
+            // if (self.input.isMouseButtonDown(.mouse_right)) {
+            //     if (self.buildings.items.len > 0) {
+            //         var building = self.buildings.pop().?;
+            //         defer building.deinit(self.allocator);
 
-            // 鼠标右键按下：删除最后一个建筑
-            if (self.input.isMouseButtonDown(.mouse_right)) {
-                if (self.buildings.items.len > 0) {
-                    var building = self.buildings.pop().?;
-                    defer building.deinit(self.allocator);
+            //         // 移除该建筑的所有约束边标记
+            //         for (building.fixed_edge_ids.items) |id|
+            //             try self.rts_map.cdt.removeConstraintsById(id);
 
-                    // 移除该建筑的所有约束边标记
-                    for (building.fixed_edge_ids.items) |id|
-                        try self.rts_map.cdt.removeConstraintsById(id);
+            //         try self.rts_map.updateMeshBuffers();
 
-                    try self.rts_map.updateMeshBuffers();
-
-                    std.debug.print("Removed building, remaining: {}\n", .{self.buildings.items.len});
-                } else {
-                    std.debug.print("No building to remove\n", .{});
-                }
-            }
+            //         std.debug.print("Removed building, remaining: {}\n", .{self.buildings.items.len});
+            //     } else {
+            //         std.debug.print("No building to remove\n", .{});
+            //     }
+            // }
 
             // // 鼠标右键按下：记录起点
             // if (self.input.isMouseButtonDown(.mouse_right)) {
@@ -127,7 +129,6 @@ pub fn start(self: *Game) !void {
             //         }
             //     } // 如果未击中，什么也不做
             // }
-
             // if (self.input.isMouseButtonReleased(.mouse_right)) {
             //     if (self.constraint_start) |start_pt| {
             //         const ray = self.camera.getForwardRay();

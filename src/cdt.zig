@@ -2,6 +2,13 @@
 const std = @import("std");
 const Vec2 = @import("imports.zig").Vec2;
 
+// 新的顶点数据结构：包含位置、关联三角形、约束边引用计数
+const Vertex = struct {
+    pos: Vec2,
+    any_tri: u32,
+    const_edge_ref_count: u32,
+};
+
 pub const Edge = struct {
     v1: u32,
     v2: u32,
@@ -15,8 +22,7 @@ pub const Triangle = struct {
 pub const CDT = struct {
     allocator: std.mem.Allocator,
     triangles: std.ArrayListUnmanaged(Triangle) = .{},
-    vertices: std.ArrayListUnmanaged(Vec2) = .{},
-    vert_tris: std.ArrayListUnmanaged(u32) = .{},
+    vertices: std.ArrayListUnmanaged(Vertex) = .{}, // 改为 Vertex 列表，不再需要 vert_tris
 
     /// 约束边 → 约束ID 映射。用于查询、删除和保护约束边不被翻转。
     constraint_edges: std.AutoHashMapUnmanaged(Edge, u32) = .{},
@@ -64,7 +70,9 @@ pub const CDT = struct {
             .neighbors = .{ -1, -1, -1 },
         };
         try cdt.triangles.append(allocator, super_tri);
-        for (super_verts) |v| cdt.vert_tris.items[v] = 0;
+        for (super_verts) |v| {
+            cdt.vertices.items[v].any_tri = 0;
+        }
 
         // 地图边界矩形（四条约束边）
         const corners = [_]Vec2{
@@ -90,7 +98,6 @@ pub const CDT = struct {
     pub fn deinit(self: *CDT) void {
         self.vertices.deinit(self.allocator);
         self.triangles.deinit(self.allocator);
-        self.vert_tris.deinit(self.allocator);
         self.constraint_edges.deinit(self.allocator);
 
         self.temp_stack.deinit(self.allocator);
@@ -104,16 +111,18 @@ pub const CDT = struct {
     // ---------- 顶点操作 ----------
     pub fn addVertex(self: *CDT, pt: Vec2) !u32 {
         const idx = @as(u32, @intCast(self.vertices.items.len));
-        try self.vertices.append(self.allocator, pt);
-        try self.vert_tris.resize(self.allocator, idx + 1);
-        self.vert_tris.items[idx] = 0;
+        try self.vertices.append(self.allocator, .{
+            .pos = pt,
+            .any_tri = 0,
+            .const_edge_ref_count = 0,
+        });
         return idx;
     }
 
     pub fn insertVertex(self: *CDT, v_idx: u32) !void {
-        const v = self.vertices.items[v_idx];
+        const v = self.vertices.items[v_idx].pos;
         const nearest = self.findNearestVertex(v);
-        const start_tri = self.vert_tris.items[nearest];
+        const start_tri = self.vertices.items[nearest].any_tri;
         try self.insertVertexWithStart(v_idx, start_tri);
     }
 
@@ -133,7 +142,7 @@ pub const CDT = struct {
     }
 
     fn walkToTriangle(self: *CDT, v_idx: u32, start_tri: u32) !struct { tri_idx: u32, on_edge: ?[2]u32 } {
-        const pt = self.vertices.items[v_idx];
+        const pt = self.vertices.items[v_idx].pos;
         var cur_tri = start_tri;
         var visited = std.AutoHashMap(u32, void).init(self.allocator);
         defer visited.deinit();
@@ -142,9 +151,9 @@ pub const CDT = struct {
             if (visited.contains(cur_tri)) return error.InfiniteLoop;
             try visited.put(cur_tri, {});
             const tri = self.triangles.items[cur_tri];
-            const a = self.vertices.items[tri.vertices[0]];
-            const b = self.vertices.items[tri.vertices[1]];
-            const c = self.vertices.items[tri.vertices[2]];
+            const a = self.vertices.items[tri.vertices[0]].pos;
+            const b = self.vertices.items[tri.vertices[1]].pos;
+            const c = self.vertices.items[tri.vertices[2]].pos;
 
             if (self.pointInTriangle(pt, a, b, c)) {
                 return .{ .tri_idx = cur_tri, .on_edge = null };
@@ -162,8 +171,8 @@ pub const CDT = struct {
         var nearest: u32 = 0;
         var min_dist_sq: f32 = std.math.floatMax(f32);
         for (self.vertices.items, 0..) |v, i| {
-            const dx = v.x - pt.x;
-            const dy = v.y - pt.y;
+            const dx = v.pos.x - pt.x;
+            const dy = v.pos.y - pt.y;
             const dist_sq = dx * dx + dy * dy;
             if (dist_sq < min_dist_sq) {
                 min_dist_sq = dist_sq;
@@ -280,19 +289,26 @@ pub const CDT = struct {
     // ---------- 约束边插入（自动分配ID）----------
     /// 插入一条约束边，返回自动分配的约束ID。
     /// 调用者应保存此ID，用于后续删除。
-    /// 插入一条约束边，返回自动分配的约束ID。
     pub fn insertConstraintEdge(self: *CDT, v1: u32, v2: u32) !u32 {
         if (v1 == v2) return error.InvalidEdge;
+
         // 如果边已存在，只需补充ID映射
         if (try self.edgeExists(v1, v2)) {
             const id = self.next_constraint_id;
             self.next_constraint_id += 1;
             try self.addConstraintMapping(v1, v2, id);
+            // 增加引用计数
+            self.vertices.items[v1].const_edge_ref_count += 1;
+            self.vertices.items[v2].const_edge_ref_count += 1;
             return id;
         }
+
         const id = self.next_constraint_id;
         self.next_constraint_id += 1;
         try self.insertEdgeIteration(v1, v2, id);
+        // 增加引用计数
+        self.vertices.items[v1].const_edge_ref_count += 1;
+        self.vertices.items[v2].const_edge_ref_count += 1;
         return id;
     }
 
@@ -333,8 +349,8 @@ pub const CDT = struct {
 
     /// 简化版收集相交三角形：假设不与任何固定边相交
     fn collectIntersectedTrianglesSimple(self: *CDT, iA: u32, iB: *u32) !void {
-        const a = self.vertices.items[iA];
-        const b = self.vertices.items[iB.*];
+        const a = self.vertices.items[iA].pos;
+        const b = self.vertices.items[iB.*].pos;
 
         var first = try self.intersectedTriangle(iA, a, b);
         var start_from_a = true;
@@ -379,7 +395,7 @@ pub const CDT = struct {
             const topo = &self.triangles.items[@intCast(iTopo)];
             const iVopo = self.opposedVertex(topo, iT);
 
-            const loc = self.lineSide(self.vertices.items[iVopo], start_pt, end_pt);
+            const loc = self.lineSide(self.vertices.items[iVopo].pos, start_pt, end_pt);
             if (loc == .Left) {
                 try self.temp_poly_l.append(self.allocator, iVopo);
                 try self.temp_outer_tris.put(self.allocator, .{ .v1 = iVL, .v2 = iVopo }, self.edgeNeighbor(topo, iVL, iVopo));
@@ -415,27 +431,28 @@ pub const CDT = struct {
     // ---------- 约束边删除 ----------
     /// 删除指定ID的所有约束边（仅清除标记，不改变网格拓扑）
     pub fn removeConstraintsById(self: *CDT, id: u32) !void {
+        var to_remove = std.ArrayList(Edge){};
+        defer to_remove.deinit(self.allocator);
+
         var iter = self.constraint_edges.iterator();
         while (iter.next()) |entry| {
             if (entry.value_ptr.* == id) {
-                const edge = entry.key_ptr.*;
-                _ = self.constraint_edges.remove(edge);
-                // 不能在此删除 map 条目，迭代器会失效
+                try to_remove.append(self.allocator, entry.key_ptr.*);
             }
         }
-        // 第二遍删除 map 条目
-        iter = self.constraint_edges.iterator();
-        while (iter.next()) |entry| {
-            if (entry.value_ptr.* == id) {
-                _ = self.constraint_edges.remove(entry.key_ptr.*);
-            }
+
+        for (to_remove.items) |edge| {
+            _ = self.constraint_edges.remove(edge);
+            // 减少引用计数
+            self.vertices.items[edge.v1].const_edge_ref_count -= 1;
+            self.vertices.items[edge.v2].const_edge_ref_count -= 1;
         }
     }
 
     /// 查询某条边是否属于约束边，若是则返回其约束ID
     pub fn getConstraintId(self: *CDT, v1: u32, v2: u32) ?u32 {
         const edge = Edge{ .v1 = v1, .v2 = v2 };
-        return self.edge_to_constraint.get(edge);
+        return self.constraint_edges.get(edge);
     }
 
     // ---------- 辅助函数 ----------
@@ -454,7 +471,7 @@ pub const CDT = struct {
 
     fn edgeExists(self: *CDT, v1: u32, v2: u32) !bool {
         if (v1 >= self.vertices.items.len or v2 >= self.vertices.items.len) return false;
-        const start_tri = self.vert_tris.items[v1];
+        const start_tri = self.vertices.items[v1].any_tri;
         if (start_tri >= self.triangles.items.len) return false;
 
         var visited = std.AutoHashMap(u32, void).init(self.allocator);
@@ -490,7 +507,7 @@ pub const CDT = struct {
     }
 
     fn intersectedTriangle(self: *CDT, iA: u32, a: Vec2, b: Vec2) !struct { tri_idx: i32, vL: u32, vR: u32 } {
-        const start_tri = self.vert_tris.items[iA];
+        const start_tri = self.vertices.items[iA].any_tri;
         var cur_tri = start_tri;
         var prev_tri: ?u32 = null;
         const max_iter = self.triangles.items.len * 2;
@@ -498,9 +515,9 @@ pub const CDT = struct {
 
         while (iter < max_iter) : (iter += 1) {
             const tri = self.triangles.items[cur_tri];
-            const v0 = self.vertices.items[tri.vertices[0]];
-            const v1 = self.vertices.items[tri.vertices[1]];
-            const v2 = self.vertices.items[tri.vertices[2]];
+            const v0 = self.vertices.items[tri.vertices[0]].pos;
+            const v1 = self.vertices.items[tri.vertices[1]].pos;
+            const v2 = self.vertices.items[tri.vertices[2]].pos;
 
             if (self.pointInTriangle(b, v0, v1, v2)) {
                 return .{ .tri_idx = -2, .vL = 0, .vR = 0 };
@@ -513,8 +530,8 @@ pub const CDT = struct {
             const opp_edge_idx = (local_idx + 1) % 3;
             const v_start = tri.vertices[opp_edge_idx];
             const v_end = tri.vertices[(opp_edge_idx + 1) % 3];
-            const p1 = self.vertices.items[v_start];
-            const p2 = self.vertices.items[v_end];
+            const p1 = self.vertices.items[v_start].pos;
+            const p2 = self.vertices.items[v_end].pos;
             const neighbor = tri.neighbors[opp_edge_idx];
 
             if (self.segmentsIntersect(a, b, p1, p2) and
@@ -653,10 +670,10 @@ pub const CDT = struct {
     }
 
     fn shouldFlipEdge(self: *CDT, v1: u32, v2: u32, v3: u32, v4: u32) bool {
-        const a = self.vertices.items[v1];
-        const b = self.vertices.items[v2];
-        const c = self.vertices.items[v3];
-        const d = self.vertices.items[v4];
+        const a = self.vertices.items[v1].pos;
+        const b = self.vertices.items[v2].pos;
+        const c = self.vertices.items[v3].pos;
+        const d = self.vertices.items[v4].pos;
         return pointInCircumcircle(a, b, c, d);
     }
 
@@ -724,8 +741,7 @@ pub const CDT = struct {
     }
 
     fn setVertTri(self: *CDT, v: u32, t: u32) !void {
-        if (self.vert_tris.items.len <= v) try self.vert_tris.resize(self.allocator, v + 1);
-        self.vert_tris.items[v] = t;
+        self.vertices.items[v].any_tri = t;
     }
 
     fn pointInCircumcircle(pt: Vec2, a: Vec2, b: Vec2, c: Vec2) bool {
@@ -858,13 +874,13 @@ pub const CDT = struct {
     }
 
     fn findDelaunayPoint(self: *CDT, poly: *std.ArrayListUnmanaged(u32), iA: u32, iB: u32) u32 {
-        const a = self.vertices.items[poly.items[iA]];
-        const b = self.vertices.items[poly.items[iB]];
+        const a = self.vertices.items[poly.items[iA]].pos;
+        const b = self.vertices.items[poly.items[iB]].pos;
         var best = iA + 1;
-        var best_c = self.vertices.items[poly.items[best]];
+        var best_c = self.vertices.items[poly.items[best]].pos;
 
         for (iA + 1..iB) |i| {
-            const v = self.vertices.items[poly.items[i]];
+            const v = self.vertices.items[poly.items[i]].pos;
             if (pointInCircumcircle(v, a, b, best_c)) {
                 best = @intCast(i);
                 best_c = v;
@@ -876,8 +892,8 @@ pub const CDT = struct {
     /// 查找或新增顶点（用于RTS地图构建）
     pub fn findOrAddVertex(self: *CDT, pt: Vec2, tolerance: f32) !u32 {
         const nearest = self.findNearestVertex(pt);
-        const dx = self.vertices.items[nearest].x - pt.x;
-        const dy = self.vertices.items[nearest].y - pt.y;
+        const dx = self.vertices.items[nearest].pos.x - pt.x;
+        const dy = self.vertices.items[nearest].pos.y - pt.y;
         const dist_sq = dx * dx + dy * dy;
         if (dist_sq <= tolerance * tolerance) return nearest;
 

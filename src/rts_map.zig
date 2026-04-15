@@ -150,9 +150,9 @@ pub const RTSMap = struct {
             const v0 = tri.vertices[0];
             const v1 = tri.vertices[1];
             const v2 = tri.vertices[2];
-            const pos0 = cdt.vertices.items[v0];
-            const pos1 = cdt.vertices.items[v1];
-            const pos2 = cdt.vertices.items[v2];
+            const pos0 = cdt.vertices.items[v0].pos;
+            const pos1 = cdt.vertices.items[v1].pos;
+            const pos2 = cdt.vertices.items[v2].pos;
 
             // 检查三条边是否为约束边
             const edge01 = Edge{ .v1 = v0, .v2 = v1 };
