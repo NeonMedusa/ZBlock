@@ -2,7 +2,6 @@
 const std = @import("std");
 const Vec2 = @import("algebra.zig").Vec2;
 const Vec3 = @import("algebra.zig").Vec3;
-const Terrain = @import("terrain.zig").Terrain;
 
 pub const RaycastHit = struct {
     hit: bool,
@@ -35,56 +34,6 @@ pub const Ray = struct {
         return self.origin.add(self.direction.scale(t));
     }
 };
-
-pub fn raycastTerrain(terrain: *Terrain, ray: Ray, max_distance: f32) RaycastHit {
-    const local_origin = worldToLocal(terrain, ray.origin);
-    const local_dir = worldToLocalDirection(terrain, ray.direction);
-    const local_ray = Ray.init(local_origin, local_dir);
-
-    const bounds_min = Vec3.new(-terrain.size_x / 2, 0.0, -terrain.size_z / 2);
-    const bounds_max = Vec3.new(terrain.size_x / 2, terrain.max_height, terrain.size_z / 2);
-
-    var t_min: f32 = 0;
-    var t_max: f32 = max_distance;
-    if (!rayAABBIntersect(local_ray, bounds_min, bounds_max, &t_min, &t_max)) {
-        return RaycastHit{
-            .hit = false,
-            .hit_type = .none,
-            .point = Vec3.zero,
-            .normal = Vec3.zero,
-            .distance = 0,
-        };
-    }
-
-    var low = t_min;
-    var high = t_max;
-
-    for (0..32) |_| {
-        const mid = (low + high) * 0.5;
-        const point = local_ray.pointAt(mid);
-        const terrain_height = terrain.getHeightLocal(Vec2.new(point.x, point.z));
-
-        if (point.y <= terrain_height) {
-            high = mid;
-        } else {
-            low = mid;
-        }
-    }
-
-    const hit_t = (low + high) * 0.5;
-    const hit_point_local = local_ray.pointAt(hit_t);
-    const hit_point_world = localToWorld(terrain, hit_point_local);
-    const normal_local = terrain.getNormalLocal(Vec2.new(hit_point_local.x, hit_point_local.z));
-    const normal_world = localToWorldDirection(terrain, normal_local);
-
-    return RaycastHit{
-        .hit = true,
-        .point = hit_point_world,
-        .normal = normal_world,
-        .distance = hit_t,
-        .hit_type = .terrain,
-    };
-}
 
 fn rayAABBIntersect(ray: Ray, min: Vec3, max: Vec3, t_min: *f32, t_max: *f32) bool {
     var t0: f32 = -std.math.floatMax(f32);
@@ -128,34 +77,4 @@ fn rayAABBIntersect(ray: Ray, min: Vec3, max: Vec3, t_min: *f32, t_max: *f32) bo
     t_min.* = if (t0 < 0) 0 else t0;
     t_max.* = t1;
     return true;
-}
-
-fn worldToLocal(terrain: *Terrain, world: Vec3) Vec3 {
-    const local_xz = terrain.worldToLocal(Vec2.new(world.x, world.z));
-    return Vec3.new(local_xz.x, world.y - terrain.position.y, local_xz.y);
-}
-
-fn localToWorld(terrain: *Terrain, local: Vec3) Vec3 {
-    const world_xz = terrain.localToWorld(Vec2.new(local.x, local.z));
-    return Vec3.new(world_xz.x, terrain.position.y + local.y, world_xz.y);
-}
-
-fn worldToLocalDirection(terrain: *Terrain, world_dir: Vec3) Vec3 {
-    const cos = @cos(terrain.rotation_y);
-    const sin = @sin(terrain.rotation_y);
-    const local_x = world_dir.x * cos - world_dir.z * sin;
-    const local_z = world_dir.x * sin + world_dir.z * cos;
-    return Vec3.new(local_x, world_dir.y, local_z);
-}
-
-fn localToWorldDirection(terrain: *Terrain, local_dir: Vec3) Vec3 {
-    const cos = @cos(terrain.rotation_y);
-    const sin = @sin(terrain.rotation_y);
-    const world_x = local_dir.x * cos + local_dir.z * sin;
-    const world_z = -local_dir.x * sin + local_dir.z * cos;
-    return Vec3.new(world_x, local_dir.y, world_z);
-}
-
-pub fn raycast(ray: Ray, max_distance: f32, terrain: *Terrain) RaycastHit {
-    return raycastTerrain(terrain, ray, max_distance);
 }

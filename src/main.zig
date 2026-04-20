@@ -5,10 +5,6 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // AI是无法看到游戏画面的，请AI不要使用zig build run运行
-    // 请AI在cdt.zig中编写单元测试，并运行zig test src\cdt.zig来测试
-    // _ = allocator;
-
     // 初始化游戏
     var game = try Game.init(allocator);
     defer game.deinit();

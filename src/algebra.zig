@@ -74,8 +74,16 @@ pub const Vec2 = struct {
         return .{ .x = @abs(v.x), .y = @abs(v.y) };
     }
 
+    /// 精确相等比较。用于内部算法，不做任何容差处理。
     pub fn eql(a: Vec2, b: Vec2) bool {
         return a.x == b.x and a.y == b.y;
+    }
+
+    /// 带容差的近似相等比较。由调用者根据坐标尺度指定容差。
+    pub fn approxEql(a: Vec2, b: Vec2, tolerance: f32) bool {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return (dx * dx + dy * dy) <= tolerance * tolerance;
     }
 
     /// 2D 叉积，返回标量 (a.x * b.z - a.z * b.x)
@@ -92,6 +100,12 @@ pub const Vec2 = struct {
     /// 返回当前向量逆时针旋转 90° 的结果 ( -z, x )
     pub fn perp(v: Vec2) Vec2 {
         return .{ .x = -v.y, .y = v.x };
+    }
+
+    pub fn distanceSq(a: Vec2, b: Vec2) f32 {
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        return dx * dx + dy * dy;
     }
 };
 

@@ -50,39 +50,6 @@ pub fn draw(game: *Game) void {
         entity_idx += 1;
     }
 
-    // ！！！！！为地形分配数据（使用记录的索引）
-    game.res_manager.entities_data[entity_idx] = .{ .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)) };
-    const terrain_translate = Mat4.fromTranslate(game.rts_map.position);
-    const terrain_rotation = Quat.fromAxisAngle(Vec3.unit_y, game.rts_map.rotation_y).toMat4();
-    const terrain_transform = terrain_translate.mul(terrain_rotation);
-    game.res_manager.instances_data[ins_idx] = .{
-        .transform = terrain_transform,
-        .entity_idx = entity_idx,
-    };
-    // 更新计数（在赋值之后）
-    entity_idx += 1;
-    ins_idx += 1;
-
-    // 更新entities_data_buffer
-    if (entity_idx > 0) {
-        Wgpu.wgpuQueueWriteBuffer(
-            game.gctx.queue,
-            game.res_manager.entities_data_buffer,
-            0,
-            game.res_manager.entities_data.ptr,
-            @sizeOf(EntityData) * entity_idx,
-        );
-    }
-    if (ins_idx > 0) {
-        Wgpu.wgpuQueueWriteBuffer(
-            game.gctx.queue,
-            game.res_manager.instances_data_buffer,
-            0,
-            game.res_manager.instances_data.ptr,
-            @sizeOf(InstanceData) * ins_idx,
-        );
-    }
-
     // ========== 第二步：准备渲染通道 ==========
     const color_attachment = Wgpu.WGPURenderPassColorAttachment{
         .view = surface_texture_view,
@@ -151,40 +118,24 @@ pub fn draw(game: *Game) void {
         draw_entity_idx += 1;
     }
 
-    // ！！！绘制地形！！！！
-    if (game.rts_map.index_count > 0) {
-        // // 1. 填充地形
-        // Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.handle);
-        // Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
-        // Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.rts_map.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.rts_map.vertex_buffer));
-        // Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.rts_map.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.rts_map.index_buffer));
-        // Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, game.rts_map.material.bind_group, 0, null);
-        // Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, game.rts_map.index_count, 1, 0, 0, draw_ins_idx);
-
-        // 线框地形
-        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.wireframe_pipeline.handle);
-        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.wireframe_pipeline.global_bind_group, 0, null);
-        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.rts_map.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.rts_map.vertex_buffer));
-        Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.rts_map.wireframe_index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.rts_map.wireframe_index_buffer));
-        Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, game.rts_map.wireframe_index_count, 1, 0, 0, draw_ins_idx);
-
-        // 渲染路径（如果有）
-        if (game.rts_map.path_index_count > 0) {
-            Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.wireframe_pipeline.handle);
-            Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.wireframe_pipeline.global_bind_group, 0, null);
-            Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.rts_map.path_vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.rts_map.path_vertex_buffer));
-            Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.rts_map.path_index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.rts_map.path_index_buffer));
-            Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, game.rts_map.path_index_count, 1, 0, 0, draw_ins_idx);
-        }
-
-        // 渲染蓝色边界线框（静态，始终绘制）
-        if (game.rts_map.boundary_index_count > 0) {
-            Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.wireframe_pipeline.handle);
-            Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.wireframe_pipeline.global_bind_group, 0, null);
-            Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.rts_map.boundary_vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.rts_map.boundary_vertex_buffer));
-            Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.rts_map.boundary_index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.rts_map.boundary_index_buffer));
-            Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, game.rts_map.boundary_index_count, 1, 0, 0, draw_ins_idx);
-        }
+    // 更新entities_data_buffer
+    if (entity_idx > 0) {
+        Wgpu.wgpuQueueWriteBuffer(
+            game.gctx.queue,
+            game.res_manager.entities_data_buffer,
+            0,
+            game.res_manager.entities_data.ptr,
+            @sizeOf(EntityData) * entity_idx,
+        );
+    }
+    if (ins_idx > 0) {
+        Wgpu.wgpuQueueWriteBuffer(
+            game.gctx.queue,
+            game.res_manager.instances_data_buffer,
+            0,
+            game.res_manager.instances_data.ptr,
+            @sizeOf(InstanceData) * ins_idx,
+        );
     }
 
     // UI渲染
