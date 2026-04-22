@@ -1,15 +1,10 @@
 const import = @import("imports.zig");
 const ECS = import.ECS;
 const GltfData = Gltf.Data;
-const ZigImg = import.zigimg;
+const IMG = import.zigimg;
 const RenderPipeline = @import("render_pipeline.zig");
 const Imports = @import("imports.zig");
 const Game = Imports.Game;
-
-const TextureRes = struct {
-    texture: Wgpu.WGPUTexture = null,
-    view: Wgpu.WGPUTextureView = null,
-};
 
 const Mesh = struct {
     primitives: []Primitive,
@@ -23,17 +18,193 @@ pub const Primitive = struct {
 };
 
 pub const MaterialConstants = struct {
-    // 标志位
     has_base_color: u32 = 0,
     has_normal: u32 = 0,
     _padding: [2]f32 = undefined,
 };
 
+pub const TextureRes = struct {
+    texture: Wgpu.WGPUTexture,
+    view: Wgpu.WGPUTextureView,
+    /// 创建一个 1x1 白色默认纹理（常用于占位）
+    pub fn createDefault(gctx: *Gctx) !TextureRes {
+        const pixels = [_]u8{ 255, 255, 255, 255 };
+        return createFromPixels(gctx, 1, 1, &pixels);
+    }
+    /// 从原始像素数据创建纹理（RGBA8 格式）
+    pub fn createFromPixels(gctx: *Gctx, width: u32, height: u32, pixels: []const u8) !TextureRes {
+        std.debug.assert(pixels.len == width * height * 4);
+        const texture_desc = Wgpu.WGPUTextureDescriptor{
+            .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
+            .dimension = Wgpu.WGPUTextureDimension_2D,
+            .size = .{
+                .width = width,
+                .height = height,
+                .depthOrArrayLayers = 1,
+            },
+            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        };
+
+        const texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &texture_desc);
+
+        Wgpu.wgpuQueueWriteTexture(
+            gctx.queue,
+            &Wgpu.WGPUTexelCopyTextureInfo{ .texture = texture, .mipLevel = 0 },
+            pixels.ptr,
+            pixels.len,
+            &Wgpu.WGPUTexelCopyBufferLayout{
+                .offset = 0,
+                .bytesPerRow = width * 4,
+                .rowsPerImage = height,
+            },
+            &Wgpu.WGPUExtent3D{
+                .width = width,
+                .height = height,
+                .depthOrArrayLayers = 1,
+            },
+        );
+
+        const view = Wgpu.wgpuTextureCreateView(texture, &Wgpu.WGPUTextureViewDescriptor{
+            .aspect = Wgpu.WGPUTextureAspect_All,
+            .baseArrayLayer = 0,
+            .arrayLayerCount = 1,
+            .baseMipLevel = 0,
+            .mipLevelCount = 1,
+            .dimension = Wgpu.WGPUTextureViewDimension_2D,
+            .format = texture_desc.format,
+        });
+
+        return .{ .texture = texture, .view = view };
+    }
+    /// 从内存中的图像数据加载（支持 PNG、JPG 等格式）
+    pub fn loadFromMemory(allocator: std.mem.Allocator, gctx: *Gctx, data: []const u8) !TextureRes {
+        var img = try IMG.Image.fromMemory(allocator, data);
+        defer img.deinit(allocator);
+
+        if (img.pixels != .rgba32) try img.convert(allocator, .rgba32);
+
+        const rgba = img.pixels.rgba32;
+        const pixels = std.mem.sliceAsBytes(rgba);
+
+        const width: u32 = @intCast(img.width);
+        const height: u32 = @intCast(img.height);
+
+        return createFromPixels(gctx, width, height, pixels);
+    }
+    /// 从文件路径加载纹理
+    pub fn loadFromFile(allocator: std.mem.Allocator, gctx: *Gctx, path: []const u8) !TextureRes {
+        const file = try std.fs.cwd().openFile(path, .{});
+        defer file.close();
+
+        const file_size = try file.getEndPos();
+        const data = try allocator.alloc(u8, file_size);
+        defer allocator.free(data);
+        _ = try file.readAll(data);
+
+        return loadFromMemory(allocator, gctx, data);
+    }
+    /// 释放 GPU 资源
+    pub fn deinit(self: *TextureRes) void {
+        if (self.view) |v| Wgpu.wgpuTextureViewRelease(v);
+        if (self.texture) |t| Wgpu.wgpuTextureRelease(t);
+    }
+};
+
 pub const Material = struct {
-    color_texture: TextureRes, // 设计为不可为空，因为Wgpu.WGPUTexture和Wgpu.WGPUTextureView是可空类型
-    normal_texture: TextureRes, // 设计为不可为空，因为Wgpu.WGPUTexture和Wgpu.WGPUTextureView是可空类型
-    uniform_buffer: Wgpu.WGPUBuffer, // 存储 MaterialConstants
-    bind_group: Wgpu.WGPUBindGroup, // 绑定组（根据纹理组合和布局创建）
+    color_texture: TextureRes,
+    normal_texture: TextureRes,
+    uniform_buffer: Wgpu.WGPUBuffer,
+    bind_group: Wgpu.WGPUBindGroup,
+    constants: MaterialConstants,
+    /// 创建默认材质（为 color 和 normal 分别创建独立的 1x1 白色纹理）
+    pub fn initDefault(gctx: *Gctx, pipeline: *RenderPipeline) !Material {
+        const default_color = try TextureRes.createDefault(gctx);
+        errdefer default_color.deinit();
+        const default_normal = try TextureRes.createDefault(gctx);
+        errdefer default_normal.deinit();
+
+        const constants = MaterialConstants{
+            .has_base_color = 0,
+            .has_normal = 0,
+            ._padding = undefined,
+        };
+
+        const uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = @sizeOf(MaterialConstants),
+            .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
+            .mappedAtCreation = 0,
+        });
+        errdefer Wgpu.wgpuBufferRelease(uniform_buffer);
+        Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &constants, @sizeOf(MaterialConstants));
+
+        const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
+            .layout = pipeline.material_bgl,
+            .entryCount = 3,
+            .entries = &[_]Wgpu.WGPUBindGroupEntry{
+                .{ .binding = 0, .buffer = uniform_buffer, .size = Wgpu.wgpuBufferGetSize(uniform_buffer) },
+                .{ .binding = 1, .textureView = default_color.view },
+                .{ .binding = 2, .textureView = default_normal.view },
+            },
+        });
+        errdefer Wgpu.wgpuBindGroupRelease(bind_group);
+
+        return .{
+            .color_texture = default_color,
+            .normal_texture = default_normal,
+            .uniform_buffer = uniform_buffer,
+            .bind_group = bind_group,
+            .constants = constants,
+        };
+    }
+    /// 释放材质拥有的所有 GPU 资源（包括纹理）
+    pub fn deinit(self: *Material) void {
+        self.color_texture.deinit();
+        self.normal_texture.deinit();
+        Wgpu.wgpuBufferRelease(self.uniform_buffer);
+        Wgpu.wgpuBindGroupRelease(self.bind_group);
+        self.* = undefined;
+    }
+    /// 替换颜色纹理（旧纹理会自动释放）
+    pub fn setColorTexture(self: *Material, gctx: *Gctx, pipeline: *RenderPipeline, new_tex: TextureRes) void {
+        self.color_texture.deinit();
+        self.color_texture = new_tex;
+        self.constants.has_base_color = 1;
+        self.syncUniformBuffer(gctx);
+        self.rebuildBindGroup(gctx, pipeline);
+    }
+    /// 替换法线纹理（旧纹理会自动释放）
+    pub fn setNormalTexture(self: *Material, gctx: *Gctx, pipeline: *RenderPipeline, new_tex: TextureRes) void {
+        self.normal_texture.deinit();
+        self.normal_texture = new_tex;
+        self.constants.has_normal = 1;
+        self.syncUniformBuffer(gctx);
+        self.rebuildBindGroup(gctx, pipeline);
+    }
+    /// 更新材质常量缓冲区
+    fn syncUniformBuffer(self: *Material, gctx: *Gctx) void {
+        Wgpu.wgpuQueueWriteBuffer(
+            gctx.queue,
+            self.uniform_buffer,
+            0,
+            &self.constants,
+            @sizeOf(MaterialConstants),
+        );
+    }
+    /// 重建绑定组（当绑定的纹理或 buffer 改变时调用）
+    fn rebuildBindGroup(self: *Material, gctx: *Gctx, pipeline: *RenderPipeline) void {
+        if (self.bind_group) |old| Wgpu.wgpuBindGroupRelease(old);
+        self.bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
+            .layout = pipeline.material_bgl,
+            .entryCount = 3,
+            .entries = &[_]Wgpu.WGPUBindGroupEntry{
+                .{ .binding = 0, .buffer = self.uniform_buffer, .size = Wgpu.wgpuBufferGetSize(self.uniform_buffer) },
+                .{ .binding = 1, .textureView = self.color_texture.view },
+                .{ .binding = 2, .textureView = self.normal_texture.view },
+            },
+        });
+    }
 };
 
 const Node = struct {
@@ -52,7 +223,7 @@ pub const Model = struct {
         allocator: std.mem.Allocator,
         gctx: *Gctx,
         name: []const u8,
-        pipeline: RenderPipeline,
+        pipeline: *RenderPipeline,
     ) !Model {
         // 加载GLTF文件
         const model_file_name = try std.fmt.allocPrint(allocator, "{s}.glb", .{name});
@@ -98,124 +269,26 @@ pub const Model = struct {
         model.textures_res = try allocator.alloc(TextureRes, gltf.data.textures.len);
         for (gltf.data.textures, 0..) |gltf_tex, i| {
             const img_source = gltf.data.images[gltf_tex.source.?];
-            var img = try ZigImg.Image.fromMemory(allocator, img_source.data.?);
-            defer img.deinit(allocator);
-
-            // 转换为 RGBA32 格式（如果不是的话）
-            if (img.pixels != .rgba32) try img.convert(allocator, .rgba32);
-
-            // 现在可以安全地访问 rgba32
-            const texture_desc = Wgpu.WGPUTextureDescriptor{
-                .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
-                .dimension = Wgpu.WGPUTextureDimension_2D,
-                .size = .{
-                    .width = @intCast(img.width),
-                    .height = @intCast(img.height),
-                    .depthOrArrayLayers = 1,
-                },
-                .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
-                .mipLevelCount = 1,
-                .sampleCount = 1,
-            };
-
-            const texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &texture_desc);
-            Wgpu.wgpuQueueWriteTexture(
-                gctx.queue,
-                &Wgpu.WGPUTexelCopyTextureInfo{
-                    .texture = texture,
-                    .mipLevel = 0,
-                },
-                img.pixels.rgba32.ptr,
-                img.pixels.rgba32.len * @sizeOf(ZigImg.color.Rgba32),
-                &Wgpu.struct_WGPUTexelCopyBufferLayout{
-                    .offset = 0,
-                    .bytesPerRow = @intCast(img.width * 4),
-                    .rowsPerImage = @intCast(img.height),
-                },
-                &Wgpu.struct_WGPUExtent3D{
-                    .width = @intCast(img.width),
-                    .height = @intCast(img.height),
-                    .depthOrArrayLayers = 1,
-                },
-            );
-
-            const texture_view = Wgpu.wgpuTextureCreateView(
-                texture,
-                &Wgpu.struct_WGPUTextureViewDescriptor{
-                    .aspect = Wgpu.WGPUTextureAspect_All,
-                    .baseArrayLayer = 0,
-                    .arrayLayerCount = texture_desc.size.depthOrArrayLayers,
-                    .baseMipLevel = 0,
-                    .mipLevelCount = 1,
-                    .dimension = Wgpu.WGPUTextureViewDimension_2D, // 改为 _2D，不是 _2DArray
-                    .format = texture_desc.format,
-                },
-            );
-
-            model.textures_res[i] = .{
-                .texture = texture,
-                .view = texture_view,
-            };
+            model.textures_res[i] = try TextureRes.loadFromMemory(allocator, gctx, img_source.data.?);
         }
 
         // 为材质绑定纹理
         model.materials = try allocator.alloc(Material, gltf.data.materials.len);
-        const default_texture = createDefaultTexture(gctx) catch unreachable;
-        for (gltf.data.materials, 0..) |gltf_meterial, i| {
-            // 材质常量，后面会写入到material_uniform_buffer
-            var material_constants = MaterialConstants{
-                .has_base_color = 0,
-                .has_normal = 0,
-            };
-            // 绑定色彩纹理
-            if (gltf_meterial.metallic_roughness.base_color_texture) |color_tex_info| {
-                material_constants.has_base_color = 1;
-                model.materials[i].color_texture = model.textures_res[color_tex_info.index];
-            } else { // 使用默认纹理
-                model.materials[i].color_texture = default_texture;
+        for (gltf.data.materials, 0..) |gltf_material, i| {
+            var mat = try Material.initDefault(gctx, pipeline);
+            errdefer mat.deinit();
+            // 处理颜色纹理
+            if (gltf_material.metallic_roughness.base_color_texture) |color_tex_info| {
+                const tex = model.textures_res[color_tex_info.index];
+                // 注意：这里需要将 tex 的所有权转移给材质，材质会释放自己的默认纹理
+                mat.setColorTexture(gctx, pipeline, tex);
             }
-            // 绑定法线纹理
-            if (gltf_meterial.normal_texture) |normal_tex_info| {
-                material_constants.has_normal = 1;
-                model.materials[i].normal_texture = model.textures_res[normal_tex_info.index];
-            } else { // 使用默认纹理
-                model.materials[i].normal_texture = default_texture;
+            // 处理法线纹理
+            if (gltf_material.normal_texture) |normal_tex_info| {
+                const tex = model.textures_res[normal_tex_info.index];
+                mat.setNormalTexture(gctx, pipeline, tex);
             }
-            // 材质常量缓冲区
-            const material_uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-                .size = @sizeOf(MaterialConstants),
-                .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
-                .mappedAtCreation = 0,
-            });
-            Wgpu.wgpuQueueWriteBuffer(
-                gctx.queue,
-                material_uniform_buffer,
-                0,
-                &material_constants,
-                Wgpu.wgpuBufferGetSize(material_uniform_buffer),
-            );
-            model.materials[i].uniform_buffer = material_uniform_buffer;
-            // 创建绑定组（实际渲染时的纹理是在这里绑定的，或许我们可以删掉Material中的color_texture和normal_texture）
-            // 又或者应该将创建绑定组的工作外包出去，但为了简单快速的验证代码，暂时先这样
-            model.materials[i].bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
-                .layout = pipeline.material_bgl,
-                .entryCount = 3,
-                .entries = &[_]Wgpu.WGPUBindGroupEntry{
-                    .{ // texture_uniform,我们刚刚创建的
-                        .binding = 0,
-                        .buffer = material_uniform_buffer,
-                        .size = Wgpu.wgpuBufferGetSize(material_uniform_buffer),
-                    },
-                    .{ // color_texture，我们刚刚绑定的
-                        .binding = 1,
-                        .textureView = model.materials[i].color_texture.view orelse null,
-                    },
-                    .{ // normal_texture，我们刚刚绑定的
-                        .binding = 2,
-                        .textureView = model.materials[i].normal_texture.view orelse null,
-                    },
-                },
-            });
+            model.materials[i] = mat;
         }
 
         // 加载网格
@@ -314,35 +387,20 @@ pub const Model = struct {
                     model.meshes[mesh_idx].primitives[prim_idx].material = model.materials[material_idx];
             }
         }
+
         // 返回
         return model;
     }
+
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
         // 1. 释放所有纹理资源
-        for (self.textures_res) |tex| {
-            if (tex.texture) |texture|
-                Wgpu.wgpuTextureRelease(texture);
-            if (tex.view) |view|
-                Wgpu.wgpuTextureViewRelease(view);
-        }
+        for (self.textures_res) |*tex| tex.deinit();
         allocator.free(self.textures_res);
-
         // 2. 释放动画纹理
-        for (self.anim_textures) |tex| {
-            if (tex.texture) |texture|
-                Wgpu.wgpuTextureRelease(texture);
-            if (tex.view) |view|
-                Wgpu.wgpuTextureViewRelease(view);
-        }
+        for (self.anim_textures) |*tex| tex.deinit();
         allocator.free(self.anim_textures);
-
         // 3. 释放材质资源
-        for (self.materials) |material| {
-            if (material.uniform_buffer) |buffer|
-                Wgpu.wgpuBufferRelease(buffer);
-            if (material.bind_group) |bind_group|
-                Wgpu.wgpuBindGroupRelease(bind_group);
-        }
+        for (self.materials) |*material| material.deinit();
         allocator.free(self.materials);
 
         // 4. 释放网格和 primitive 资源
@@ -413,7 +471,7 @@ pub const ResManager = struct {
                 self.allocator,
                 self.gctx,
                 name,
-                self.pipeline.*,
+                self.pipeline,
             ) catch unreachable,
         };
         self.models.put(name, model_ref) catch unreachable;
@@ -481,64 +539,6 @@ pub const ResManager = struct {
     }
 };
 
-pub fn createDefaultTexture(gctx: *Gctx) !TextureRes {
-    // 创建一个 1x1 的纹理
-    const white_pixel = [_]u8{ 255, 255, 255, 255 };
-
-    const texture_desc = Wgpu.WGPUTextureDescriptor{
-        .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
-        .dimension = Wgpu.WGPUTextureDimension_2D,
-        .size = .{
-            .width = 1,
-            .height = 1,
-            .depthOrArrayLayers = 1,
-        },
-        .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
-        .mipLevelCount = 1,
-        .sampleCount = 1,
-    };
-
-    const texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &texture_desc);
-
-    Wgpu.wgpuQueueWriteTexture(
-        gctx.queue,
-        &Wgpu.WGPUTexelCopyTextureInfo{
-            .texture = texture,
-            .mipLevel = 0,
-        },
-        &white_pixel,
-        @sizeOf(@TypeOf(white_pixel)),
-        &Wgpu.struct_WGPUTexelCopyBufferLayout{
-            .offset = 0,
-            .bytesPerRow = 4, // 1 pixel * 4 bytes
-            .rowsPerImage = 1,
-        },
-        &Wgpu.struct_WGPUExtent3D{
-            .width = 1,
-            .height = 1,
-            .depthOrArrayLayers = 1,
-        },
-    );
-
-    const texture_view = Wgpu.wgpuTextureCreateView(
-        texture,
-        &Wgpu.struct_WGPUTextureViewDescriptor{
-            .aspect = Wgpu.WGPUTextureAspect_All,
-            .baseArrayLayer = 0,
-            .arrayLayerCount = 1,
-            .baseMipLevel = 0,
-            .mipLevelCount = 1,
-            .dimension = Wgpu.WGPUTextureViewDimension_2D,
-            .format = texture_desc.format,
-        },
-    );
-
-    return TextureRes{
-        .texture = texture,
-        .view = texture_view,
-    };
-}
-
 pub const SceneUniform = struct {
     proj_matrix: Mat4 = undefined, // 投影矩阵
     view_matrix: Mat4 = undefined, // 视图矩阵
@@ -575,38 +575,6 @@ pub const InstanceData = struct {
     entity_idx: u32, // 该渲染实例属于哪个游戏实体
     _padding: [3]f32 = undefined,
 };
-
-// 创建默认材质（has_base_color为0，表示没有基础色彩纹理）
-pub fn createDefaultMaterial(gctx: *Gctx, render_pipeline: *RenderPipeline) !Material {
-    const default_tex = try createDefaultTexture(gctx);
-    const material_constants = MaterialConstants{
-        .has_base_color = 0,
-        .has_normal = 0,
-        ._padding = .{ 0, 0 },
-    };
-    const uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-        .size = @sizeOf(MaterialConstants),
-        .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
-        .mappedAtCreation = 0,
-    });
-    Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &material_constants, @sizeOf(MaterialConstants));
-
-    const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &Wgpu.WGPUBindGroupDescriptor{
-        .layout = render_pipeline.material_bgl,
-        .entryCount = 3,
-        .entries = &[_]Wgpu.WGPUBindGroupEntry{
-            .{ .binding = 0, .buffer = uniform_buffer, .size = Wgpu.wgpuBufferGetSize(uniform_buffer) },
-            .{ .binding = 1, .textureView = default_tex.view },
-            .{ .binding = 2, .textureView = default_tex.view },
-        },
-    });
-    return Material{
-        .color_texture = default_tex,
-        .normal_texture = default_tex,
-        .uniform_buffer = uniform_buffer,
-        .bind_group = bind_group,
-    };
-}
 
 const std = @import("std");
 const Gctx = @import("gctx.zig");

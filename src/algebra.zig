@@ -226,6 +226,246 @@ pub const Vec3 = struct {
     pub fn lerp(a: Vec3, b: Vec3, t: f32) Vec3 {
         return a.add(b.sub(a).scale(t));
     }
+
+    // ---- 转换为整数向量 ----
+    pub fn toVec3iFloor(self: Vec3) Vec3i {
+        return Vec3i{
+            .x = @intFromFloat(@floor(self.x)),
+            .y = @intFromFloat(@floor(self.y)),
+            .z = @intFromFloat(@floor(self.z)),
+        };
+    }
+
+    pub fn toVec3iRound(self: Vec3) Vec3i {
+        return Vec3i{
+            .x = @intFromFloat(@round(self.x)),
+            .y = @intFromFloat(@round(self.y)),
+            .z = @intFromFloat(@round(self.z)),
+        };
+    }
+
+    pub fn toVec3iTrunc(self: Vec3) Vec3i {
+        return Vec3i{
+            .x = @intFromFloat(@trunc(self.x)),
+            .y = @intFromFloat(@trunc(self.y)),
+            .z = @intFromFloat(@trunc(self.z)),
+        };
+    }
+
+    pub fn toVec3uFloor(self: Vec3) Vec3u {
+        const ix: i32 = @intFromFloat(@floor(self.x));
+        const iy: i32 = @intFromFloat(@floor(self.y));
+        const iz: i32 = @intFromFloat(@floor(self.z));
+        return .{ .x = @intCast(ix), .y = @intCast(iy), .z = @intCast(iz) };
+    }
+};
+
+pub const Vec3i = struct {
+    x: i32,
+    y: i32,
+    z: i32,
+
+    pub const zero = Vec3i{ .x = 0, .y = 0, .z = 0 };
+    pub const one = Vec3i{ .x = 1, .y = 1, .z = 1 };
+    pub const unit_x = Vec3i{ .x = 1, .y = 0, .z = 0 };
+    pub const unit_y = Vec3i{ .x = 0, .y = 1, .z = 0 };
+    pub const unit_z = Vec3i{ .x = 0, .y = 0, .z = 1 };
+
+    pub fn new(x: i32, y: i32, z: i32) Vec3i {
+        return .{ .x = x, .y = y, .z = z };
+    }
+
+    pub fn fromVec3(v: Vec3) Vec3i {
+        return v.toVec3iFloor();
+    }
+
+    pub fn fromVec3u(v: Vec3u) Vec3i {
+        return .{
+            .x = @as(i32, @intCast(v.x)),
+            .y = @as(i32, @intCast(v.y)),
+            .z = @as(i32, @intCast(v.z)),
+        };
+    }
+
+    pub fn toVec3(self: Vec3i) Vec3 {
+        return .{
+            .x = @floatFromInt(self.x),
+            .y = @floatFromInt(self.y),
+            .z = @floatFromInt(self.z),
+        };
+    }
+
+    pub fn toVec3u(self: Vec3i) Vec3u {
+        return Vec3u.fromVec3i(self);
+    }
+
+    pub fn add(a: Vec3i, b: Vec3i) Vec3i {
+        return .{ .x = a.x + b.x, .y = a.y + b.y, .z = a.z + b.z };
+    }
+
+    pub fn sub(a: Vec3i, b: Vec3i) Vec3i {
+        return .{ .x = a.x - b.x, .y = a.y - b.y, .z = a.z - b.z };
+    }
+
+    pub fn mul(a: Vec3i, b: Vec3i) Vec3i {
+        return .{ .x = a.x * b.x, .y = a.y * b.y, .z = a.z * b.z };
+    }
+
+    pub fn scale(v: Vec3i, s: i32) Vec3i {
+        return .{ .x = v.x * s, .y = v.y * s, .z = v.z * s };
+    }
+
+    pub fn neg(v: Vec3i) Vec3i {
+        return .{ .x = -v.x, .y = -v.y, .z = -v.z };
+    }
+
+    pub fn dot(a: Vec3i, b: Vec3i) i64 {
+        return @as(i64, a.x) * @as(i64, b.x) +
+            @as(i64, a.y) * @as(i64, b.y) +
+            @as(i64, a.z) * @as(i64, b.z);
+    }
+
+    pub fn cross(a: Vec3i, b: Vec3i) Vec3i {
+        return .{
+            .x = a.y * b.z - a.z * b.y,
+            .y = a.z * b.x - a.x * b.z,
+            .z = a.x * b.y - a.y * b.x,
+        };
+    }
+
+    pub fn len2(v: Vec3i) i64 {
+        return v.dot(v);
+    }
+
+    pub fn len(v: Vec3i) f32 {
+        return @sqrt(@as(f32, @floatFromInt(v.len2())));
+    }
+
+    pub fn eql(a: Vec3i, b: Vec3i) bool {
+        return a.x == b.x and a.y == b.y and a.z == b.z;
+    }
+
+    pub fn max(a: Vec3i, b: Vec3i) Vec3i {
+        return .{
+            .x = @max(a.x, b.x),
+            .y = @max(a.y, b.y),
+            .z = @max(a.z, b.z),
+        };
+    }
+
+    pub fn min(a: Vec3i, b: Vec3i) Vec3i {
+        return .{
+            .x = @min(a.x, b.x),
+            .y = @min(a.y, b.y),
+            .z = @min(a.z, b.z),
+        };
+    }
+
+    pub fn clamp(v: Vec3i, min_v: Vec3i, max_v: Vec3i) Vec3i {
+        return v.max(min_v).min(max_v);
+    }
+};
+
+pub const Vec3u = struct {
+    x: u32,
+    y: u32,
+    z: u32,
+
+    pub const zero = Vec3u{ .x = 0, .y = 0, .z = 0 };
+    pub const one = Vec3u{ .x = 1, .y = 1, .z = 1 };
+    pub const unit_x = Vec3u{ .x = 1, .y = 0, .z = 0 };
+    pub const unit_y = Vec3u{ .x = 0, .y = 1, .z = 0 };
+    pub const unit_z = Vec3u{ .x = 0, .y = 0, .z = 1 };
+
+    pub fn new(x: u32, y: u32, z: u32) Vec3u {
+        return .{ .x = x, .y = y, .z = z };
+    }
+
+    pub fn fromVec3i(v: Vec3i) Vec3u {
+        return .{
+            .x = @intCast(v.x),
+            .y = @intCast(v.y),
+            .z = @intCast(v.z),
+        };
+    }
+
+    pub fn fromVec3Floor(v: Vec3) Vec3u {
+        return v.toVec3uFloor();
+    }
+
+    pub fn toVec3(self: Vec3u) Vec3 {
+        return .{
+            .x = @floatFromInt(self.x),
+            .y = @floatFromInt(self.y),
+            .z = @floatFromInt(self.z),
+        };
+    }
+
+    pub fn toVec3i(self: Vec3u) Vec3i {
+        return .{
+            .x = @as(i32, @intCast(self.x)),
+            .y = @as(i32, @intCast(self.y)),
+            .z = @as(i32, @intCast(self.z)),
+        };
+    }
+
+    pub fn add(a: Vec3u, b: Vec3u) Vec3u {
+        return .{ .x = a.x + b.x, .y = a.y + b.y, .z = a.z + b.z };
+    }
+
+    pub fn sub(a: Vec3u, b: Vec3u) Vec3u {
+        return .{ .x = a.x - b.x, .y = a.y - b.y, .z = a.z - b.z };
+    }
+
+    pub fn mul(a: Vec3u, b: Vec3u) Vec3u {
+        return .{ .x = a.x * b.x, .y = a.y * b.y, .z = a.z * b.z };
+    }
+
+    pub fn scale(v: Vec3u, s: u32) Vec3u {
+        return .{ .x = v.x * s, .y = v.y * s, .z = v.z * s };
+    }
+
+    pub fn dot(a: Vec3u, b: Vec3u) u64 {
+        return @as(u64, a.x) * @as(u64, b.x) +
+            @as(u64, a.y) * @as(u64, b.y) +
+            @as(u64, a.z) * @as(u64, b.z);
+    }
+
+    pub fn len2(v: Vec3u) u64 {
+        return v.dot(v);
+    }
+
+    pub fn len(v: Vec3u) f32 {
+        return @sqrt(@as(f32, @floatFromInt(v.len2())));
+    }
+
+    pub fn eql(a: Vec3u, b: Vec3u) bool {
+        return a.x == b.x and a.y == b.y and a.z == b.z;
+    }
+
+    pub fn max(a: Vec3u, b: Vec3u) Vec3u {
+        return .{
+            .x = @max(a.x, b.x),
+            .y = @max(a.y, b.y),
+            .z = @max(a.z, b.z),
+        };
+    }
+
+    pub fn min(a: Vec3u, b: Vec3u) Vec3u {
+        return .{
+            .x = @min(a.x, b.x),
+            .y = @min(a.y, b.y),
+            .z = @min(a.z, b.z),
+        };
+    }
+
+    pub fn clamp(v: Vec3u, min_v: Vec3u, max_v: Vec3u) Vec3u {
+        return v.max(min_v).min(max_v);
+    }
+
+    pub fn volume(self: Vec3u) usize {
+        return @as(usize, self.x) * @as(usize, self.y) * @as(usize, self.z);
+    }
 };
 
 pub const Vec4 = struct {
