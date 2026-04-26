@@ -5,6 +5,7 @@ const Vec3 = Imports.Vec3;
 const Vec3i = Imports.Vec3i;
 const Vec3u = Imports.Vec3u;
 const Vec4 = Imports.Vec4;
+const Quat = Imports.Quat;
 const Wgpu = Imports.Wgpu;
 const Material = Imports.RendCTX.Material;
 const MaterialConstants = Imports.RendCTX.MaterialConstants;
@@ -23,6 +24,8 @@ pub const BlockProtoType = struct {
     occludes: bool = true, // 新增：是否遮挡相邻方块的面
     opacity: f32 = 1.0, // 不透明度
     solidity: f32 = 1.0, // 流体-固体，1.0代表固体
+    durability: u32 = 32, // 耐久度
+    is_directional: bool = true,
 };
 
 /// 方块注册表
@@ -35,7 +38,7 @@ const block_infos = [_]BlockProtoType{
     },
     .{
         .name = "grass",
-        .face_variants = .{ 0, 0, 0, 0, 1, 2 },
+        .face_variants = .{ 0, 1, 2, 2, 2, 2 },
     },
     .{ .name = "stone" },
     .{ .name = "dirt" },
@@ -78,9 +81,9 @@ pub const BlockId = enum(u32) {
     }
 };
 
-pub const CHUNK_SIZE_X: u32 = 64;
+pub const CHUNK_SIZE_X: u32 = 32;
 pub const CHUNK_SIZE_Y: u32 = 256;
-pub const CHUNK_SIZE_Z: u32 = 64;
+pub const CHUNK_SIZE_Z: u32 = 32;
 pub const ChunkSize = Vec3u{
     .x = CHUNK_SIZE_X,
     .y = CHUNK_SIZE_Y,
@@ -88,7 +91,7 @@ pub const ChunkSize = Vec3u{
 };
 
 pub const Chunk = struct {
-    blocks: [CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockId,
+    blocks: [CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockState,
 
     pub fn generate(world_origin: Vec3i) Chunk {
         const noise_scale: f32 = 0.05;
@@ -108,7 +111,7 @@ pub const Chunk = struct {
 
                 for (0..CHUNK_SIZE_Y) |y| {
                     const y_i32: i32 = @intCast(y);
-                    const block: BlockId = blk: {
+                    const block_id: BlockId = blk: {
                         if (y_i32 > ground_position) {
                             if (y_i32 < water_height) break :blk .fromName("water");
                             break :blk .fromName("air");
@@ -116,16 +119,21 @@ pub const Chunk = struct {
                             if (y_i32 < water_height) break :blk .fromName("sand");
                             break :blk .fromName("grass");
                         } else {
-                            // 地表以下
                             const depth = ground_position - y_i32;
                             if (depth >= 5) break :blk .fromName("stone");
                             break :blk .fromName("dirt");
                         }
                     };
-                    chunk.blocks[x][y][z] = block;
+                    // 使用 BlockState 初始化，自动继承原型耐久度
+                    chunk.blocks[x][y][z] = BlockState.init(block_id);
                 }
             }
         }
+
+        var bs = BlockState.init(.fromName("grass"));
+        // 测试用，让所有生成的方块都朝向某个方向
+        bs.facing = .down;
+        chunk.blocks[0][90][0] = bs;
         return chunk;
     }
 };
@@ -357,55 +365,35 @@ pub const CachedMaterial = struct {
     }
 };
 
-test "foo" {
-    const id = BlockId.fromInt(1);
-    std.debug.print("\n{s}\n", .{id.name()});
+pub const Direction = enum(u3) {
+    up, // +Y   (索引 0)
+    down, // -Y   (索引 1)
+    north, // -Z   (索引 2)  注意：这里定义 north 为 -Z
+    south, // +Z   (索引 3)
+    west, // -X   (索引 4)
+    east, // +X   (索引 5)
 
-    const grass_id = BlockId.fromName("grass");
-    const water_prototype = grass_id.prototype();
-
-    std.debug.print("{}\n", .{water_prototype.solidity});
-
-    const grass_mat_key = MaterialKey{ .block_id = grass_id, .variant = 0 };
-    const grass_mat_id = grass_mat_key.toId();
-    std.debug.print("{}\n", .{grass_mat_id});
-
-    const material_count = block_infos.len * 8;
-    var active_materials = SparseSet(MaterialId, material_count).init();
-    defer active_materials.deinit(std.testing.allocator);
-
-    active_materials.set(std.testing.allocator, @intFromEnum(grass_mat_key.toId()), grass_mat_id);
-    if (active_materials.getPtr(@intFromEnum(grass_mat_key.toId()))) |grass_mat|
-        std.debug.print("Got it:{}\n", .{grass_mat});
-}
-
-const Direction = enum(u3) {
-    forwards, // +Z
-    backwards, // -Z
-    right, // +X
-    left, // -X
-    up, // +Y
-    down, // -Y
-
+    /// 返回该方向的单位法线向量
     pub fn normal(self: Direction) Vec3 {
         return switch (self) {
-            .forwards => Vec3.new(0, 0, 1),
-            .backwards => Vec3.new(0, 0, -1),
-            .right => Vec3.new(1, 0, 0),
-            .left => Vec3.new(-1, 0, 0),
             .up => Vec3.new(0, 1, 0),
             .down => Vec3.new(0, -1, 0),
+            .north => Vec3.new(0, 0, -1),
+            .south => Vec3.new(0, 0, 1),
+            .west => Vec3.new(-1, 0, 0),
+            .east => Vec3.new(1, 0, 0),
         };
     }
 
+    /// 返回该方向的整数偏移向量（用于邻居查找）
     pub fn offset(self: Direction) Vec3i {
         return switch (self) {
-            .forwards => Vec3i.new(0, 0, 1),
-            .backwards => Vec3i.new(0, 0, -1),
-            .right => Vec3i.new(1, 0, 0),
-            .left => Vec3i.new(-1, 0, 0),
             .up => Vec3i.new(0, 1, 0),
             .down => Vec3i.new(0, -1, 0),
+            .north => Vec3i.new(0, 0, -1),
+            .south => Vec3i.new(0, 0, 1),
+            .west => Vec3i.new(-1, 0, 0),
+            .east => Vec3i.new(1, 0, 0),
         };
     }
 };
@@ -426,130 +414,6 @@ const MeshBuilder = struct {
         self.vertices.deinit(self.allocator);
         self.indices.deinit(self.allocator);
     }
-
-    // 添加一个完整的方形面（4 个顶点，两个三角形）
-    pub fn addFace(self: *MeshBuilder, center: Vec3, dir: Direction, allocator: std.mem.Allocator) !void {
-        const x = center.x;
-        const y = center.y;
-        const z = center.z;
-        const h = 0.5;
-
-        var positions: [4]Vec3 = undefined;
-        var uvs: [4]Vec2 = undefined;
-        const normal = dir.normal();
-
-        switch (dir) {
-            .up => {
-                // 从上方看，CCW：左后 -> 右后 -> 右前 -> 左前
-                positions = .{
-                    Vec3.new(x - h, y + h, z - h), // v0
-                    Vec3.new(x + h, y + h, z - h), // v1
-                    Vec3.new(x + h, y + h, z + h), // v2
-                    Vec3.new(x - h, y + h, z + h), // v3
-                };
-                uvs = .{
-                    Vec2.new(0, 1), // V 翻转后，左下对应世界左后
-                    Vec2.new(1, 1),
-                    Vec2.new(1, 0),
-                    Vec2.new(0, 0),
-                };
-            },
-            .down => {
-                // 从下方看，CCW：左前 -> 右前 -> 右后 -> 左后
-                positions = .{
-                    Vec3.new(x - h, y - h, z + h),
-                    Vec3.new(x + h, y - h, z + h),
-                    Vec3.new(x + h, y - h, z - h),
-                    Vec3.new(x - h, y - h, z - h),
-                };
-                uvs = .{
-                    Vec2.new(0, 0),
-                    Vec2.new(1, 0),
-                    Vec2.new(1, 1),
-                    Vec2.new(0, 1),
-                };
-            },
-            .forwards => {
-                // 前 (+Z)，从 +Z 看 CCW：右下 -> 左下 -> 左上 -> 右上
-                positions = .{
-                    Vec3.new(x + h, y - h, z + h), // 右下
-                    Vec3.new(x - h, y - h, z + h), // 左下
-                    Vec3.new(x - h, y + h, z + h), // 左上
-                    Vec3.new(x + h, y + h, z + h), // 右上
-                };
-                uvs = .{
-                    Vec2.new(1, 1), // 翻转后：右下对应纹理右下
-                    Vec2.new(0, 1), // 左下对应纹理左下
-                    Vec2.new(0, 0), // 左上对应纹理左上
-                    Vec2.new(1, 0), // 右上对应纹理右上
-                };
-            },
-            .backwards => {
-                // 后 (-Z)，从 -Z 看 CCW：左下 -> 右下 -> 右上 -> 左上
-                positions = .{
-                    Vec3.new(x - h, y - h, z - h),
-                    Vec3.new(x + h, y - h, z - h),
-                    Vec3.new(x + h, y + h, z - h),
-                    Vec3.new(x - h, y + h, z - h),
-                };
-                uvs = .{
-                    Vec2.new(0, 1),
-                    Vec2.new(1, 1),
-                    Vec2.new(1, 0),
-                    Vec2.new(0, 0),
-                };
-            },
-            .right => {
-                // +X 面，从 +X 看 CCW：下后 -> 下前 -> 上前 -> 上后
-                positions = .{
-                    Vec3.new(x + h, y - h, z - h),
-                    Vec3.new(x + h, y - h, z + h),
-                    Vec3.new(x + h, y + h, z + h),
-                    Vec3.new(x + h, y + h, z - h),
-                };
-                uvs = .{
-                    Vec2.new(0, 1),
-                    Vec2.new(1, 1),
-                    Vec2.new(1, 0),
-                    Vec2.new(0, 0),
-                };
-            },
-            .left => {
-                // -X 面，从 -X 看 CCW：下前 -> 下后 -> 上后 -> 上前
-                positions = .{
-                    Vec3.new(x - h, y - h, z + h),
-                    Vec3.new(x - h, y - h, z - h),
-                    Vec3.new(x - h, y + h, z - h),
-                    Vec3.new(x - h, y + h, z + h),
-                };
-                uvs = .{
-                    Vec2.new(0, 1),
-                    Vec2.new(1, 1),
-                    Vec2.new(1, 0),
-                    Vec2.new(0, 0),
-                };
-            },
-        }
-
-        const base_index = @as(u32, @intCast(self.vertices.items.len));
-        for (positions, uvs) |pos, uv| {
-            try self.vertices.append(allocator, VertexAttribute{
-                .position = pos,
-                .normal = normal,
-                .texcoord = uv,
-                .tangent = Vec4.new(1, 0, 0, 1),
-                .color = Vec4.new(1, 1, 1, 1),
-                .joint_indices = .{ 0, 0, 0, 0 },
-                .joint_weights = .{ 1, 0, 0, 0 },
-            });
-        }
-
-        // 两个三角形 CCW 索引
-        try self.indices.appendSlice(allocator, &[_]u32{
-            base_index, base_index + 2, base_index + 1,
-            base_index, base_index + 3, base_index + 2,
-        });
-    }
 };
 
 // 核心：为一个区块生成网格数据并上传到材质缓冲区
@@ -566,12 +430,21 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
     for (0..CHUNK_SIZE_X) |x| {
         for (0..CHUNK_SIZE_Z) |z| {
             for (0..CHUNK_SIZE_Y) |y| {
-                const block_id = chunk.blocks[x][y][z]; // [X][Y][Z]
+                const block_state = chunk.blocks[x][y][z];
+                const block_id = block_state.block_id;
                 if (block_id == BlockId.fromName("air")) continue;
                 const proto = block_id.prototype();
 
+                // 计算方块旋转（保持单位旋转当无方向性时）
+                const rot = if (proto.is_directional)
+                    fromToRotation(Vec3.up, block_state.facing.normal())
+                else
+                    Quat.identity;
+
                 const dirs = std.enums.values(Direction);
                 for (dirs) |dir| {
+                    // 世界方向（判断邻居、生成顶点位置）
+                    const world_dir = dir;
                     const offset = dir.offset();
                     const nx = @as(i32, @intCast(x)) + offset.x;
                     const ny = @as(i32, @intCast(y)) + offset.y;
@@ -582,14 +455,22 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                         ny >= 0 and ny < CHUNK_SIZE_Y and
                         nz >= 0 and nz < CHUNK_SIZE_Z)
                     {
-                        neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)];
+                        neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
                     } else {
                         neighbor = .fromName("air");
                     }
 
                     if (neighbor.prototype().occludes) continue;
 
-                    const face_index = @intFromEnum(dir);
+                    // 局部方向（用于材质变体和UV轴旋转）
+                    const local_dir = if (proto.is_directional) blk: {
+                        const world_vec = world_dir.normal();
+                        const local_vec = rot.inverse().rotate(world_vec);
+                        break :blk directionFromVec(local_vec);
+                    } else world_dir;
+
+                    // 材质变体选择
+                    const face_index = @intFromEnum(local_dir);
                     const variant = proto.face_variants[face_index];
                     const mat_key = MaterialKey{ .block_id = block_id, .variant = variant };
                     const mat_id = mat_key.toId();
@@ -599,12 +480,37 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                         gop.value_ptr.* = MeshBuilder.init(allocator);
                     }
 
+                    // 获取标准姿态的面数据（局部方向）
+                    const face_data = getStandardFaceData(local_dir);
                     const center = Vec3.new(
                         @as(f32, @floatFromInt(x)) + 0.5,
                         @as(f32, @floatFromInt(y)) + 0.5,
                         @as(f32, @floatFromInt(z)) + 0.5,
                     );
-                    try gop.value_ptr.addFace(center, dir, registry.allocator);
+
+                    // 构建顶点和索引
+                    const builder_ptr = gop.value_ptr; // 指向 MeshBuilder 的指针
+                    const start_vertex = builder_ptr.vertices.items.len;
+
+                    for (face_data.positions, face_data.uvs) |local_pos, uv| {
+                        const world_pos = rot.rotate(local_pos).add(center);
+                        const world_normal = rot.rotate(local_dir.normal());
+                        try builder_ptr.vertices.append(allocator, VertexAttribute{
+                            .position = world_pos,
+                            .normal = world_normal,
+                            .texcoord = uv,
+                            .tangent = Vec4.new(1, 0, 0, 1),
+                            .color = Vec4.new(1, 1, 1, 1),
+                            .joint_indices = .{ 0, 0, 0, 0 },
+                            .joint_weights = .{ 1, 0, 0, 0 },
+                        });
+                    }
+
+                    // 两个三角形组成面
+                    try builder_ptr.indices.appendSlice(allocator, &[_]u32{
+                        @intCast(start_vertex), @intCast(start_vertex + 2), @intCast(start_vertex + 1),
+                        @intCast(start_vertex), @intCast(start_vertex + 3), @intCast(start_vertex + 2),
+                    });
                 }
             }
         }
@@ -621,4 +527,121 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
         const cached = try registry.acquire(material_key);
         try cached.updateMesh(registry.gctx, builder.vertices.items, builder.indices.items);
     }
+}
+
+pub const BlockState = struct {
+    block_id: BlockId = BlockId.fromName("air"),
+    facing: Direction = .up,
+    durability: u32 = 10,
+    /// 从一个方块ID创建默认状态（使用原型中的耐久度）
+    pub fn init(block_id: BlockId) BlockState {
+        return .{
+            .block_id = block_id,
+            .facing = .up,
+            .durability = block_id.prototype().durability,
+        };
+    }
+};
+
+/// 返回从向量 from 到 to 的最短旋转四元数
+fn fromToRotation(from: Vec3, to: Vec3) Quat {
+    const f = from.norm();
+    const t = to.norm();
+    const dot = f.dot(t);
+    if (dot > 0.9999) return Quat.identity;
+    if (dot < -0.9999) {
+        // 180° 旋转，找一个与 from 垂直的轴
+        const perp = if (@abs(f.x) < 0.9) Vec3.new(1, 0, 0) else Vec3.new(0, 1, 0);
+        const axis = f.cross(perp).norm();
+        return Quat.fromAxisAngle(axis, std.math.pi);
+    }
+    const axis = f.cross(t).norm();
+    const angle = std.math.acos(dot);
+    return Quat.fromAxisAngle(axis, angle);
+}
+
+fn directionFromVec(v: Vec3) Direction {
+    const ax = @abs(v.x);
+    const ay = @abs(v.y);
+    const az = @abs(v.z);
+    if (ay >= ax and ay >= az) return if (v.y > 0) .up else .down;
+    if (ax >= ay and ax >= az) return if (v.x > 0) .east else .west;
+    return if (v.z > 0) .south else .north;
+}
+
+const FaceData = struct {
+    positions: [4]Vec3,
+    uvs: [4]Vec2,
+};
+
+fn getStandardFaceData(local_dir: Direction) FaceData {
+    const h = 0.5;
+    return switch (local_dir) {
+        .up => FaceData{
+            .positions = .{
+                Vec3.new(-h, h, -h),
+                Vec3.new(h, h, -h),
+                Vec3.new(h, h, h),
+                Vec3.new(-h, h, h),
+            },
+            .uvs = .{
+                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
+            },
+        },
+        .down => FaceData{
+            .positions = .{
+                Vec3.new(-h, -h, h),
+                Vec3.new(h, -h, h),
+                Vec3.new(h, -h, -h),
+                Vec3.new(-h, -h, -h),
+            },
+            .uvs = .{
+                Vec2.new(0, 0), Vec2.new(1, 0), Vec2.new(1, 1), Vec2.new(0, 1),
+            },
+        },
+        .north => FaceData{
+            .positions = .{
+                Vec3.new(-h, -h, -h),
+                Vec3.new(h, -h, -h),
+                Vec3.new(h, h, -h),
+                Vec3.new(-h, h, -h),
+            },
+            .uvs = .{
+                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
+            },
+        },
+        .south => FaceData{
+            .positions = .{
+                Vec3.new(h, -h, h),
+                Vec3.new(-h, -h, h),
+                Vec3.new(-h, h, h),
+                Vec3.new(h, h, h),
+            },
+            .uvs = .{
+                Vec2.new(1, 1), Vec2.new(0, 1), Vec2.new(0, 0), Vec2.new(1, 0),
+            },
+        },
+        .east => FaceData{
+            .positions = .{
+                Vec3.new(h, -h, -h),
+                Vec3.new(h, -h, h),
+                Vec3.new(h, h, h),
+                Vec3.new(h, h, -h),
+            },
+            .uvs = .{
+                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
+            },
+        },
+        .west => FaceData{
+            .positions = .{
+                Vec3.new(-h, -h, h),
+                Vec3.new(-h, -h, -h),
+                Vec3.new(-h, h, -h),
+                Vec3.new(-h, h, h),
+            },
+            .uvs = .{
+                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
+            },
+        },
+    };
 }

@@ -636,6 +636,11 @@ pub const Quat = struct {
             },
         };
     }
+
+    pub fn inverse(q: Quat) Quat {
+        // 共轭即逆（对于单位四元数，我们总是保持单位化）
+        return .{ .x = -q.x, .y = -q.y, .z = -q.z, .w = q.w };
+    }
 };
 
 pub const Mat4 = struct {
