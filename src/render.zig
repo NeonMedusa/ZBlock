@@ -50,6 +50,21 @@ pub fn draw(game: *Game) void {
         entity_idx += 1;
     }
 
+    // 为方块预留一个实体数据（单位矩阵）
+    const chunk_entity_idx = entity_idx;
+    game.res_manager.entities_data[chunk_entity_idx] = EntityData{
+        .transform = Mat4.fromTranslate(Vec3.new(3, -70, 3)),
+    };
+    entity_idx += 1;
+
+    // 为方块预留一个实例数据（单位矩阵 + 指针）
+    const chunk_instance_idx = ins_idx;
+    game.res_manager.instances_data[chunk_instance_idx] = InstanceData{
+        .transform = Mat4.identity,
+        .entity_idx = chunk_entity_idx,
+    };
+    ins_idx += 1;
+
     // ========== 第二步：准备渲染通道 ==========
     const color_attachment = Wgpu.WGPURenderPassColorAttachment{
         .view = surface_texture_view,
@@ -138,6 +153,52 @@ pub fn draw(game: *Game) void {
         );
     }
 
+    // 绘制方块（所有不透明材质）
+    {
+        var mat_iter = game.material_registry.active_materials.iterator();
+        while (mat_iter.next()) |entry| {
+            const mat_id: MaterialId = @enumFromInt(entry[0]);
+            if (game.material_registry.materials.get(mat_id)) |cached| {
+                if (cached.index_count == 0) continue;
+
+                // 设置顶点和索引缓冲区
+                Wgpu.wgpuRenderPassEncoderSetVertexBuffer(
+                    pass,
+                    0,
+                    cached.vertex_buffer,
+                    0,
+                    Wgpu.wgpuBufferGetSize(cached.vertex_buffer),
+                );
+                Wgpu.wgpuRenderPassEncoderSetIndexBuffer(
+                    pass,
+                    cached.index_buffer,
+                    Wgpu.WGPUIndexFormat_Uint32,
+                    0,
+                    Wgpu.wgpuBufferGetSize(cached.index_buffer),
+                );
+
+                // 设置材质绑定组（纹理、uniform常量）
+                Wgpu.wgpuRenderPassEncoderSetBindGroup(
+                    pass,
+                    1,
+                    cached.material.bind_group,
+                    0,
+                    null,
+                );
+
+                // 绘制（非实例化，最后一个参数为 0）
+                Wgpu.wgpuRenderPassEncoderDrawIndexed(
+                    pass,
+                    cached.index_count,
+                    1, // instance count = 1
+                    0, // first index
+                    0, // base vertex
+                    chunk_instance_idx, // first instance = 0
+                );
+            }
+        }
+    }
+
     // UI渲染
     Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.ui_system.render_pipeline.handle);
     Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.ui_system.render_pipeline.bind_group, 0, null);
@@ -185,3 +246,4 @@ const ECS = @import("zigecs");
 const Comps = @import("components.zig").Components;
 
 const Model = @import("rend_ctx.zig").Model;
+const MaterialId = @import("block_world.zig").MaterialId;

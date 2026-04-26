@@ -12,6 +12,13 @@ camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
 
+material_registry: MaterialRegistry = undefined,
+chunk: Chunk = undefined,
+
+const BlockWorld = @import("block_world.zig");
+const MaterialRegistry = BlockWorld.MaterialRegistry;
+const Chunk = BlockWorld.Chunk;
+
 // 开始游戏
 pub fn start(self: *Game) !void {
     // 初始化主菜单
@@ -24,6 +31,19 @@ pub fn start(self: *Game) !void {
     self.registry.add(e1, Comps.Velocity{ .vec = Vec3.zero });
     self.registry.add(e1, Comps.Player{ .id = self.player_id });
     self.registry.add(e1, Comps.Speed{ .value = 3 });
+
+    const e2 = self.registry.create();
+    self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
+    self.registry.add(e2, Comps.Position{ .vec = .new(0, 2, 0) });
+
+    self.chunk = Chunk.generate(.new(0, 0, 0));
+    self.material_registry = try MaterialRegistry.init(
+        self.allocator,
+        &self.gctx,
+        &self.render_pipeline,
+    );
+    defer self.material_registry.deinit();
+    try BlockWorld.buildChunkMesh(&self.chunk, &self.material_registry);
 
     // 主循环
     while (!self.window.shouldClose()) {
@@ -59,6 +79,10 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 初始化wgpu
     const gctx = try Gctx.init(self.window);
     self.gctx = gctx;
+
+    // 初始化噪声系统
+    const perlin = @import("perlin.zig");
+    perlin.init(99);
     // 初始化资源管理器
     const res_manager = try ResManager.init(allocator, &self.gctx, &self.render_pipeline);
     self.res_manager = res_manager;

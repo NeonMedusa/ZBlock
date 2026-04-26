@@ -458,6 +458,7 @@ pub const ResManager = struct {
     models: std.StringHashMap(ModelRef),
     gctx: *Gctx,
     pipeline: *RenderPipeline,
+
     /// 获取或加载模型，调用此函数时会增加ref_count
     pub fn getOrLoadModel(self: *ResManager, name: []const u8) Model {
         if (self.models.getPtr(name)) |model_ref| {
@@ -477,12 +478,14 @@ pub const ResManager = struct {
         self.models.put(name, model_ref) catch unreachable;
         return self.models.getPtr(name).?.model;
     }
+
     /// 归零所有模型的引用计数，应该在每帧开始时调用
     pub fn resetRefCount(self: *ResManager) void {
         var iter = self.*.models.iterator();
         while (iter.next()) |entry|
             entry.value_ptr.ref_count = 0;
     }
+
     /// 卸载所有引用为0的模型，应该在每帧结束时调用
     pub fn removeZeroRefModel(self: *ResManager) void {
         var iter = self.*.models.iterator();
