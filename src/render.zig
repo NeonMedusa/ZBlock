@@ -53,7 +53,7 @@ pub fn draw(game: *Game) void {
     // 为方块预留一个实体数据（单位矩阵）
     const chunk_entity_idx = entity_idx;
     game.res_manager.entities_data[chunk_entity_idx] = EntityData{
-        .transform = Mat4.fromTranslate(Vec3.new(3, -70, 3)),
+        .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)),
     };
     entity_idx += 1;
 
@@ -155,10 +155,10 @@ pub fn draw(game: *Game) void {
 
     // 绘制方块（所有不透明材质）
     {
-        var mat_iter = game.material_registry.active_materials.iterator();
+        var mat_iter = game.block_world.material_registry.active_materials.iterator();
         while (mat_iter.next()) |entry| {
             const mat_id: MaterialId = @enumFromInt(entry[0]);
-            if (game.material_registry.materials.get(mat_id)) |cached| {
+            if (game.block_world.material_registry.materials.get(mat_id)) |cached| {
                 if (cached.index_count == 0) continue;
 
                 // 设置顶点和索引缓冲区

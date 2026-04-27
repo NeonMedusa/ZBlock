@@ -11,20 +11,14 @@ render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
-
-material_registry: MaterialRegistry = undefined,
-chunk: Chunk = undefined,
-
-const BlockWorld = @import("block_world.zig");
-const MaterialRegistry = BlockWorld.MaterialRegistry;
-const Chunk = BlockWorld.Chunk;
+block_world: BlockWorld,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
     // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
 
-    // 创建用于测试的实体
+    // 创建用于测试模型渲染的实体
     const e1 = self.registry.create();
     self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
     self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
@@ -36,15 +30,6 @@ pub fn start(self: *Game) !void {
     self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
     self.registry.add(e2, Comps.Position{ .vec = .new(0, 2, 0) });
 
-    self.chunk = Chunk.generate(.new(0, 0, 0));
-    self.material_registry = try MaterialRegistry.init(
-        self.allocator,
-        &self.gctx,
-        &self.render_pipeline,
-    );
-    defer self.material_registry.deinit();
-    try BlockWorld.buildChunkMesh(&self.chunk, &self.material_registry);
-
     // 主循环
     while (!self.window.shouldClose()) {
         // 先重置输入状态
@@ -52,10 +37,41 @@ pub fn start(self: *Game) !void {
         // 再更新窗口事件
         self.window.pollEvents();
         // 如果主菜单不可见，则更新世界和摄像头
-        if (!main_menu.visible)
-            // 更新摄像头
-            self.camera.update(self);
+        if (!main_menu.visible) {
+            var move_dir = Vec3.zero;
+            var input = self.input;
 
+            // 水平移动（不变）
+            const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
+            const right_h = Vec3.new(self.camera.front.cross(self.camera.up).x, 0, self.camera.front.cross(self.camera.up).z).norm();
+            if (input.isKeyPressed(.w)) move_dir = move_dir.add(front_h);
+            if (input.isKeyPressed(.s)) move_dir = move_dir.sub(front_h);
+            if (input.isKeyPressed(.a)) move_dir = move_dir.sub(right_h);
+            if (input.isKeyPressed(.d)) move_dir = move_dir.add(right_h);
+
+            // 空格：站立时跳跃，水中悬浮时上浮
+            if (input.isKeyPressed(.space)) {
+                if (self.block_world.physics.on_ground) {
+                    self.block_world.physics.jump();
+                } else if (self.block_world.physics.isInWater()) {
+                    move_dir.y = 1.0;
+                }
+            }
+
+            // Ctrl：水中下潜
+            if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control)) {
+                if (self.block_world.physics.isInWater()) {
+                    move_dir.y = -1.0;
+                }
+            }
+
+            if (move_dir.len2() > 0.001)
+                move_dir = move_dir.norm();
+
+            self.block_world.tick(move_dir, self.window.delta_time);
+            self.camera.position = self.block_world.physics.position.add(Vec3.new(0, 1.6, 0));
+            self.camera.updateFromMouse(self);
+        }
         // UI开始新帧
         self.ui_system.beginFrame();
         // 如果主菜单可见，则渲染主菜单
@@ -71,7 +87,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     var self = try allocator.create(@This());
     self.allocator = allocator;
     // 创建窗口
-    const window = try Window.init(self, "ZigGame", 640, 480);
+    const window = try Window.init(self, "ZigGame", 1280, 720);
     self.window = window;
     // 初始化输入系统
     const input = Input.init(self);
@@ -109,6 +125,9 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const ui_system = try UiSystem.init(allocator, &self.gctx, self);
     self.ui_system = ui_system;
 
+    // 测试方块世界
+    self.block_world = try BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline);
+
     // 返回实例
     return self;
 }
@@ -132,6 +151,7 @@ pub fn deinit(self: *@This()) void {
     self.render_pipeline.deinit();
     self.registry.deinit();
     self.ui_system.deinit();
+    self.block_world.deinit();
 }
 
 const Game = @This();
@@ -170,3 +190,5 @@ const Comps = Imports.Comps;
 const Raycast = @import("raycast.zig");
 
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
+
+const BlockWorld = @import("block_world.zig").BlockWorld;

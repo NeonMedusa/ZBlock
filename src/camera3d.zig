@@ -23,19 +23,25 @@ pub fn init(game: *Game) @This() {
     };
 }
 
-pub fn update(self: *@This(), game: *Game) void {
+/// 通过鼠标输入更新视角（yaw 和 pitch）
+pub fn updateFromMouse(self: *@This(), game: *Game) void {
     var input = game.input;
     const window = game.window;
-    //鼠标控制方向
-    const mousePos = input.getCursorPos(); // 获取鼠标位置
-    input.setCursorToCenter(); // 重置鼠标位置到窗口中心
-    self.yaw += (mousePos.x - window.center_x) * self.sensitivity; // 更新相机角度
+    const mousePos = input.getCursorPosThroughPolling();
+    input.setCursorToCenter();
+    self.yaw += (mousePos.x - window.center_x) * self.sensitivity;
     self.pitch -= (mousePos.y - window.center_y) * self.sensitivity;
-    if (self.pitch > 89.0) self.pitch = 89.0; // 限制俯仰角
+    if (self.pitch > 89.0) self.pitch = 89.0;
     if (self.pitch < -89.0) self.pitch = -89.0;
-    self.updateVectors(); // 更新相机方向向量
-    // 键盘控制移动
-    const velocity = self.movement_speed * window.delta_time;
+    self.updateVectors();
+    // 更新视图矩阵
+    self.game.ubo.view_matrix = Mat4.lookAt(self.position, self.position.add(self.front), self.up);
+}
+
+/// 通过键盘输入更新位置（保留用于调试，自由飞行模式）
+pub fn updateFromKeyboard(self: *@This(), game: *Game) void {
+    var input = game.input;
+    const velocity = self.movement_speed * game.window.delta_time;
     const right = self.front.cross(self.up).norm();
     if (input.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
     if (input.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));
@@ -44,10 +50,16 @@ pub fn update(self: *@This(), game: *Game) void {
     if (input.isKeyPressed(.space)) self.position = self.position.add(self.up.scale(velocity));
     if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control))
         self.position = self.position.sub(self.up.scale(velocity));
-
-    // 更新视图矩阵
+    // 更新视图矩阵（位置变化后）
     self.game.ubo.view_matrix = Mat4.lookAt(self.position, self.position.add(self.front), self.up);
 }
+
+/// 保留完整的 update 方法，内部调用两个新函数（兼容旧代码）
+pub fn update(self: *@This(), game: *Game) void {
+    self.updateFromMouse(game);
+    self.updateFromKeyboard(game);
+}
+
 // 更新相机方向向量
 fn updateVectors(self: *@This()) void {
     const yawRad = Algebra.toRadians(self.yaw);
@@ -55,6 +67,7 @@ fn updateVectors(self: *@This()) void {
     self.front = Vec3.new(@cos(yawRad) * @cos(pitchRad), @sin(pitchRad), @sin(yawRad) * @cos(pitchRad)).norm();
     self.up = self.front.cross(self.world_up).norm().cross(self.front).norm();
 }
+
 /// 根据屏幕 UV 坐标生成射线（u,v ∈ [0,1]）
 pub fn getRayFromScreenUV(self: *@This(), u: f32, v: f32) Raycast.Ray {
     const ndc_x = u * 2.0 - 1.0;
