@@ -698,7 +698,7 @@ pub const BlockWorld = struct {
         var view = registry.view(.{
             Comps.Position,
             Comps.Velocity,
-            Comps.AABB,
+            Comps.Collider,
             Comps.MoveSpeed,
             Comps.JumpVelocity,
             Comps.OnGround,
@@ -709,7 +709,7 @@ pub const BlockWorld = struct {
         while (iter.next()) |entity| {
             const pos = view.get(Comps.Position, entity);
             const vel = view.get(Comps.Velocity, entity);
-            const aabb = view.get(Comps.AABB, entity);
+            const aabb = view.get(Comps.Collider, entity);
             const move_speed = view.get(Comps.MoveSpeed, entity);
             const jump_vel = view.get(Comps.JumpVelocity, entity);
             const on_ground = view.get(Comps.OnGround, entity);
@@ -781,13 +781,13 @@ pub const BlockWorld = struct {
         }
     }
 
-    fn getEntityAABB(pos: Vec3, aabb: *Comps.AABB) AABB {
-        const half_w = aabb.width / 2.0;
+    fn getEntityAABB(pos: Vec3, collider: *Comps.Collider) AABB {
+        const half_w = collider.width / 2.0;
         return AABB{
             .min_x = pos.x - half_w,
             .max_x = pos.x + half_w,
             .min_y = pos.y,
-            .max_y = pos.y + aabb.height,
+            .max_y = pos.y + collider.height,
             .min_z = pos.z - half_w,
             .max_z = pos.z + half_w,
         };
@@ -796,7 +796,7 @@ pub const BlockWorld = struct {
     fn moveEntity(
         pos: *Comps.Position,
         vel: *Comps.Velocity,
-        aabb: *Comps.AABB,
+        collider: *Comps.Collider,
         on_ground: *Comps.OnGround,
         chunk: *Chunk,
         collision_list: *std.ArrayListUnmanaged(AABB),
@@ -808,9 +808,8 @@ pub const BlockWorld = struct {
         var dx = xd;
         var dy = yd;
         var dz = zd;
-        var box = getEntityAABB(pos.vec, aabb);
+        var box = getEntityAABB(pos.vec, collider);
 
-        // 收集碰撞方块
         collision_list.clearRetainingCapacity();
         getCollidingBlocks(chunk, box.expand(dx, dy, dz), collision_list, allocator);
 
@@ -839,10 +838,6 @@ pub const BlockWorld = struct {
         pos.vec.x = (box.min_x + box.max_x) / 2.0;
         pos.vec.z = (box.min_z + box.max_z) / 2.0;
         pos.vec.y = box.min_y;
-
-        // 去穿透：卡在方块中时尝试推出
-        if (isColliding(pos.vec, aabb, chunk))
-            pushOutOfBlocks(pos.vec, aabb, chunk, vel);
     }
 
     fn getCollidingBlocks(chunk: *Chunk, expanded_box: AABB, out_list: *std.ArrayListUnmanaged(AABB), allocator: std.mem.Allocator) void {
@@ -881,107 +876,16 @@ pub const BlockWorld = struct {
         }
     }
 
-    fn isInSwimmable(pos: *Comps.Position, aabb: *Comps.AABB, chunk: *Chunk) bool {
+    fn isInSwimmable(pos: *Comps.Position, collider: *Comps.Collider, chunk: *Chunk) bool {
         const points = [_]Vec3{
             pos.vec.add(Vec3.new(0, 0.1, 0)),
-            pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0)),
-            pos.vec.add(Vec3.new(0, aabb.height - 0.1, 0)),
+            pos.vec.add(Vec3.new(0, collider.height * 0.5, 0)),
+            pos.vec.add(Vec3.new(0, collider.height - 0.1, 0)),
         };
         for (points) |p| {
             if (getBlockAt(chunk, p).prototype().is_swimmable) return true;
         }
         return false;
-    }
-
-    fn isColliding(pos: Vec3, aabb: *Comps.AABB, chunk: *Chunk) bool {
-        const box = getEntityAABB(pos, aabb);
-        const min_x = @as(i32, @intFromFloat(@floor(box.min_x)));
-        const max_x = @as(i32, @intFromFloat(@floor(box.max_x)));
-        const min_y = @as(i32, @intFromFloat(@floor(box.min_y)));
-        const max_y = @as(i32, @intFromFloat(@floor(box.max_y)));
-        const min_z = @as(i32, @intFromFloat(@floor(box.min_z)));
-        const max_z = @as(i32, @intFromFloat(@floor(box.max_z)));
-
-        var y = min_y;
-        while (y <= max_y) : (y += 1) {
-            var x = min_x;
-            while (x <= max_x) : (x += 1) {
-                var z = min_z;
-                while (z <= max_z) : (z += 1) {
-                    const block_id = getBlockAt(chunk, Vec3.new(
-                        @as(f32, @floatFromInt(x)) + 0.5,
-                        @as(f32, @floatFromInt(y)) + 0.5,
-                        @as(f32, @floatFromInt(z)) + 0.5,
-                    ));
-                    if (block_id == BlockId.fromName("air")) continue;
-                    if (block_id.prototype().is_solid) return true;
-                }
-            }
-        }
-        return false;
-    }
-
-    fn pushOutOfBlocks(pos: Vec3, aabb: *Comps.AABB, chunk: *Chunk, vel: *Comps.Velocity) void {
-        const half_w = aabb.width * 0.35;
-        const points = [4]Vec3{
-            pos.add(Vec3.new(-half_w, 0.5, half_w)),
-            pos.add(Vec3.new(-half_w, 0.5, -half_w)),
-            pos.add(Vec3.new(half_w, 0.5, -half_w)),
-            pos.add(Vec3.new(half_w, 0.5, half_w)),
-        };
-
-        for (points) |point| {
-            const px = point.x;
-            const py = point.y;
-            const pz = point.z;
-            const block_x = @as(i32, @intFromFloat(@floor(px)));
-            const block_y = @as(i32, @intFromFloat(@floor(py)));
-            const block_z = @as(i32, @intFromFloat(@floor(pz)));
-
-            if (!isBlockSolidAt(chunk, @floatFromInt(block_x), @floatFromInt(block_y), @floatFromInt(block_z)) and
-                !isBlockSolidAt(chunk, @floatFromInt(block_x), @floatFromInt(block_y + 1), @floatFromInt(block_z))) continue;
-
-            const dirs = [4]Direction{ .west, .east, .north, .south };
-            var best_dir: ?Direction = null;
-            var best_dist: f32 = 9999.0;
-
-            const local_x = px - @as(f32, @floatFromInt(block_x));
-            const local_z = pz - @as(f32, @floatFromInt(block_z));
-
-            for (dirs) |dir| {
-                const off = dir.offset();
-                const nx = block_x + off.x;
-                const ny = block_y;
-                const nz = block_z + off.z;
-                if (!isBlockSolidAt(chunk, @floatFromInt(nx), @floatFromInt(ny), @floatFromInt(nz)) and
-                    !isBlockSolidAt(chunk, @floatFromInt(nx), @floatFromInt(ny + 1), @floatFromInt(nz)))
-                {
-                    const d = switch (dir) {
-                        .west => local_x,
-                        .east => 1.0 - local_x,
-                        .north => local_z,
-                        .south => 1.0 - local_z,
-                        else => 9999.0,
-                    };
-                    if (d < best_dist) {
-                        best_dir = dir;
-                        best_dist = d;
-                    }
-                }
-            }
-
-            if (best_dir) |dir| {
-                const off = dir.offset();
-                vel.vec.x = @as(f32, @floatFromInt(off.x)) * 0.1;
-                vel.vec.z = @as(f32, @floatFromInt(off.z)) * 0.1;
-            }
-        }
-    }
-
-    fn isBlockSolidAt(chunk: *Chunk, x: f32, y: f32, z: f32) bool {
-        const block_id = getBlockAt(chunk, Vec3.new(x, y, z));
-        if (block_id == BlockId.fromName("air")) return false;
-        return block_id.prototype().is_solid;
     }
 
     pub fn getBlockAt(chunk: *Chunk, pos: Vec3) BlockId {
@@ -1033,7 +937,6 @@ pub const AABB = struct {
     }
 
     pub fn clipXCollide(self: AABB, moving_box: AABB, move_distance: f32) f32 {
-        // 只有当 Y 轴和 Z 轴都有重叠时，才考虑 X 轴碰撞
         if (moving_box.max_y <= self.min_y or moving_box.min_y >= self.max_y) return move_distance;
         if (moving_box.max_z <= self.min_z or moving_box.min_z >= self.max_z) return move_distance;
         return clipAxisCollide(self.min_x, self.max_x, moving_box.min_x, moving_box.max_x, move_distance);
@@ -1053,19 +956,19 @@ pub const AABB = struct {
 
     fn clipAxisCollide(block_min: f32, block_max: f32, box_min: f32, box_max: f32, move_dist: f32) f32 {
         if (move_dist > 0.0) {
-            // 正向移动
+            // 正向移动：box_max 可能已经超过了 block_min（已穿透）
             if (box_max + move_dist > block_min) {
-                const max_allowed = block_min - box_max; // 可以是负数（已穿透）
+                const max_allowed = block_min - box_max;
                 if (max_allowed < 0) {
-                    // 已经穿透，正向移动会加深穿透 → 阻止
-                    return 0;
+                    // 已经穿透，正向移动是脱离方向 → 允许
+                    return move_dist;
                 }
                 return @min(move_dist, max_allowed - PHYS_EPS);
             }
         } else if (move_dist < 0.0) {
-            // 负向移动
+            // 负向移动：box_min 可能已经穿透了 block_max
             if (box_min + move_dist < block_max) {
-                const min_allowed = block_max - box_min; // 可以是正数（已穿透）
+                const min_allowed = block_max - box_min;
                 if (min_allowed > 0) {
                     // 已经穿透，负向移动是脱离方向 → 允许
                     return move_dist;

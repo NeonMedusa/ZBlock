@@ -11,7 +11,7 @@ render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
-block_world: BlockWorld,
+block_world: BlockWorld.BlockWorld,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
@@ -22,7 +22,7 @@ pub fn start(self: *Game) !void {
     self.registry.add(player_entity, Comps.Player{ .id = self.player_id });
     self.registry.add(player_entity, Comps.Position{ .vec = Vec3.new(8, 130, 8) });
     self.registry.add(player_entity, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(player_entity, Comps.AABB{});
+    self.registry.add(player_entity, Comps.Collider{});
     self.registry.add(player_entity, Comps.MoveSpeed{ .value = 4.0 });
     self.registry.add(player_entity, Comps.JumpVelocity{ .value = 8.0 });
     self.registry.add(player_entity, Comps.OnGround{ .value = false });
@@ -33,7 +33,7 @@ pub fn start(self: *Game) !void {
     self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
     self.registry.add(e2, Comps.Position{ .vec = Vec3.new(8, 100, 8) });
     self.registry.add(e2, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(e2, Comps.AABB{});
+    self.registry.add(e2, Comps.Collider{});
     self.registry.add(e2, Comps.MoveSpeed{ .value = 4.0 });
     self.registry.add(e2, Comps.JumpVelocity{ .value = 8.0 });
     self.registry.add(e2, Comps.OnGround{ .value = false });
@@ -54,6 +54,13 @@ pub fn start(self: *Game) !void {
             self.block_world.updatePhysics(&self.registry, self.window.delta_time);
             // 3. 摄像机同步
             syncCameraFromPlayer(self);
+
+            if (self.input.isMouseButtonPressed(.mouse_left)) {
+                try tryBreakBlock(self); // 左键破坏
+            }
+            if (self.input.isMouseButtonPressed(.mouse_right)) {
+                try tryPlaceBlock(self); // 右键放置
+            }
         }
         self.ui_system.beginFrame();
         main_menu.update(self);
@@ -105,7 +112,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.ui_system = ui_system;
 
     // 测试方块世界
-    self.block_world = try BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline);
+    self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline);
 
     // 返回实例
     return self;
@@ -126,7 +133,7 @@ pub fn deinit(self: *@This()) void {
 }
 
 fn produceMoveIntent(self: *Game) void {
-    var view = self.registry.view(.{ Comps.Player, Comps.MoveIntent, Comps.Position, Comps.AABB }, .{});
+    var view = self.registry.view(.{ Comps.Player, Comps.MoveIntent, Comps.Position, Comps.Collider }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
         const player = view.get(Comps.Player, entity);
@@ -174,6 +181,45 @@ fn syncCameraFromPlayer(self: *Game) void {
     }
 }
 
+fn tryBreakBlock(self: *Game) !void {
+    const ray = self.camera.getCursorRay();
+    const hit = Raycast.raycastWorld(self.block_world.chunk, ray, 8.0);
+    if (hit.hit) {
+        // 将方块设为空气
+        const x = hit.block_pos.x;
+        const y = hit.block_pos.y;
+        const z = hit.block_pos.z;
+        if (x >= 0 and x < BlockWorld.CHUNK_SIZE_X and
+            y >= 0 and y < BlockWorld.CHUNK_SIZE_Y and
+            z >= 0 and z < BlockWorld.CHUNK_SIZE_Z)
+        {
+            self.block_world.chunk.blocks[@intCast(x)][@intCast(y)][@intCast(z)] = BlockWorld.BlockState.init(.fromName("air"));
+            // 重新构建网格
+            try BlockWorld.buildChunkMesh(self.block_world.chunk, &self.block_world.material_registry);
+        }
+    }
+}
+
+fn tryPlaceBlock(self: *Game) !void {
+    const ray = self.camera.getCursorRay();
+    const hit = Raycast.raycastWorld(self.block_world.chunk, ray, 8.0);
+    if (hit.hit) {
+        // 放置点在命中面的外侧
+        const place_x = hit.block_pos.x + hit.face_normal.x;
+        const place_y = hit.block_pos.y + hit.face_normal.y;
+        const place_z = hit.block_pos.z + hit.face_normal.z;
+        // 检查放置位置是否合法（在区块内且不重叠玩家）
+        if (place_x >= 0 and place_x < BlockWorld.CHUNK_SIZE_X and
+            place_y >= 0 and place_y < BlockWorld.CHUNK_SIZE_Y and
+            place_z >= 0 and place_z < BlockWorld.CHUNK_SIZE_Z)
+        {
+            // 简单起见，放置石头
+            self.block_world.chunk.blocks[@intCast(place_x)][@intCast(place_y)][@intCast(place_z)] = BlockWorld.BlockState.init(.fromName("stone"));
+            try BlockWorld.buildChunkMesh(self.block_world.chunk, &self.block_world.material_registry);
+        }
+    }
+}
+
 const Game = @This();
 
 const std = @import("std");
@@ -211,4 +257,4 @@ const Raycast = @import("raycast.zig");
 
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
 
-const BlockWorld = @import("block_world.zig").BlockWorld;
+const BlockWorld = @import("block_world.zig");

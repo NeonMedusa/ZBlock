@@ -12,7 +12,7 @@ pub const Components = struct {
     // ---- 物理状态 ----
     pub const Position = struct { vec: Vec3 };
     pub const Velocity = struct { vec: Vec3 = Vec3.zero };
-    pub const AABB = struct { // 物理碰撞箱（相对于位置）
+    pub const Collider = struct { // 物理碰撞箱（相对于位置）
         width: f32 = 0.6,
         height: f32 = 1.8,
     };
