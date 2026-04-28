@@ -67,7 +67,7 @@ pub fn SparseSet(comptime Entity: type) type {
 
             for (self.sparse.items) |maybe_page| {
                 if (maybe_page) |page| {
-                    self.allocator.free(page);
+                    self.allocator.free(@as([]Entity.Index, page));
                 }
             }
 
@@ -106,7 +106,7 @@ pub fn SparseSet(comptime Entity: type) type {
 
         /// Increases the capacity of a sparse sets index array
         pub fn reserve(self: *Self, cap: usize) void {
-            self.sparse.resize(cap) catch unreachable;
+            self.sparse.resize(self.allocator, cap) catch unreachable;
         }
 
         /// Returns the number of dense elements that a sparse set has currently allocated space for
@@ -313,7 +313,7 @@ pub fn SparseSet(comptime Entity: type) type {
         pub fn clear(self: *Self) void {
             for (self.sparse.items, 0..) |maybe_page, i| {
                 if (maybe_page) |page| {
-                    self.allocator.free(page);
+                    self.allocator.free(@as([]Entity.Index, page));
                     self.sparse.items[i] = null;
                 }
             }

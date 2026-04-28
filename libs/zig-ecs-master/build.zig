@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
             .root_module = example_module,
         });
         exe.root_module.addImport("ecs", ecs_module);
-        exe.linkLibC();
+        exe.root_module.link_libc = true;
 
         const docs = exe;
         const doc = b.step(b.fmt("{s}-docs", .{name}), "Generate documentation");

@@ -18,13 +18,17 @@ pub fn start(self: *Game) !void {
     // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
 
-    // 创建用于测试模型渲染的实体
+    // 创建用于测试的实体
     const e1 = self.registry.create();
     self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
     self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
     self.registry.add(e1, Comps.Velocity{ .vec = Vec3.zero });
     self.registry.add(e1, Comps.Player{ .id = self.player_id });
-    self.registry.add(e1, Comps.Speed{ .value = 3 });
+    self.registry.add(e1, Comps.MoveSpeed{ .value = 3 });
+    self.registry.add(e1, Comps.JumpVelocity{ .value = 8.0 });
+    self.registry.add(e1, Comps.OnGround{ .value = false });
+    self.registry.add(e1, Comps.AABB{});
+    self.registry.add(e1, Comps.MoveIntent{});
 
     const e2 = self.registry.create();
     self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
@@ -38,39 +42,7 @@ pub fn start(self: *Game) !void {
         self.window.pollEvents();
         // 如果主菜单不可见，则更新世界和摄像头
         if (!main_menu.visible) {
-            var move_dir = Vec3.zero;
-            var input = self.input;
-
-            // 水平移动（不变）
-            const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
-            const right_h = Vec3.new(self.camera.front.cross(self.camera.up).x, 0, self.camera.front.cross(self.camera.up).z).norm();
-            if (input.isKeyPressed(.w)) move_dir = move_dir.add(front_h);
-            if (input.isKeyPressed(.s)) move_dir = move_dir.sub(front_h);
-            if (input.isKeyPressed(.a)) move_dir = move_dir.sub(right_h);
-            if (input.isKeyPressed(.d)) move_dir = move_dir.add(right_h);
-
-            // 空格：站立时跳跃，水中悬浮时上浮
-            if (input.isKeyPressed(.space)) {
-                if (self.block_world.physics.on_ground) {
-                    self.block_world.physics.jump();
-                } else if (self.block_world.physics.isInWater()) {
-                    move_dir.y = 1.0;
-                }
-            }
-
-            // Ctrl：水中下潜
-            if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control)) {
-                if (self.block_world.physics.isInWater()) {
-                    move_dir.y = -1.0;
-                }
-            }
-
-            if (move_dir.len2() > 0.001)
-                move_dir = move_dir.norm();
-
-            self.block_world.tick(move_dir, self.window.delta_time);
-            self.camera.position = self.block_world.physics.position.add(Vec3.new(0, 1.6, 0));
-            self.camera.updateFromMouse(self);
+            self.updatePlayerMovement();
         }
         // UI开始新帧
         self.ui_system.beginFrame();
@@ -136,14 +108,6 @@ pub fn deinit(self: *@This()) void {
     // 最后释放自己
     defer self.allocator.destroy(self);
 
-    // 清理所有未完成的 MoveOrder 组件
-    var view = self.registry.view(.{Comps.MoveOrder}, .{});
-    var iter = view.entityIterator();
-    while (iter.next()) |entity| {
-        var order = self.registry.get(Comps.MoveOrder, entity);
-        order.deinit();
-        self.registry.remove(Comps.MoveOrder, entity);
-    }
     self.window.deinit();
     self.gctx.deinit();
     self.res_manager.deinit(self.allocator);
@@ -152,6 +116,49 @@ pub fn deinit(self: *@This()) void {
     self.registry.deinit();
     self.ui_system.deinit();
     self.block_world.deinit();
+}
+
+fn updatePlayerMovement(self: *Game) void {
+    var move_dir = Vec3.zero;
+    var input = self.input;
+
+    // 水平方向投影
+    const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
+    const right_h = Vec3.new(
+        self.camera.front.cross(self.camera.up).x,
+        0,
+        self.camera.front.cross(self.camera.up).z,
+    ).norm();
+
+    if (input.isKeyPressed(.w)) move_dir = move_dir.add(front_h);
+    if (input.isKeyPressed(.s)) move_dir = move_dir.sub(front_h);
+    if (input.isKeyPressed(.a)) move_dir = move_dir.sub(right_h);
+    if (input.isKeyPressed(.d)) move_dir = move_dir.add(right_h);
+
+    // 游泳/跳跃
+    if (input.isKeyPressed(.space)) {
+        if (self.block_world.physics.on_ground) {
+            self.block_world.physics.jump();
+        } else if (self.block_world.physics.isInSwimmable()) {
+            move_dir.y = 1.0;
+        }
+    }
+
+    // 水中下潜
+    if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control)) {
+        if (self.block_world.physics.isInSwimmable()) {
+            move_dir.y = -1.0;
+        }
+    }
+
+    if (move_dir.len2() > 0.001) move_dir = move_dir.norm();
+
+    self.block_world.tick(move_dir, self.window.delta_time);
+
+    // 摄像机跟随
+    const eye_offset = Vec3.new(0, 1.6, 0);
+    self.camera.position = self.block_world.physics.position.add(eye_offset);
+    self.camera.updateFromMouse(self);
 }
 
 const Game = @This();

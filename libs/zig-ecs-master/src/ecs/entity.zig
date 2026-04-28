@@ -21,6 +21,26 @@ pub fn EntityClass(comptime entity_parameters: EntityParameters) type {
 
         index: Index,
         version: Version,
+
+        pub fn formatNumber(value: @This(), writer: *std.Io.Writer, number: std.fmt.Number) std.Io.Writer.Error!void {
+            return writer.printIntAny(
+                @as(EntityBackingInt, @bitCast(value)),
+                switch (number.mode) {
+                    .decimal => 10,
+                    .binary => 2,
+                    .octal => 8,
+                    .hex => 16,
+                    .scientific => 10,
+                },
+                number.case,
+                .{
+                    .width = number.width,
+                    .alignment = number.alignment,
+                    .fill = number.fill,
+                    .precision = null,
+                },
+            );
+        }
     };
 }
 

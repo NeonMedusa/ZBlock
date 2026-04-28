@@ -81,7 +81,7 @@ pub fn ComponentStorage(comptime Component: type, comptime Entity: type) type {
             };
 
             if (!is_empty_struct) {
-                store.instances = std.ArrayListUnmanaged(ComponentOrDummy){};
+                store.instances = .empty;
             }
 
             return store;
@@ -127,9 +127,16 @@ pub fn ComponentStorage(comptime Component: type, comptime Entity: type) type {
             self.construction.publish(.{ self.registry, entity });
         }
 
-        /// Removes an entity from a storage
+        /// Removes an entity from a storage.
+        /// The destruction signal fires while the component is still
+        /// accessible.  After the signal returns, the entity may have
+        /// already been removed by a reentrant destroy, so we check
+        /// before touching the sparse set.
         pub fn remove(self: *Self, entity: Entity) void {
             self.destruction.publish(.{ self.registry, entity });
+            // A signal handler may have reentrantly destroyed this entity,
+            // which already removed it from this storage.
+            if (!self.set.contains(entity)) return;
             if (!is_empty_struct) {
                 _ = self.instances.swapRemove(self.set.index(entity));
             }

@@ -9,29 +9,11 @@ pub fn DelegateFromTuple(comptime Params: type) type {
     return struct {
         const Self = @This();
 
-        pub const FreeFn = Fn(Params);
+        /// A function pointer type that accepts the tuple params individually.
+        /// We use *const anyopaque for storage and cast at call sites.
+        pub const FreeFn = FreeFnType(Params);
         pub fn BindFn(comptime T: type) type {
-            const fields = std.meta.fields(Params);
-            comptime var params: [1 + fields.len]std.builtin.Type.Fn.Param = undefined;
-            params[0] = .{
-                .is_generic = false,
-                .is_noalias = false,
-                .type = T,
-            };
-            for (fields, 1..) |field, i| {
-                params[i] = .{
-                    .is_generic = false,
-                    .is_noalias = false,
-                    .type = field.type,
-                };
-            }
-            return *const @Type(.{ .@"fn" = .{
-                .calling_convention = .auto,
-                .is_generic = false,
-                .is_var_args = false,
-                .return_type = void,
-                .params = &params,
-            } });
+            return BindFnType(T, Params);
         }
 
         ctx_ptr: ?*anyopaque = null,
@@ -82,23 +64,40 @@ pub fn DelegateFromTuple(comptime Params: type) type {
     };
 }
 
-fn Fn(comptime Params: type) type {
+/// Generate a free function pointer type from a tuple type, without @Type.
+/// Supports up to 8 parameters.
+fn FreeFnType(comptime Params: type) type {
     const fields = std.meta.fields(Params);
-    comptime var params: [fields.len]std.builtin.Type.Fn.Param = undefined;
-    for (fields, 0..) |field, i| {
-        params[i] = .{
-            .is_generic = false,
-            .is_noalias = false,
-            .type = field.type,
-        };
-    }
-    return *const @Type(.{ .@"fn" = .{
-        .calling_convention = .auto,
-        .is_generic = false,
-        .is_var_args = false,
-        .return_type = void,
-        .params = &params,
-    } });
+    return switch (fields.len) {
+        0 => *const fn () void,
+        1 => *const fn (fields[0].type) void,
+        2 => *const fn (fields[0].type, fields[1].type) void,
+        3 => *const fn (fields[0].type, fields[1].type, fields[2].type) void,
+        4 => *const fn (fields[0].type, fields[1].type, fields[2].type, fields[3].type) void,
+        5 => *const fn (fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type) void,
+        6 => *const fn (fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type, fields[5].type) void,
+        7 => *const fn (fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type, fields[5].type, fields[6].type) void,
+        8 => *const fn (fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type, fields[5].type, fields[6].type, fields[7].type) void,
+        else => @compileError("Delegate: too many parameters (max 8)"),
+    };
+}
+
+/// Generate a bound function pointer type (with context as first param) from a tuple type.
+/// Supports up to 8 additional parameters.
+fn BindFnType(comptime T: type, comptime Params: type) type {
+    const fields = std.meta.fields(Params);
+    return switch (fields.len) {
+        0 => *const fn (T) void,
+        1 => *const fn (T, fields[0].type) void,
+        2 => *const fn (T, fields[0].type, fields[1].type) void,
+        3 => *const fn (T, fields[0].type, fields[1].type, fields[2].type) void,
+        4 => *const fn (T, fields[0].type, fields[1].type, fields[2].type, fields[3].type) void,
+        5 => *const fn (T, fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type) void,
+        6 => *const fn (T, fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type, fields[5].type) void,
+        7 => *const fn (T, fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type, fields[5].type, fields[6].type) void,
+        8 => *const fn (T, fields[0].type, fields[1].type, fields[2].type, fields[3].type, fields[4].type, fields[5].type, fields[6].type, fields[7].type) void,
+        else => @compileError("Delegate: too many parameters (max 8)"),
+    };
 }
 
 pub fn Tuple(comptime Params: anytype) type {

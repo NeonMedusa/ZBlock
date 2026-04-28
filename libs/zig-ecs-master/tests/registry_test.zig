@@ -132,3 +132,89 @@ test "remove all" {
     try std.testing.expect(!reg.has(Position, e));
     try std.testing.expect(!reg.has(u32, e));
 }
+
+// ── Issue: reentrant destroy from destruction signal ────────────────────
+
+test "destroy: reentrant destroy from onDestruct signal does not crash" {
+    // Scenario: a system removes a component from an entity, and the
+    // destruction signal handler calls registry.destroy() on the same
+    // entity.  Before the fix this caused a segfault because destroy()
+    // called removeAll() while the entity handle was still valid,
+    // leading to double sparse-set removal.
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const entity = reg.create();
+    reg.add(entity, Position{ .x = 1, .y = 2 });
+    reg.add(entity, Velocity{ .x = 3, .y = 4 });
+
+    // When Position is removed, attempt to destroy the same entity.
+    reg.onDestruct(Position).connect(struct {
+        fn handler(r: *Registry, e: ecs.Entity) void {
+            if (r.valid(e)) {
+                r.destroy(e);
+            }
+        }
+    }.handler);
+
+    // Trigger: remove Position → signal fires → handler calls destroy.
+    reg.remove(Position, entity);
+
+    // Entity must be fully dead.
+    try std.testing.expect(!reg.valid(entity));
+}
+
+test "destroy: onDestruct signal handler destroys a different entity" {
+    // A destruction signal on entity A destroys entity B.
+    // This mutates the handle pool during signal dispatch.
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const a = reg.create();
+    const b = reg.create();
+    reg.add(a, Position{ .x = 1, .y = 1 });
+    reg.add(b, Position{ .x = 2, .y = 2 });
+    reg.add(b, Velocity{ .x = 0, .y = 0 });
+
+    reg.onDestruct(Position).connect(struct {
+        fn handler(r: *Registry, e: ecs.Entity) void {
+            // Destroy every entity with Velocity that isn't the one
+            // currently being destroyed.
+            var view = r.basicView(Velocity);
+            var iter = view.entityIterator();
+            while (iter.next()) |other| {
+                if (other != e and r.valid(other)) {
+                    r.destroy(other);
+                }
+            }
+        }
+    }.handler);
+
+    reg.destroy(a);
+
+    try std.testing.expect(!reg.valid(a));
+    try std.testing.expect(!reg.valid(b));
+}
+
+test "destroy: component data is still readable in onDestruct signal" {
+    // The destruction signal fires before the component is removed from
+    // storage, so handlers can still read component values.
+    var reg = Registry.init(std.testing.allocator);
+    defer reg.deinit();
+
+    const entity = reg.create();
+    reg.add(entity, Position{ .x = 42, .y = 99 });
+
+    var signal_saw_position = false;
+
+    reg.onDestruct(Position).connectBound(&signal_saw_position, struct {
+        fn handler(flag: *bool, _: *Registry, _: ecs.Entity) void {
+            flag.* = true;
+        }
+    }.handler);
+
+    reg.destroy(entity);
+
+    try std.testing.expect(signal_saw_position);
+    try std.testing.expect(!reg.valid(entity));
+}

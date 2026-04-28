@@ -49,14 +49,6 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("stb", stb_module);
 
-    // zalgebra
-    const zalgebra_dep = b.dependency("zalgebra", .{
-        .target = target,
-        .optimize = optimize,
-    });
-    const zalgebra_module = zalgebra_dep.module("zalgebra");
-    exe.root_module.addImport("zalgebra", zalgebra_module);
-
     // zgltf
     const zgltf_dep = b.dependency("zgltf", .{
         .target = target,
@@ -65,7 +57,7 @@ pub fn build(b: *std.Build) void {
     const zgltf_module = zgltf_dep.module("zgltf");
     exe.root_module.addImport("zgltf", zgltf_module);
 
-    //zigimg
+    // zigimg
     const zigimg_dep = b.dependency("zigimg", .{
         .target = target,
         .optimize = optimize,
@@ -73,7 +65,7 @@ pub fn build(b: *std.Build) void {
     const zigimg_module = zigimg_dep.module("zigimg");
     exe.root_module.addImport("zigimg", zigimg_module);
 
-    //zigecs
+    // zigecs
     const ecs_dep = b.dependency("zigecs", .{
         .target = target,
         .optimize = optimize,

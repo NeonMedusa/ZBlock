@@ -17,7 +17,7 @@ pub fn SignalFromTuple(comptime Params: type) type {
         pub fn init(allocator: std.mem.Allocator) Self {
             // we purposely do not store the allocator locally in this case so we know not to destroy ourself in deint!
             return Self{
-                .calls = std.ArrayListUnmanaged(Delegate(Params)){},
+                .calls = .empty,
                 .allocator = allocator,
             };
         }
