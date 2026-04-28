@@ -15,42 +15,49 @@ block_world: BlockWorld,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
-    // 初始化主菜单
     var main_menu = @import("ui/main_menu.zig"){};
 
-    // 创建用于测试的实体
-    const e1 = self.registry.create();
-    self.registry.add(e1, Comps.ModelName{ .string = "CesiumMan" });
-    self.registry.add(e1, Comps.Position{ .vec = .new(0, 0, 0) });
-    self.registry.add(e1, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(e1, Comps.Player{ .id = self.player_id });
-    self.registry.add(e1, Comps.MoveSpeed{ .value = 3 });
-    self.registry.add(e1, Comps.JumpVelocity{ .value = 8.0 });
-    self.registry.add(e1, Comps.OnGround{ .value = false });
-    self.registry.add(e1, Comps.AABB{});
-    self.registry.add(e1, Comps.MoveIntent{});
+    // 创建玩家实体
+    const player_entity = self.registry.create();
+    self.registry.add(player_entity, Comps.Player{ .id = self.player_id });
+    self.registry.add(player_entity, Comps.Position{ .vec = Vec3.new(8, 130, 8) });
+    self.registry.add(player_entity, Comps.Velocity{ .vec = Vec3.zero });
+    self.registry.add(player_entity, Comps.AABB{});
+    self.registry.add(player_entity, Comps.MoveSpeed{ .value = 4.0 });
+    self.registry.add(player_entity, Comps.JumpVelocity{ .value = 8.0 });
+    self.registry.add(player_entity, Comps.OnGround{ .value = false });
+    self.registry.add(player_entity, Comps.MoveIntent{});
 
+    // 测试用静态模型实体
     const e2 = self.registry.create();
     self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
-    self.registry.add(e2, Comps.Position{ .vec = .new(0, 2, 0) });
+    self.registry.add(e2, Comps.Position{ .vec = Vec3.new(8, 100, 8) });
+    self.registry.add(e2, Comps.Velocity{ .vec = Vec3.zero });
+    self.registry.add(e2, Comps.AABB{});
+    self.registry.add(e2, Comps.MoveSpeed{ .value = 4.0 });
+    self.registry.add(e2, Comps.JumpVelocity{ .value = 8.0 });
+    self.registry.add(e2, Comps.OnGround{ .value = false });
+    self.registry.add(e2, Comps.MoveIntent{});
+
+    const e3 = self.registry.create();
+    self.registry.add(e3, Comps.ModelName{ .string = "CesiumMan" });
+    self.registry.add(e3, Comps.Position{ .vec = .new(0, 2, 0) });
 
     // 主循环
     while (!self.window.shouldClose()) {
-        // 先重置输入状态
         self.input.beginFrame();
-        // 再更新窗口事件
         self.window.pollEvents();
-        // 如果主菜单不可见，则更新世界和摄像头
         if (!main_menu.visible) {
-            self.updatePlayerMovement();
+            // 1. 输入 -> MoveIntent
+            produceMoveIntent(self);
+            // 2. 物理
+            self.block_world.updatePhysics(&self.registry, self.window.delta_time);
+            // 3. 摄像机同步
+            syncCameraFromPlayer(self);
         }
-        // UI开始新帧
         self.ui_system.beginFrame();
-        // 如果主菜单可见，则渲染主菜单
         main_menu.update(self);
-        // UI帧结束
         try self.ui_system.endFrame(&self.gctx);
-        // 渲染
         Render.draw(self);
     }
 }
@@ -118,47 +125,53 @@ pub fn deinit(self: *@This()) void {
     self.block_world.deinit();
 }
 
-fn updatePlayerMovement(self: *Game) void {
-    var move_dir = Vec3.zero;
-    var input = self.input;
+fn produceMoveIntent(self: *Game) void {
+    var view = self.registry.view(.{ Comps.Player, Comps.MoveIntent, Comps.Position, Comps.AABB }, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        const player = view.get(Comps.Player, entity);
+        if (player.id != self.player_id) continue;
+        var intent = view.get(Comps.MoveIntent, entity);
 
-    // 水平方向投影
-    const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
-    const right_h = Vec3.new(
-        self.camera.front.cross(self.camera.up).x,
-        0,
-        self.camera.front.cross(self.camera.up).z,
-    ).norm();
+        var move_dir = Vec3.zero;
+        const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
+        const right_h = Vec3.new(
+            self.camera.front.cross(self.camera.up).x,
+            0,
+            self.camera.front.cross(self.camera.up).z,
+        ).norm();
 
-    if (input.isKeyPressed(.w)) move_dir = move_dir.add(front_h);
-    if (input.isKeyPressed(.s)) move_dir = move_dir.sub(front_h);
-    if (input.isKeyPressed(.a)) move_dir = move_dir.sub(right_h);
-    if (input.isKeyPressed(.d)) move_dir = move_dir.add(right_h);
+        if (self.input.isKeyPressed(.w)) move_dir = move_dir.add(front_h);
+        if (self.input.isKeyPressed(.s)) move_dir = move_dir.sub(front_h);
+        if (self.input.isKeyPressed(.a)) move_dir = move_dir.sub(right_h);
+        if (self.input.isKeyPressed(.d)) move_dir = move_dir.add(right_h);
 
-    // 游泳/跳跃
-    if (input.isKeyPressed(.space)) {
-        if (self.block_world.physics.on_ground) {
-            self.block_world.physics.jump();
-        } else if (self.block_world.physics.isInSwimmable()) {
-            move_dir.y = 1.0;
+        if (self.input.isKeyPressed(.space)) {
+            intent.jump = true; // 物理系统会根据地面/水中决定行为
+            move_dir.y = 1.0; // 水中上浮指示符
+        }
+        if (self.input.isKeyPressed(.left_control) or self.input.isKeyPressed(.right_control)) {
+            move_dir.y = -1.0; // 水中下潜指示符
+        }
+
+        if (move_dir.len2() > 0.001) move_dir = move_dir.norm();
+        intent.direction = move_dir;
+    }
+}
+
+fn syncCameraFromPlayer(self: *Game) void {
+    var view = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        const player = view.get(Comps.Player, entity);
+        if (player.id == self.player_id) {
+            const pos = view.get(Comps.Position, entity);
+            const eye_offset = Vec3.new(0, 1.6, 0);
+            self.camera.position = pos.vec.add(eye_offset);
+            self.camera.updateFromMouse(self);
+            break;
         }
     }
-
-    // 水中下潜
-    if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control)) {
-        if (self.block_world.physics.isInSwimmable()) {
-            move_dir.y = -1.0;
-        }
-    }
-
-    if (move_dir.len2() > 0.001) move_dir = move_dir.norm();
-
-    self.block_world.tick(move_dir, self.window.delta_time);
-
-    // 摄像机跟随
-    const eye_offset = Vec3.new(0, 1.6, 0);
-    self.camera.position = self.block_world.physics.position.add(eye_offset);
-    self.camera.updateFromMouse(self);
 }
 
 const Game = @This();

@@ -16,6 +16,8 @@ const IMG = Imports.zigimg;
 const SparseSet = @import("sparse_set.zig").SparseSet;
 const Perlin = @import("perlin.zig");
 const VertexAttribute = Imports.RendCTX.VertexAttribute;
+const ECS = Imports.ECS;
+const Comps = Imports.Comps;
 
 /// 方块原型
 pub const BlockProtoType = struct {
@@ -651,7 +653,350 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
 // 物理系统
 // ---------------------------------------------------------------
 
+// 物理常量（可调整）
+const GRAVITY: f32 = 25.0;
+const FLUID_GRAVITY: f32 = 5.0;
+const SWIM_UP_SPEED: f32 = 5.0;
+const SWIM_DOWN_SPEED: f32 = 3.0;
+const SINK_TERMINAL: f32 = -2.0;
+const GROUND_FRICTION: f32 = 0.6;
+const AIR_FRICTION: f32 = 4.0;
+const ACCELERATION: f32 = 30.0;
 const PHYS_EPS = 1e-6;
+
+pub const BlockWorld = struct {
+    allocator: std.mem.Allocator,
+    chunk: *Chunk,
+    material_registry: MaterialRegistry,
+    collision_list: std.ArrayListUnmanaged(AABB) = .{}, // 物理碰撞列表（复用）
+
+    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline) !BlockWorld {
+        const chunk = try allocator.create(Chunk);
+        errdefer allocator.destroy(chunk);
+        Chunk.generate(.new(0, 0, 0), chunk);
+
+        var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
+        errdefer material_registry.deinit();
+
+        try buildChunkMesh(chunk, &material_registry);
+
+        return BlockWorld{
+            .allocator = allocator,
+            .chunk = chunk,
+            .material_registry = material_registry,
+            .collision_list = .{},
+        };
+    }
+
+    pub fn deinit(self: *BlockWorld) void {
+        self.material_registry.deinit();
+        self.collision_list.deinit(self.allocator);
+        self.allocator.destroy(self.chunk);
+    }
+
+    pub fn updatePhysics(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
+        var view = registry.view(.{
+            Comps.Position,
+            Comps.Velocity,
+            Comps.AABB,
+            Comps.MoveSpeed,
+            Comps.JumpVelocity,
+            Comps.OnGround,
+            Comps.MoveIntent,
+        }, .{});
+        var iter = view.entityIterator();
+
+        while (iter.next()) |entity| {
+            const pos = view.get(Comps.Position, entity);
+            const vel = view.get(Comps.Velocity, entity);
+            const aabb = view.get(Comps.AABB, entity);
+            const move_speed = view.get(Comps.MoveSpeed, entity);
+            const jump_vel = view.get(Comps.JumpVelocity, entity);
+            const on_ground = view.get(Comps.OnGround, entity);
+            var intent = view.get(Comps.MoveIntent, entity);
+
+            const in_swimmable = isInSwimmable(pos, aabb, self.chunk);
+            const resistance: f32 = if (in_swimmable) blk: {
+                const mid = pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0));
+                const block_id = getBlockAt(self.chunk, mid);
+                break :blk if (block_id.prototype().is_swimmable) block_id.prototype().fluid_resistance else 0.0;
+            } else 0.0;
+
+            const effective_gravity: f32 = if (in_swimmable) FLUID_GRAVITY else GRAVITY;
+            const max_speed = move_speed.value * (1.0 - resistance);
+            const acceleration = ACCELERATION * (1.0 - resistance);
+
+            // ---- 垂直移动 ----
+            if (in_swimmable) {
+                if (intent.direction.y > 0.0) {
+                    vel.vec.y = SWIM_UP_SPEED;
+                    on_ground.value = false;
+                } else if (intent.direction.y < 0.0) {
+                    vel.vec.y = -SWIM_DOWN_SPEED;
+                    on_ground.value = false;
+                } else {
+                    vel.vec.y -= effective_gravity * dt;
+                    if (vel.vec.y < SINK_TERMINAL) vel.vec.y = SINK_TERMINAL;
+                }
+            } else {
+                vel.vec.y -= effective_gravity * dt;
+                // 跳跃
+                if (intent.jump and on_ground.value) {
+                    vel.vec.y = jump_vel.value;
+                    on_ground.value = false;
+                }
+            }
+
+            // ---- 水平移动 ----
+            var h_vel = Vec3.new(vel.vec.x, 0, vel.vec.z);
+            const move_dir = Vec3.new(intent.direction.x, 0, intent.direction.z);
+            if (move_dir.len2() > 0.001) {
+                const wish_dir = move_dir.norm();
+                h_vel = h_vel.add(wish_dir.scale(acceleration * dt));
+                const h_speed = h_vel.len();
+                if (h_speed > max_speed) h_vel = h_vel.scale(max_speed / h_speed);
+            } else {
+                if (on_ground.value) {
+                    h_vel = h_vel.scale(GROUND_FRICTION);
+                } else {
+                    const h_speed = h_vel.len();
+                    if (h_speed > 0.001) {
+                        const reduction = AIR_FRICTION * dt;
+                        const new_speed = @max(h_speed - reduction, 0);
+                        h_vel = h_vel.scale(new_speed / h_speed);
+                    }
+                }
+            }
+            vel.vec.x = h_vel.x;
+            vel.vec.z = h_vel.z;
+
+            // ---- 碰撞移动 ----
+            const dx = vel.vec.x * dt;
+            const dy = vel.vec.y * dt;
+            const dz = vel.vec.z * dt;
+            moveEntity(pos, vel, aabb, on_ground, self.chunk, &self.collision_list, self.allocator, dx, dy, dz);
+
+            // 消费跳跃意图（本帧已处理）
+            intent.jump = false;
+        }
+    }
+
+    fn getEntityAABB(pos: Vec3, aabb: *Comps.AABB) AABB {
+        const half_w = aabb.width / 2.0;
+        return AABB{
+            .min_x = pos.x - half_w,
+            .max_x = pos.x + half_w,
+            .min_y = pos.y,
+            .max_y = pos.y + aabb.height,
+            .min_z = pos.z - half_w,
+            .max_z = pos.z + half_w,
+        };
+    }
+
+    fn moveEntity(
+        pos: *Comps.Position,
+        vel: *Comps.Velocity,
+        aabb: *Comps.AABB,
+        on_ground: *Comps.OnGround,
+        chunk: *Chunk,
+        collision_list: *std.ArrayListUnmanaged(AABB),
+        allocator: std.mem.Allocator,
+        xd: f32,
+        yd: f32,
+        zd: f32,
+    ) void {
+        var dx = xd;
+        var dy = yd;
+        var dz = zd;
+        var box = getEntityAABB(pos.vec, aabb);
+
+        // 收集碰撞方块
+        collision_list.clearRetainingCapacity();
+        getCollidingBlocks(chunk, box.expand(dx, dy, dz), collision_list, allocator);
+
+        // Y 轴
+        for (collision_list.items) |block| {
+            dy = block.clipYCollide(box, dy);
+        }
+        box = box.move(0, dy, 0);
+        const was_falling = yd < 0;
+        const blocked_y = (yd != dy);
+        on_ground.value = blocked_y and was_falling;
+        if (on_ground.value) vel.vec.y = 0;
+
+        // X 轴
+        for (collision_list.items) |block| {
+            dx = block.clipXCollide(box, dx);
+        }
+        box = box.move(dx, 0, 0);
+
+        // Z 轴
+        for (collision_list.items) |block| {
+            dz = block.clipZCollide(box, dz);
+        }
+        box = box.move(0, 0, dz);
+
+        pos.vec.x = (box.min_x + box.max_x) / 2.0;
+        pos.vec.z = (box.min_z + box.max_z) / 2.0;
+        pos.vec.y = box.min_y;
+
+        // 去穿透：卡在方块中时尝试推出
+        if (isColliding(pos.vec, aabb, chunk))
+            pushOutOfBlocks(pos.vec, aabb, chunk, vel);
+    }
+
+    fn getCollidingBlocks(chunk: *Chunk, expanded_box: AABB, out_list: *std.ArrayListUnmanaged(AABB), allocator: std.mem.Allocator) void {
+        const min_x = @as(i32, @intFromFloat(@floor(expanded_box.min_x)));
+        const max_x = @as(i32, @intFromFloat(@floor(expanded_box.max_x)));
+        const min_y = @as(i32, @intFromFloat(@floor(expanded_box.min_y)));
+        const max_y = @as(i32, @intFromFloat(@floor(expanded_box.max_y)));
+        const min_z = @as(i32, @intFromFloat(@floor(expanded_box.min_z)));
+        const max_z = @as(i32, @intFromFloat(@floor(expanded_box.max_z)));
+
+        var y = min_y;
+        while (y <= max_y) : (y += 1) {
+            var x = min_x;
+            while (x <= max_x) : (x += 1) {
+                var z = min_z;
+                while (z <= max_z) : (z += 1) {
+                    const world_pos = Vec3.new(
+                        @as(f32, @floatFromInt(x)) + 0.5,
+                        @as(f32, @floatFromInt(y)) + 0.5,
+                        @as(f32, @floatFromInt(z)) + 0.5,
+                    );
+                    const block_id = getBlockAt(chunk, world_pos);
+                    if (block_id == BlockId.fromName("air")) continue;
+                    if (!block_id.prototype().is_solid) continue;
+                    const bb = AABB{
+                        .min_x = @floatFromInt(x),
+                        .max_x = @floatFromInt(x + 1),
+                        .min_y = @floatFromInt(y),
+                        .max_y = @floatFromInt(y + 1),
+                        .min_z = @floatFromInt(z),
+                        .max_z = @floatFromInt(z + 1),
+                    };
+                    out_list.append(allocator, bb) catch continue;
+                }
+            }
+        }
+    }
+
+    fn isInSwimmable(pos: *Comps.Position, aabb: *Comps.AABB, chunk: *Chunk) bool {
+        const points = [_]Vec3{
+            pos.vec.add(Vec3.new(0, 0.1, 0)),
+            pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0)),
+            pos.vec.add(Vec3.new(0, aabb.height - 0.1, 0)),
+        };
+        for (points) |p| {
+            if (getBlockAt(chunk, p).prototype().is_swimmable) return true;
+        }
+        return false;
+    }
+
+    fn isColliding(pos: Vec3, aabb: *Comps.AABB, chunk: *Chunk) bool {
+        const box = getEntityAABB(pos, aabb);
+        const min_x = @as(i32, @intFromFloat(@floor(box.min_x)));
+        const max_x = @as(i32, @intFromFloat(@floor(box.max_x)));
+        const min_y = @as(i32, @intFromFloat(@floor(box.min_y)));
+        const max_y = @as(i32, @intFromFloat(@floor(box.max_y)));
+        const min_z = @as(i32, @intFromFloat(@floor(box.min_z)));
+        const max_z = @as(i32, @intFromFloat(@floor(box.max_z)));
+
+        var y = min_y;
+        while (y <= max_y) : (y += 1) {
+            var x = min_x;
+            while (x <= max_x) : (x += 1) {
+                var z = min_z;
+                while (z <= max_z) : (z += 1) {
+                    const block_id = getBlockAt(chunk, Vec3.new(
+                        @as(f32, @floatFromInt(x)) + 0.5,
+                        @as(f32, @floatFromInt(y)) + 0.5,
+                        @as(f32, @floatFromInt(z)) + 0.5,
+                    ));
+                    if (block_id == BlockId.fromName("air")) continue;
+                    if (block_id.prototype().is_solid) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn pushOutOfBlocks(pos: Vec3, aabb: *Comps.AABB, chunk: *Chunk, vel: *Comps.Velocity) void {
+        const half_w = aabb.width * 0.35;
+        const points = [4]Vec3{
+            pos.add(Vec3.new(-half_w, 0.5, half_w)),
+            pos.add(Vec3.new(-half_w, 0.5, -half_w)),
+            pos.add(Vec3.new(half_w, 0.5, -half_w)),
+            pos.add(Vec3.new(half_w, 0.5, half_w)),
+        };
+
+        for (points) |point| {
+            const px = point.x;
+            const py = point.y;
+            const pz = point.z;
+            const block_x = @as(i32, @intFromFloat(@floor(px)));
+            const block_y = @as(i32, @intFromFloat(@floor(py)));
+            const block_z = @as(i32, @intFromFloat(@floor(pz)));
+
+            if (!isBlockSolidAt(chunk, @floatFromInt(block_x), @floatFromInt(block_y), @floatFromInt(block_z)) and
+                !isBlockSolidAt(chunk, @floatFromInt(block_x), @floatFromInt(block_y + 1), @floatFromInt(block_z))) continue;
+
+            const dirs = [4]Direction{ .west, .east, .north, .south };
+            var best_dir: ?Direction = null;
+            var best_dist: f32 = 9999.0;
+
+            const local_x = px - @as(f32, @floatFromInt(block_x));
+            const local_z = pz - @as(f32, @floatFromInt(block_z));
+
+            for (dirs) |dir| {
+                const off = dir.offset();
+                const nx = block_x + off.x;
+                const ny = block_y;
+                const nz = block_z + off.z;
+                if (!isBlockSolidAt(chunk, @floatFromInt(nx), @floatFromInt(ny), @floatFromInt(nz)) and
+                    !isBlockSolidAt(chunk, @floatFromInt(nx), @floatFromInt(ny + 1), @floatFromInt(nz)))
+                {
+                    const d = switch (dir) {
+                        .west => local_x,
+                        .east => 1.0 - local_x,
+                        .north => local_z,
+                        .south => 1.0 - local_z,
+                        else => 9999.0,
+                    };
+                    if (d < best_dist) {
+                        best_dir = dir;
+                        best_dist = d;
+                    }
+                }
+            }
+
+            if (best_dir) |dir| {
+                const off = dir.offset();
+                vel.vec.x = @as(f32, @floatFromInt(off.x)) * 0.1;
+                vel.vec.z = @as(f32, @floatFromInt(off.z)) * 0.1;
+            }
+        }
+    }
+
+    fn isBlockSolidAt(chunk: *Chunk, x: f32, y: f32, z: f32) bool {
+        const block_id = getBlockAt(chunk, Vec3.new(x, y, z));
+        if (block_id == BlockId.fromName("air")) return false;
+        return block_id.prototype().is_solid;
+    }
+
+    pub fn getBlockAt(chunk: *Chunk, pos: Vec3) BlockId {
+        const x = @as(i32, @intFromFloat(@floor(pos.x)));
+        const y = @as(i32, @intFromFloat(@floor(pos.y)));
+        const z = @as(i32, @intFromFloat(@floor(pos.z)));
+        if (x >= 0 and x < CHUNK_SIZE_X and
+            y >= 0 and y < CHUNK_SIZE_Y and
+            z >= 0 and z < CHUNK_SIZE_Z)
+        {
+            return chunk.blocks[@intCast(x)][@intCast(y)][@intCast(z)].block_id;
+        }
+        return .fromName("air");
+    }
+};
 
 pub const AABB = struct {
     min_x: f32,
@@ -729,333 +1074,5 @@ pub const AABB = struct {
             }
         }
         return move_dist;
-    }
-};
-
-pub const PhysicsSystem = struct {
-    position: Vec3, // 脚底中心坐标
-    velocity: Vec3,
-    width: f32 = 0.6,
-    height: f32 = 1.8,
-    on_ground: bool = false,
-    step_height: f32 = 0.6,
-    chunk: *Chunk,
-    allocator: std.mem.Allocator,
-
-    collision_list: std.ArrayListUnmanaged(AABB) = .{},
-
-    gravity: f32 = 25.0, // 直接成为PhysicsSystem的字段或许更好？
-
-    pub fn init(allocator: std.mem.Allocator, position: Vec3, chunk: *Chunk) PhysicsSystem {
-        return .{
-            .position = position,
-            .velocity = Vec3.zero,
-            .chunk = chunk,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *PhysicsSystem) void {
-        self.collision_list.deinit(self.allocator);
-    }
-
-    /// 每帧调用：传入移动方向（世界空间，建议归一化）和时间步长
-    pub fn tick(self: *PhysicsSystem, move_dir: Vec3, dt: f32) void {
-        const in_swimmable = self.isInSwimmable();
-        const gravity: f32 = if (in_swimmable) 5.0 else 25.0;
-        const max_speed: f32 = 4.0; // 步行速度
-        const acceleration: f32 = 30.0;
-        const friction: f32 = 4.0; // 空中线性阻力
-
-        // ---- 垂直移动 ----
-        if (in_swimmable) {
-            if (move_dir.y > 0.0) {
-                self.velocity.y = 5.0; // 上浮
-                self.on_ground = false;
-            } else if (move_dir.y < 0.0) {
-                self.velocity.y = -3.0; // 下潜
-                self.on_ground = false;
-            } else {
-                self.velocity.y -= gravity * dt;
-                if (self.velocity.y < -2.0) self.velocity.y = -2.0; // 终端下沉速度
-            }
-        } else {
-            self.velocity.y -= gravity * dt;
-        }
-
-        // ---- 水平移动 ----
-        var h_velocity = Vec3.new(self.velocity.x, 0, self.velocity.z);
-        if (move_dir.len2() > 0.001) {
-            const wish_dir = move_dir.norm();
-            h_velocity = h_velocity.add(wish_dir.scale(acceleration * dt));
-            const h_speed = h_velocity.len();
-            if (h_speed > max_speed) {
-                h_velocity = h_velocity.scale(max_speed / h_speed);
-            }
-        } else {
-            if (self.on_ground) {
-                h_velocity = h_velocity.scale(0.6); // 地面摩擦
-            } else {
-                const h_speed = h_velocity.len();
-                if (h_speed > 0.001) {
-                    const reduction = friction * dt;
-                    const new_speed = @max(h_speed - reduction, 0);
-                    h_velocity = h_velocity.scale(new_speed / h_speed);
-                }
-            }
-        }
-        self.velocity.x = h_velocity.x;
-        self.velocity.z = h_velocity.z;
-
-        // 移动并解决碰撞
-        const dx = self.velocity.x * dt;
-        const dy = self.velocity.y * dt;
-        const dz = self.velocity.z * dt;
-        self.move(dx, dy, dz);
-
-        // 如果卡在方块中尝试推出
-        self.pushOutOfBlocks();
-    }
-
-    fn getAABB(self: PhysicsSystem) AABB {
-        const half_w = self.width / 2.0;
-        return AABB{
-            .min_x = self.position.x - half_w,
-            .max_x = self.position.x + half_w,
-            .min_y = self.position.y,
-            .max_y = self.position.y + self.height,
-            .min_z = self.position.z - half_w,
-            .max_z = self.position.z + half_w,
-        };
-    }
-
-    /// 获取可能与给定膨胀盒发生碰撞的所有固体方块 AABB
-    fn getCollidingBlocks(self: *PhysicsSystem, expanded_box: AABB, out_list: *std.ArrayListUnmanaged(AABB)) void {
-        out_list.clearRetainingCapacity();
-        // 使用 page_allocator 临时分配，便于快速验证；后续可优化
-        const min_x = @as(i32, @intFromFloat(@floor(expanded_box.min_x)));
-        const max_x = @as(i32, @intFromFloat(@floor(expanded_box.max_x)));
-        const min_y = @as(i32, @intFromFloat(@floor(expanded_box.min_y)));
-        const max_y = @as(i32, @intFromFloat(@floor(expanded_box.max_y)));
-        const min_z = @as(i32, @intFromFloat(@floor(expanded_box.min_z)));
-        const max_z = @as(i32, @intFromFloat(@floor(expanded_box.max_z)));
-
-        var y = min_y;
-        while (y <= max_y) : (y += 1) {
-            var x = min_x;
-            while (x <= max_x) : (x += 1) {
-                var z = min_z;
-                while (z <= max_z) : (z += 1) {
-                    const world_pos = Vec3.new(
-                        @as(f32, @floatFromInt(x)) + 0.5,
-                        @as(f32, @floatFromInt(y)) + 0.5,
-                        @as(f32, @floatFromInt(z)) + 0.5,
-                    );
-                    const block_id = getBlockAt(self.chunk, world_pos);
-                    if (block_id == BlockId.fromName("air")) continue;
-                    const proto = block_id.prototype();
-                    if (!proto.is_solid) continue;
-                    const block_box = AABB{
-                        .min_x = @floatFromInt(x),
-                        .max_x = @floatFromInt(x + 1),
-                        .min_y = @floatFromInt(y),
-                        .max_y = @floatFromInt(y + 1),
-                        .min_z = @floatFromInt(z),
-                        .max_z = @floatFromInt(z + 1),
-                    };
-                    self.collision_list.append(self.allocator, block_box) catch continue;
-                }
-            }
-        }
-    }
-
-    pub fn jump(self: *PhysicsSystem) void {
-        if (self.on_ground) {
-            self.velocity.y = 8.0; // 跳跃初速度，重力 20 时可跳到约 2 格高
-            self.on_ground = false; // 离地
-        }
-    }
-
-    fn move(self: *PhysicsSystem, xd: f32, yd: f32, zd: f32) void {
-        var dx = xd;
-        var dy = yd;
-        var dz = zd;
-        var box = self.getAABB();
-
-        self.getCollidingBlocks(box.expand(dx, dy, dz), &self.collision_list);
-
-        // Y 轴
-        for (self.collision_list.items) |block| {
-            dy = block.clipYCollide(box, dy);
-        }
-        box = box.move(0, dy, 0);
-
-        const was_falling = yd < 0;
-        const blocked_y = (yd != dy);
-        self.on_ground = blocked_y and was_falling;
-        if (self.on_ground) {
-            self.velocity.y = 0;
-        }
-
-        // X 轴
-        for (self.collision_list.items) |block| {
-            dx = block.clipXCollide(box, dx);
-        }
-        box = box.move(dx, 0, 0);
-
-        // Z 轴
-        for (self.collision_list.items) |block| {
-            dz = block.clipZCollide(box, dz);
-        }
-        box = box.move(0, 0, dz);
-
-        self.position.x = (box.min_x + box.max_x) / 2.0;
-        self.position.z = (box.min_z + box.max_z) / 2.0;
-        self.position.y = box.min_y;
-    }
-
-    pub fn isInSwimmable(self: *PhysicsSystem) bool {
-        // 检查脚底、腰、头顶附近是否有水
-        const points = [_]Vec3{
-            self.position.add(Vec3.new(0, 0.1, 0)), // 脚底
-            self.position.add(Vec3.new(0, self.height * 0.5, 0)), // 腰部
-            self.position.add(Vec3.new(0, self.height - 0.1, 0)), // 头顶
-        };
-        for (points) |p| {
-            if (getBlockAt(self.chunk, p).prototype().is_swimmable) return true;
-        }
-        return false;
-    }
-
-    // 检查某个世界坐标是否被固体方块占据
-    fn isBlockSolidAt(chunk: *Chunk, x: f32, y: f32, z: f32) bool {
-        const block_id = getBlockAt(chunk, Vec3.new(x, y, z));
-        if (block_id == BlockId.fromName("air")) return false;
-        return block_id.prototype().is_solid;
-    }
-
-    // 去穿透
-    fn pushOutOfBlocks(self: *PhysicsSystem) void {
-        const half_w = self.width * 0.35;
-        const points = [4]Vec3{
-            self.position.add(Vec3.new(-half_w, 0.5, half_w)),
-            self.position.add(Vec3.new(-half_w, 0.5, -half_w)),
-            self.position.add(Vec3.new(half_w, 0.5, -half_w)),
-            self.position.add(Vec3.new(half_w, 0.5, half_w)),
-        };
-
-        // 对每个点进行处理
-        for (points) |point| {
-            const px = point.x;
-            const py = point.y;
-            const pz = point.z;
-
-            const block_x = @as(i32, @intFromFloat(@floor(px)));
-            const block_y = @as(i32, @intFromFloat(@floor(py)));
-            const block_z = @as(i32, @intFromFloat(@floor(pz)));
-
-            // 该位置及上方至少有一个固体方块 → 可能卡住
-            if (!isBlockSolidAt(self.chunk, @floatFromInt(block_x), @floatFromInt(block_y), @floatFromInt(block_z)) and
-                !isBlockSolidAt(self.chunk, @floatFromInt(block_x), @floatFromInt(block_y + 1), @floatFromInt(block_z))) continue;
-
-            // 检查四个方向哪个方向可供推出
-            const dirs = [4]Direction{ .west, .east, .north, .south };
-            var best_dir: ?Direction = null;
-            var best_dist: f32 = 9999.0;
-
-            const local_x = px - @as(f32, @floatFromInt(block_x));
-            const local_z = pz - @as(f32, @floatFromInt(block_z));
-
-            const dist_to_west = local_x;
-            const dist_to_east = 1.0 - local_x;
-            const dist_to_north = local_z;
-            const dist_to_south = 1.0 - local_z;
-
-            for (dirs) |dir| {
-                const off = dir.offset();
-                const nx = block_x + off.x;
-                const ny = block_y;
-                const nz = block_z + off.z;
-
-                // 目标方向及其上方的方块都必须是固体，玩家才能站在上面
-                if (isBlockSolidAt(self.chunk, @floatFromInt(nx), @floatFromInt(ny), @floatFromInt(nz)) and
-                    isBlockSolidAt(self.chunk, @floatFromInt(nx), @floatFromInt(ny + 1), @floatFromInt(nz)))
-                {
-                    const d = switch (dir) {
-                        .west => dist_to_west,
-                        .east => dist_to_east,
-                        .north => dist_to_north,
-                        .south => dist_to_south,
-                        else => 9999.0,
-                    };
-                    if (d < best_dist) {
-                        best_dir = dir;
-                        best_dist = d;
-                    }
-                }
-            }
-
-            if (best_dir) |dir| {
-                const off = dir.offset();
-                // 直接给一个微小的推出速度
-                self.velocity.x = @as(f32, @floatFromInt(off.x)) * 0.1;
-                self.velocity.z = @as(f32, @floatFromInt(off.z)) * 0.1;
-                // 因为给了水平速度，可以认为不再完全静止
-            }
-        }
-    }
-};
-
-pub fn getBlockAt(chunk: *Chunk, pos: Vec3) BlockId {
-    const x = @as(i32, @intFromFloat(@floor(pos.x)));
-    const y = @as(i32, @intFromFloat(@floor(pos.y)));
-    const z = @as(i32, @intFromFloat(@floor(pos.z)));
-    if (x >= 0 and x < CHUNK_SIZE_X and
-        y >= 0 and y < CHUNK_SIZE_Y and
-        z >= 0 and z < CHUNK_SIZE_Z)
-    {
-        return chunk.blocks[@intCast(x)][@intCast(y)][@intCast(z)].block_id;
-    }
-    return .fromName("air");
-}
-
-pub const BlockWorld = struct {
-    allocator: std.mem.Allocator,
-    chunk: *Chunk, // 改为指针
-    material_registry: MaterialRegistry,
-    physics: PhysicsSystem,
-
-    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline) !BlockWorld {
-        const chunk = try allocator.create(Chunk);
-        errdefer allocator.destroy(chunk);
-        Chunk.generate(.new(0, 0, 0), chunk); // 直接填充堆上的内存
-
-        var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
-        errdefer material_registry.deinit();
-
-        const physics = PhysicsSystem.init(
-            allocator,
-            Vec3.new(8, 130, 8),
-            chunk,
-        );
-
-        try buildChunkMesh(chunk, &material_registry);
-
-        return BlockWorld{
-            .allocator = allocator,
-            .chunk = chunk,
-            .material_registry = material_registry,
-            .physics = physics,
-        };
-    }
-
-    pub fn deinit(self: *BlockWorld) void {
-        self.material_registry.deinit();
-        self.physics.deinit();
-        self.allocator.destroy(self.chunk); // 释放区块内存
-    }
-
-    pub fn tick(self: *BlockWorld, move_dir: Vec3, dt: f32) void {
-        self.physics.tick(move_dir, dt);
     }
 };
