@@ -55,10 +55,10 @@ pub fn start(self: *Game) !void {
             // 3. 摄像机同步
             syncCameraFromPlayer(self);
 
-            if (self.input.isMouseButtonPressed(.mouse_left)) {
+            if (self.input.isMouseButtonDown(.mouse_left)) {
                 try tryBreakBlock(self); // 左键破坏
             }
-            if (self.input.isMouseButtonPressed(.mouse_right)) {
+            if (self.input.isMouseButtonDown(.mouse_right)) {
                 try tryPlaceBlock(self); // 右键放置
             }
         }
@@ -126,14 +126,13 @@ pub fn deinit(self: *@This()) void {
     self.gctx.deinit();
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
-    self.render_pipeline.deinit();
     self.registry.deinit();
     self.ui_system.deinit();
     self.block_world.deinit();
 }
 
 fn produceMoveIntent(self: *Game) void {
-    var view = self.registry.view(.{ Comps.Player, Comps.MoveIntent, Comps.Position, Comps.Collider }, .{});
+    var view = self.registry.view(.{ Comps.Player, Comps.MoveIntent }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
         const player = view.get(Comps.Player, entity);
@@ -203,21 +202,58 @@ fn tryBreakBlock(self: *Game) !void {
 fn tryPlaceBlock(self: *Game) !void {
     const ray = self.camera.getCursorRay();
     const hit = Raycast.raycastWorld(self.block_world.chunk, ray, 8.0);
-    if (hit.hit) {
-        // 放置点在命中面的外侧
-        const place_x = hit.block_pos.x + hit.face_normal.x;
-        const place_y = hit.block_pos.y + hit.face_normal.y;
-        const place_z = hit.block_pos.z + hit.face_normal.z;
-        // 检查放置位置是否合法（在区块内且不重叠玩家）
-        if (place_x >= 0 and place_x < BlockWorld.CHUNK_SIZE_X and
-            place_y >= 0 and place_y < BlockWorld.CHUNK_SIZE_Y and
-            place_z >= 0 and place_z < BlockWorld.CHUNK_SIZE_Z)
+    if (!hit.hit) return;
+
+    const place_x = hit.block_pos.x + hit.face_normal.x;
+    const place_y = hit.block_pos.y + hit.face_normal.y;
+    const place_z = hit.block_pos.z + hit.face_normal.z;
+
+    // 边界检查
+    if (place_x < 0 or place_x >= BlockWorld.CHUNK_SIZE_X or
+        place_y < 0 or place_y >= BlockWorld.CHUNK_SIZE_Y or
+        place_z < 0 or place_z >= BlockWorld.CHUNK_SIZE_Z) return;
+
+    // 放置方块的 AABB
+    const block_box = BlockWorld.AABB{
+        .min_x = @floatFromInt(place_x),
+        .max_x = @floatFromInt(place_x + 1),
+        .min_y = @floatFromInt(place_y),
+        .max_y = @floatFromInt(place_y + 1),
+        .min_z = @floatFromInt(place_z),
+        .max_z = @floatFromInt(place_z + 1),
+    };
+
+    // 检查是否与任何有碰撞体积的实体重叠
+    var view = self.registry.view(.{ Comps.Position, Comps.Collider }, .{});
+    var iter = view.entityIterator();
+    var can_place = true;
+    while (iter.next()) |entity| {
+        const pos = view.get(Comps.Position, entity);
+        const collider = view.get(Comps.Collider, entity);
+        const half_w = collider.width / 2.0;
+        const entity_box = BlockWorld.AABB{
+            .min_x = pos.vec.x - half_w,
+            .max_x = pos.vec.x + half_w,
+            .min_y = pos.vec.y,
+            .max_y = pos.vec.y + collider.height,
+            .min_z = pos.vec.z - half_w,
+            .max_z = pos.vec.z + half_w,
+        };
+        if (entity_box.min_x < block_box.max_x and entity_box.max_x > block_box.min_x and
+            entity_box.min_y < block_box.max_y and entity_box.max_y > block_box.min_y and
+            entity_box.min_z < block_box.max_z and entity_box.max_z > block_box.min_z)
         {
-            // 简单起见，放置石头
-            self.block_world.chunk.blocks[@intCast(place_x)][@intCast(place_y)][@intCast(place_z)] = BlockWorld.BlockState.init(.fromName("stone"));
-            try BlockWorld.buildChunkMesh(self.block_world.chunk, &self.block_world.material_registry);
+            can_place = false;
+            break;
         }
     }
+
+    if (!can_place) return;
+
+    // 放置方块
+    self.block_world.chunk.blocks[@intCast(place_x)][@intCast(place_y)][@intCast(place_z)] =
+        BlockWorld.BlockState.init(.fromName("foo"));
+    try BlockWorld.buildChunkMesh(self.block_world.chunk, &self.block_world.material_registry);
 }
 
 const Game = @This();

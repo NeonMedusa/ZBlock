@@ -1,3 +1,4 @@
+// block_word.zig
 const std = @import("std");
 const Imports = @import("imports.zig");
 const Vec2 = Imports.Vec2;
@@ -57,6 +58,7 @@ const block_infos = [_]BlockProtoType{
         .is_swimmable = true,
         .fluid_resistance = 0.3,
     },
+    .{ .name = "foo" },
 };
 
 /// 生成“方块名→索引”的枚举
@@ -89,9 +91,9 @@ pub const BlockId = enum(u32) {
     }
 };
 
-pub const CHUNK_SIZE_X: u32 = 128;
+pub const CHUNK_SIZE_X: u32 = 16;
 pub const CHUNK_SIZE_Y: u32 = 256;
-pub const CHUNK_SIZE_Z: u32 = 128;
+pub const CHUNK_SIZE_Z: u32 = 16;
 pub const ChunkSize = Vec3u{
     .x = CHUNK_SIZE_X,
     .y = CHUNK_SIZE_Y,
@@ -208,7 +210,7 @@ pub const MaterialRegistry = struct {
             const key_usize = entry[0];
             const id: MaterialId = @enumFromInt(key_usize);
             if (self.materials.getPtr(id).*) |*cached| {
-                cached.deinit(); // cached 是 *CachedMaterial
+                cached.deinit(self.allocator); // cached 是 *CachedMaterial
             }
         }
         self.active_materials.deinit(self.allocator);
@@ -305,6 +307,10 @@ pub const CachedMaterial = struct {
     vertex_count: u32,
     index_count: u32,
     ref_count: u32,
+
+    cpu_vertices: std.ArrayListUnmanaged(VertexAttribute) = .{},
+    cpu_indices: std.ArrayListUnmanaged(u32) = .{},
+
     pub fn init(gctx: *Gctx, material: Material) !CachedMaterial {
         const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = 0,
@@ -325,11 +331,22 @@ pub const CachedMaterial = struct {
             .ref_count = 0,
         };
     }
-    pub fn deinit(self: *CachedMaterial) void {
+    pub fn deinit(self: *CachedMaterial, allocator: std.mem.Allocator) void {
+        // 释放 CPU 列表
+        self.cpu_vertices.deinit(allocator); // 你需要一个分配器引用，可以存入 CachedMaterial 或传入
+        self.cpu_indices.deinit(allocator);
+
         self.material.deinit();
         if (self.vertex_buffer) |b| Wgpu.wgpuBufferRelease(b);
         if (self.index_buffer) |b| Wgpu.wgpuBufferRelease(b);
     }
+
+    /// 清空 CPU 网格数据，准备重新收集
+    pub fn clearMeshData(self: *CachedMaterial) void {
+        self.cpu_vertices.clearRetainingCapacity();
+        self.cpu_indices.clearRetainingCapacity();
+    }
+
     /// 替换整个顶点和索引缓冲区
     pub fn updateMesh(
         self: *CachedMaterial,
@@ -363,7 +380,120 @@ pub const CachedMaterial = struct {
         self.vertex_count = @intCast(vertices.len);
         self.index_count = @intCast(indices.len);
     }
+
+    /// 收集完数据后，将 CPU 数据上传到 GPU 缓冲区
+    pub fn uploadMeshData(self: *CachedMaterial, gctx: *Gctx) !void {
+        try self.updateMesh(gctx, self.cpu_vertices.items, self.cpu_indices.items);
+        // 上传后可以清空 CPU 列表以节省内存，也可保留用于后续局部更新
+        // 增量更新最佳的数据结构是稀疏集，但每个区块光是键（u32类型）就需要1.5MB的内存
+        // 而且还要算上本就存在的顶点数据，开销有些大了，暂不实现增量更新
+        // self.cpu_vertices.clearAndFree(allocaotr);
+        // self.cpu_indices.clearAndFree(allocaotr);
+    }
 };
+
+// 核心：为一个区块生成网格数据并上传到材质缓冲区
+pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
+    const allocator = registry.allocator;
+
+    // 遍历区块，直接向对应材质追加顶点（不再提前清零）
+    for (0..CHUNK_SIZE_X) |x| {
+        for (0..CHUNK_SIZE_Z) |z| {
+            for (0..CHUNK_SIZE_Y) |y| {
+                const block_state = chunk.blocks[x][y][z];
+                const block_id = block_state.block_id;
+                if (block_id == BlockId.fromName("air")) continue;
+                const proto = block_id.prototype();
+
+                const rot = if (proto.is_directional)
+                    fromToRotation(Vec3.up, block_state.facing.normal())
+                else
+                    Quat.identity;
+
+                const dirs = std.enums.values(Direction);
+                for (dirs) |dir| {
+                    const world_dir = dir;
+                    const offset = dir.offset();
+                    const nx = @as(i32, @intCast(x)) + offset.x;
+                    const ny = @as(i32, @intCast(y)) + offset.y;
+                    const nz = @as(i32, @intCast(z)) + offset.z;
+
+                    var neighbor: BlockId = .fromName("air");
+                    if (nx >= 0 and nx < CHUNK_SIZE_X and
+                        ny >= 0 and ny < CHUNK_SIZE_Y and
+                        nz >= 0 and nz < CHUNK_SIZE_Z)
+                    {
+                        neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
+                    } else {
+                        neighbor = .fromName("air");
+                    }
+
+                    const neighbor_proto = neighbor.prototype();
+                    if (neighbor_proto.occludes) continue;
+                    if (!proto.occludes and block_id == neighbor and neighbor != BlockId.fromName("air")) continue;
+
+                    const local_dir = if (proto.is_directional) blk: {
+                        const world_vec = world_dir.normal();
+                        const local_vec = rot.inverse().rotate(world_vec);
+                        break :blk directionFromVec(local_vec);
+                    } else world_dir;
+
+                    const face_index = @intFromEnum(local_dir);
+                    const variant = proto.face_variants[face_index];
+                    const mat_key = MaterialKey{ .block_id = block_id, .variant = variant };
+
+                    // acquire 会递增计数并确保材质在活跃集中
+                    var cached = try registry.acquire(mat_key);
+
+                    const face_data = getStandardFaceData(local_dir);
+                    const center = Vec3.new(
+                        @as(f32, @floatFromInt(x)) + 0.5,
+                        @as(f32, @floatFromInt(y)) + 0.5,
+                        @as(f32, @floatFromInt(z)) + 0.5,
+                    );
+
+                    const start_vertex: u32 = @intCast(cached.cpu_vertices.items.len);
+                    for (face_data.positions, face_data.uvs) |local_pos, uv| {
+                        const world_pos = rot.rotate(local_pos).add(center);
+                        const world_normal = rot.rotate(local_dir.normal());
+                        try cached.cpu_vertices.append(allocator, VertexAttribute{
+                            .position = world_pos,
+                            .normal = world_normal,
+                            .texcoord = uv,
+                            .tangent = Vec4.new(1, 0, 0, 1),
+                            .color = Vec4.new(1, 1, 1, 1),
+                            .joint_indices = .{ 0, 0, 0, 0 },
+                            .joint_weights = .{ 1, 0, 0, 0 },
+                        });
+                    }
+
+                    try cached.cpu_indices.appendSlice(allocator, &[_]u32{
+                        start_vertex, start_vertex + 2, start_vertex + 1,
+                        start_vertex, start_vertex + 3, start_vertex + 2,
+                    });
+                }
+            }
+        }
+    }
+
+    // 卸载废弃材质 + 上传网格 + 清空并重置计数
+    var iter = registry.active_materials.iterator();
+    while (iter.next()) |entry| {
+        const id: MaterialId = @enumFromInt(entry[0]);
+        if (registry.materials.getPtr(id).*) |*cached| {
+            if (cached.ref_count == 0) { // 本轮构建没有用到，卸载
+                cached.deinit(allocator);
+                registry.materials.set(id, null);
+                _ = registry.active_materials.remove(entry[0]);
+            } else { // 用到了：上传数据，然后重置并清空 CPU 网格
+                if (cached.cpu_vertices.items.len > 0)
+                    try cached.uploadMeshData(registry.gctx);
+                cached.ref_count = 0;
+                cached.clearMeshData();
+            }
+        }
+    }
+}
 
 pub const Direction = enum(u3) {
     up, // +Y   (索引 0)
@@ -397,140 +527,6 @@ pub const Direction = enum(u3) {
         };
     }
 };
-
-// 临时网格构建器
-const MeshBuilder = struct {
-    vertices: std.ArrayListUnmanaged(VertexAttribute),
-    indices: std.ArrayListUnmanaged(u32),
-    allocator: std.mem.Allocator,
-    pub fn init(allocator: std.mem.Allocator) MeshBuilder {
-        return .{
-            .vertices = std.ArrayList(VertexAttribute){},
-            .indices = std.ArrayList(u32){},
-            .allocator = allocator,
-        };
-    }
-    pub fn deinit(self: *MeshBuilder) void {
-        self.vertices.deinit(self.allocator);
-        self.indices.deinit(self.allocator);
-    }
-};
-
-// 核心：为一个区块生成网格数据并上传到材质缓冲区
-pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
-    const allocator = registry.allocator;
-
-    var mesh_map = std.AutoHashMap(MaterialId, MeshBuilder).init(allocator);
-    defer {
-        var iter = mesh_map.valueIterator();
-        while (iter.next()) |builder| builder.deinit();
-        mesh_map.deinit();
-    }
-
-    for (0..CHUNK_SIZE_X) |x| {
-        for (0..CHUNK_SIZE_Z) |z| {
-            for (0..CHUNK_SIZE_Y) |y| {
-                const block_state = chunk.blocks[x][y][z];
-                const block_id = block_state.block_id;
-                if (block_id == BlockId.fromName("air")) continue;
-                const proto = block_id.prototype();
-
-                // 计算方块旋转（保持单位旋转当无方向性时）
-                const rot = if (proto.is_directional)
-                    fromToRotation(Vec3.up, block_state.facing.normal())
-                else
-                    Quat.identity;
-
-                const dirs = std.enums.values(Direction);
-                for (dirs) |dir| {
-                    // 世界方向（判断邻居、生成顶点位置）
-                    const world_dir = dir;
-                    const offset = dir.offset();
-                    const nx = @as(i32, @intCast(x)) + offset.x;
-                    const ny = @as(i32, @intCast(y)) + offset.y;
-                    const nz = @as(i32, @intCast(z)) + offset.z;
-
-                    var neighbor: BlockId = .fromName("air");
-                    if (nx >= 0 and nx < CHUNK_SIZE_X and
-                        ny >= 0 and ny < CHUNK_SIZE_Y and
-                        nz >= 0 and nz < CHUNK_SIZE_Z)
-                    {
-                        neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
-                    } else {
-                        neighbor = .fromName("air");
-                    }
-
-                    const neighbor_proto = neighbor.prototype();
-                    if (neighbor_proto.occludes) continue;
-                    // 相邻透明且同种方块之间不渲染面（水-水、玻璃-玻璃等）
-                    if (!proto.occludes and block_id == neighbor and neighbor != BlockId.fromName("air")) continue;
-
-                    // 局部方向（用于材质变体和UV轴旋转）
-                    const local_dir = if (proto.is_directional) blk: {
-                        const world_vec = world_dir.normal();
-                        const local_vec = rot.inverse().rotate(world_vec);
-                        break :blk directionFromVec(local_vec);
-                    } else world_dir;
-
-                    // 材质变体选择
-                    const face_index = @intFromEnum(local_dir);
-                    const variant = proto.face_variants[face_index];
-                    const mat_key = MaterialKey{ .block_id = block_id, .variant = variant };
-                    const mat_id = mat_key.toId();
-
-                    const gop = try mesh_map.getOrPut(mat_id);
-                    if (!gop.found_existing) {
-                        gop.value_ptr.* = MeshBuilder.init(allocator);
-                    }
-
-                    // 获取标准姿态的面数据（局部方向）
-                    const face_data = getStandardFaceData(local_dir);
-                    const center = Vec3.new(
-                        @as(f32, @floatFromInt(x)) + 0.5,
-                        @as(f32, @floatFromInt(y)) + 0.5,
-                        @as(f32, @floatFromInt(z)) + 0.5,
-                    );
-
-                    // 构建顶点和索引
-                    const builder_ptr = gop.value_ptr; // 指向 MeshBuilder 的指针
-                    const start_vertex = builder_ptr.vertices.items.len;
-
-                    for (face_data.positions, face_data.uvs) |local_pos, uv| {
-                        const world_pos = rot.rotate(local_pos).add(center);
-                        const world_normal = rot.rotate(local_dir.normal());
-                        try builder_ptr.vertices.append(allocator, VertexAttribute{
-                            .position = world_pos,
-                            .normal = world_normal,
-                            .texcoord = uv,
-                            .tangent = Vec4.new(1, 0, 0, 1),
-                            .color = Vec4.new(1, 1, 1, 1),
-                            .joint_indices = .{ 0, 0, 0, 0 },
-                            .joint_weights = .{ 1, 0, 0, 0 },
-                        });
-                    }
-
-                    // 两个三角形组成面
-                    try builder_ptr.indices.appendSlice(allocator, &[_]u32{
-                        @intCast(start_vertex), @intCast(start_vertex + 2), @intCast(start_vertex + 1),
-                        @intCast(start_vertex), @intCast(start_vertex + 3), @intCast(start_vertex + 2),
-                    });
-                }
-            }
-        }
-    }
-
-    var mesh_iter = mesh_map.iterator();
-    while (mesh_iter.next()) |entry| {
-        const mat_id = entry.key_ptr.*;
-        const builder = entry.value_ptr;
-
-        if (builder.vertices.items.len == 0) continue;
-
-        const material_key = MaterialKey.fromId(mat_id);
-        const cached = try registry.acquire(material_key);
-        try cached.updateMesh(registry.gctx, builder.vertices.items, builder.indices.items);
-    }
-}
 
 pub const BlockState = struct {
     block_id: BlockId = BlockId.fromName("air"),
@@ -909,10 +905,6 @@ pub const AABB = struct {
     max_x: f32,
     max_y: f32,
     max_z: f32,
-
-    pub fn init(min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32) AABB {
-        return .{ .min_x = min_x, .min_y = min_y, .min_z = min_z, .max_x = max_x, .max_y = max_y, .max_z = max_z };
-    }
 
     pub fn expand(self: AABB, dx: f32, dy: f32, dz: f32) AABB {
         return AABB{
