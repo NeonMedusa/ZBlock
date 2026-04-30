@@ -12,6 +12,7 @@
 struct SceneUniform {
     proj_matrix: mat4x4f,
     view_matrix: mat4x4f,
+    camera_position: vec3f,
     time: f32,
 };
 
@@ -61,22 +62,17 @@ fn calculateWorldNormal(model_matrix: mat4x4f, local_normal: vec3f) -> vec3f {
 }
 
 // 简单的光照计算
-fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f {
-    // 归一化法线
+fn calculateLighting(normal: vec3f, position: vec3f, camera_pos: vec3f, base_color: vec4f) -> vec4f {
     let n = normalize(normal);
     
-    // 光源方向（从表面指向光源）
     let light_dir = normalize(LIGHT_DIRECTION);
     
-    // 环境光
     let ambient = AMBIENT_STRENGTH * base_color.rgb;
     
-    // 漫反射
     let diffuse_factor = max(dot(n, light_dir), 0.0);
     let diffuse = diffuse_factor * LIGHT_COLOR * base_color.rgb;
     
-    // 高光（镜面反射）
-    let view_dir = normalize(-position);
+    let view_dir = normalize(camera_pos - position);
     let reflect_dir = reflect(-light_dir, n);
     let specular_factor = pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS);
     let specular = specular_factor * SPECULAR_STRENGTH * LIGHT_COLOR;
@@ -136,7 +132,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let normal = normalize(in.world_normal);
     
     // 应用光照
-    let lit_color = calculateLighting(normal, in.world_position, base_color);
+    let lit_color = calculateLighting(normal, in.world_position, scene_uniform.camera_position, base_color);
     
     // 简单的伽玛校正
     let final_color = pow(lit_color, vec4f(2.2));

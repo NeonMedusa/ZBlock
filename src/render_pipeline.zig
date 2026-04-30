@@ -131,7 +131,7 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
         .primitive = .{
             .topology = Wgpu.WGPUPrimitiveTopology_TriangleList,
             .frontFace = Wgpu.WGPUFrontFace_CCW,
-            .cullMode = Wgpu.WGPUCullMode_Back,
+            .cullMode = Wgpu.WGPUCullMode_None,
         },
         .fragment = &Wgpu.WGPUFragmentState{
             .module = shader_module,

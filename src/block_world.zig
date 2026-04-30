@@ -28,7 +28,7 @@ pub const BlockProtoType = struct {
     opacity: f32 = 1.0, // 不透明度
 
     is_solid: bool = true, // 是否是固体（不可进入，有完整碰撞箱）
-    is_swimmable: bool = false, // 是否可以在其中“游泳”（如水体）
+    is_swimmable: bool = false, // 是否可以在其中"游泳"（如水体）
     fluid_resistance: f32 = 0.0, // 游泳时的额外阻力系数（越大移动越慢）
 
     durability: u32 = 32, // 耐久度
@@ -61,7 +61,7 @@ const block_infos = [_]BlockProtoType{
     .{ .name = "foo" },
 };
 
-/// 生成“方块名→索引”的枚举
+/// 生成"方块名→索引"的枚举
 pub const BlockNames = blk: {
     var fields: [block_infos.len]std.builtin.Type.EnumField = undefined;
     for (&fields, block_infos, 0..) |*field, def, i|
@@ -91,9 +91,9 @@ pub const BlockId = enum(u32) {
     }
 };
 
-pub const CHUNK_SIZE_X: u32 = 128;
+pub const CHUNK_SIZE_X: u32 = 16;
 pub const CHUNK_SIZE_Y: u32 = 256;
-pub const CHUNK_SIZE_Z: u32 = 128;
+pub const CHUNK_SIZE_Z: u32 = 16;
 pub const ChunkSize = Vec3u{
     .x = CHUNK_SIZE_X,
     .y = CHUNK_SIZE_Y,
@@ -160,13 +160,95 @@ pub const MaterialKey = struct {
 };
 
 const MAX_MATERIALS = block_infos.len * MAX_VARIANTS;
+pub const MaterialIdx = u32;
+
+pub const GlobalMaterial = struct {
+    material: Material,
+    ref_count: u32 = 0,
+
+    pub fn deinit(self: *GlobalMaterial) void {
+        self.material.deinit();
+    }
+};
+
+pub const ChunkMesh = struct {
+    vertex_buffer: Wgpu.WGPUBuffer,
+    index_buffer: Wgpu.WGPUBuffer,
+    vertex_count: u32,
+    index_count: u32,
+
+    cpu_vertices: std.ArrayListUnmanaged(VertexAttribute) = .{},
+    cpu_indices: std.ArrayListUnmanaged(u32) = .{},
+
+    pub fn init(gctx: *Gctx) !ChunkMesh {
+        const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = 0,
+            .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
+            .mappedAtCreation = 0,
+        });
+        const index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = 0,
+            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+            .mappedAtCreation = 0,
+        });
+        return .{
+            .vertex_buffer = vertex_buffer,
+            .index_buffer = index_buffer,
+            .vertex_count = 0,
+            .index_count = 0,
+        };
+    }
+
+    pub fn deinit(self: *ChunkMesh, allocator: std.mem.Allocator) void {
+        self.cpu_vertices.deinit(allocator);
+        self.cpu_indices.deinit(allocator);
+        if (self.vertex_buffer) |b| Wgpu.wgpuBufferRelease(b);
+        if (self.index_buffer) |b| Wgpu.wgpuBufferRelease(b);
+    }
+
+    pub fn clearMeshData(self: *ChunkMesh) void {
+        self.cpu_vertices.clearRetainingCapacity();
+        self.cpu_indices.clearRetainingCapacity();
+    }
+
+    pub fn uploadMeshData(self: *ChunkMesh, gctx: *Gctx) !void {
+        if (self.vertex_buffer) |old| Wgpu.wgpuBufferRelease(old);
+        if (self.index_buffer) |old| Wgpu.wgpuBufferRelease(old);
+
+        const vertices = self.cpu_vertices.items;
+        const indices = self.cpu_indices.items;
+
+        const vtx_size = @sizeOf(VertexAttribute) * vertices.len;
+        self.vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = vtx_size,
+            .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
+            .mappedAtCreation = 0,
+        });
+        if (vtx_size > 0) {
+            Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.vertex_buffer, 0, vertices.ptr, vtx_size);
+        }
+
+        const idx_size = @sizeOf(u32) * indices.len;
+        self.index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = idx_size,
+            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
+            .mappedAtCreation = 0,
+        });
+        if (idx_size > 0) {
+            Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.index_buffer, 0, indices.ptr, idx_size);
+        }
+
+        self.vertex_count = @intCast(vertices.len);
+        self.index_count = @intCast(indices.len);
+    }
+};
 
 pub const MaterialRegistry = struct {
     gctx: *Gctx,
     pipeline: *RenderPipeline,
     allocator: std.mem.Allocator,
 
-    materials: [MAX_MATERIALS]?CachedMaterial = [1]?CachedMaterial{null} ** MAX_MATERIALS,
+    materials: [MAX_MATERIALS]?GlobalMaterial = [1]?GlobalMaterial{null} ** MAX_MATERIALS,
     active_materials: SparseSet(bool, MAX_MATERIALS),
 
     const Self = @This();
@@ -184,75 +266,70 @@ pub const MaterialRegistry = struct {
         var iter = self.active_materials.iterator();
         while (iter.next()) |entry| {
             const key_usize = entry[0];
-            const id: u32 = @intCast(key_usize); // 直接转为 MaterialIdx (u32)
-            if (self.materials[id]) |*cached| { // 直接用整数索引数组
-                cached.deinit(self.allocator);
+            const id: u32 = @intCast(key_usize);
+            if (self.materials[id]) |*mat| {
+                mat.deinit();
             }
         }
         self.active_materials.deinit(self.allocator);
     }
 
-    /// 获取或加载材质，增加引用计数。返回可写指针以便后续操作（如更新顶点）
-    pub fn acquire(self: *Self, key: MaterialKey) !*CachedMaterial {
+    pub fn acquire(self: *Self, key: MaterialKey) !*GlobalMaterial {
         const id = key.toId();
         if (self.materials[@intCast(id)] == null) {
-            const cached = try self.loadMaterial(key);
-            self.materials[@intCast(id)] = cached;
+            const global_mat = try self.loadGlobalMaterial(key);
+            self.materials[@intCast(id)] = global_mat;
             self.active_materials.set(self.allocator, id, true);
         }
-        var cached = &(self.materials[@intCast(id)].?);
-        cached.ref_count += 1;
-        return cached;
+        var global_mat = &(self.materials[@intCast(id)].?);
+        global_mat.ref_count += 1;
+        return global_mat;
     }
 
-    /// 上传所有活跃材质的网格数据（如果有），清理 CPU 缓冲，卸载无引用的材质。
-    pub fn uploadAndClean(self: *Self) !void {
+    pub fn releaseById(self: *Self, id: MaterialIdx) void {
+        if (self.materials[@intCast(id)]) |*mat| {
+            mat.ref_count -= 1;
+            if (mat.ref_count < 0) mat.ref_count = 0;
+        }
+    }
+
+    pub fn cleanupUnused(self: *Self) void {
         var iter = self.active_materials.iterator();
         while (iter.next()) |entry| {
-            const id: u32 = @intCast(entry[0]); // entry[0] 是 usize
-            if (self.materials[@intCast(id)]) |*cached| {
-                if (cached.ref_count == 0) {
-                    cached.deinit(self.allocator);
+            const key_usize = entry[0];
+            const id: u32 = @intCast(key_usize);
+            if (self.materials[@intCast(id)]) |*mat| {
+                if (mat.ref_count == 0) {
+                    mat.deinit();
                     self.materials[@intCast(id)] = null;
-                    _ = self.active_materials.remove(entry[0]);
-                } else {
-                    if (cached.cpu_vertices.items.len > 0) {
-                        try cached.uploadMeshData(self.gctx);
-                    }
-                    cached.ref_count = 0;
-                    cached.clearMeshData();
+                    _ = self.active_materials.remove(key_usize);
                 }
             }
         }
     }
 
-    /// 内部：加载材质纹理、创建占位顶点缓冲区
-    fn loadMaterial(self: *Self, key: MaterialKey) !CachedMaterial {
+    fn loadGlobalMaterial(self: *Self, key: MaterialKey) !GlobalMaterial {
         const block_id = key.block_id;
         const variant = key.variant;
         const block_info = block_id.prototype();
 
-        // 构建纹理路径
         const color_path = try self.buildTexturePath(block_info.name, variant, false);
         defer self.allocator.free(color_path);
         const normal_path = try self.buildTexturePath(block_info.name, variant, true);
         defer self.allocator.free(normal_path);
 
-        // 创建默认材质（包含独立默认纹理）
         var material = try Material.initDefault(self.gctx, self.pipeline);
         errdefer material.deinit();
 
-        // 尝试加载颜色纹理，成功则替换默认纹理
         if (TextureRes.loadFromFile(self.allocator, self.gctx, color_path)) |color_tex| {
             material.setColorTexture(self.gctx, self.pipeline, color_tex);
         } else |_| {}
 
-        // 尝试加载法线纹理
         if (TextureRes.loadFromFile(self.allocator, self.gctx, normal_path)) |normal_tex| {
             material.setNormalTexture(self.gctx, self.pipeline, normal_tex);
         } else |_| {}
 
-        return CachedMaterial.init(self.gctx, material);
+        return .{ .material = material, .ref_count = 0 };
     }
 
     fn buildTexturePath(self: *Self, base_name: [:0]const u8, variant: u3, is_normal: bool) ![]u8 {
@@ -266,102 +343,62 @@ pub const MaterialRegistry = struct {
     }
 };
 
-pub const CachedMaterial = struct {
-    material: Material,
-    vertex_buffer: Wgpu.WGPUBuffer,
-    index_buffer: Wgpu.WGPUBuffer,
-    vertex_count: u32,
-    index_count: u32,
-    ref_count: u32,
+pub const ChunkMeshCache = struct {
+    allocator: std.mem.Allocator,
+    gctx: *Gctx,
+    global_registry: *MaterialRegistry,
 
-    cpu_vertices: std.ArrayListUnmanaged(VertexAttribute) = .{},
-    cpu_indices: std.ArrayListUnmanaged(u32) = .{},
+    meshes: std.AutoHashMap(MaterialIdx, ChunkMesh),
 
-    pub fn init(gctx: *Gctx, material: Material) !CachedMaterial {
-        const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-            .size = 0,
-            .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
-        });
-        const index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-            .size = 0,
-            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
-        });
+    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, global_registry: *MaterialRegistry) !ChunkMeshCache {
+        var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh).init(allocator);
+        try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
         return .{
-            .material = material,
-            .vertex_buffer = vertex_buffer,
-            .index_buffer = index_buffer,
-            .vertex_count = 0,
-            .index_count = 0,
-            .ref_count = 0,
+            .allocator = allocator,
+            .gctx = gctx,
+            .global_registry = global_registry,
+            .meshes = meshes,
         };
     }
-    pub fn deinit(self: *CachedMaterial, allocator: std.mem.Allocator) void {
-        std.debug.print("deinit\n", .{});
-        // 释放 CPU 列表
-        self.cpu_vertices.deinit(allocator); // 你需要一个分配器引用，可以存入 CachedMaterial 或传入
-        self.cpu_indices.deinit(allocator);
 
-        self.material.deinit();
-        if (self.vertex_buffer) |b| Wgpu.wgpuBufferRelease(b);
-        if (self.index_buffer) |b| Wgpu.wgpuBufferRelease(b);
+    pub fn deinit(self: *ChunkMeshCache) void {
+        self.clear();
+        self.meshes.deinit();
     }
 
-    /// 清空 CPU 网格数据，准备重新收集
-    pub fn clearMeshData(self: *CachedMaterial) void {
-        self.cpu_vertices.clearRetainingCapacity();
-        self.cpu_indices.clearRetainingCapacity();
-    }
-
-    /// 替换整个顶点和索引缓冲区
-    pub fn updateMesh(
-        self: *CachedMaterial,
-        gctx: *Gctx,
-        vertices: []const VertexAttribute,
-        indices: []const u32,
-    ) !void {
-        // 释放旧缓冲区
-        if (self.vertex_buffer) |old| Wgpu.wgpuBufferRelease(old);
-        if (self.index_buffer) |old| Wgpu.wgpuBufferRelease(old);
-        // 上传顶点
-        const vtx_size = @sizeOf(VertexAttribute) * vertices.len;
-        self.vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-            .size = vtx_size,
-            .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
-        });
-        if (vtx_size > 0) {
-            Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.vertex_buffer, 0, vertices.ptr, vtx_size);
+    pub fn clear(self: *ChunkMeshCache) void {
+        var it = self.meshes.iterator();
+        while (it.next()) |entry| {
+            const mat_idx = entry.key_ptr.*;
+            entry.value_ptr.deinit(self.allocator);
+            self.global_registry.releaseById(mat_idx);
         }
-        // 上传索引
-        const idx_size = @sizeOf(u32) * indices.len;
-        self.index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-            .size = idx_size,
-            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
-        });
-        if (idx_size > 0) {
-            Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.index_buffer, 0, indices.ptr, idx_size);
-        }
-        self.vertex_count = @intCast(vertices.len);
-        self.index_count = @intCast(indices.len);
+        self.meshes.clearRetainingCapacity();
     }
 
-    /// 收集完数据后，将 CPU 数据上传到 GPU 缓冲区
-    pub fn uploadMeshData(self: *CachedMaterial, gctx: *Gctx) !void {
-        try self.updateMesh(gctx, self.cpu_vertices.items, self.cpu_indices.items);
-        // 上传后可以清空 CPU 列表以节省内存，也可保留用于后续局部更新
-        // 增量更新最佳的数据结构是稀疏集，但每个区块光是键（u32类型）就需要1.5MB的内存
-        // 而且还要算上本就存在的顶点数据，开销有些大了，暂不实现增量更新
-        // self.cpu_vertices.clearAndFree(allocaotr);
-        // self.cpu_indices.clearAndFree(allocaotr);
+    pub fn getMesh(self: *ChunkMeshCache, mat_idx: MaterialIdx) !*ChunkMesh {
+        const res = try self.meshes.getOrPut(mat_idx);
+        if (!res.found_existing) {
+            res.value_ptr.* = try ChunkMesh.init(self.gctx);
+        }
+        return res.value_ptr;
+    }
+
+    pub fn uploadAll(self: *ChunkMeshCache) !void {
+        var it = self.meshes.valueIterator();
+        while (it.next()) |mesh| {
+            if (mesh.cpu_vertices.items.len > 0) {
+                try mesh.uploadMeshData(self.gctx);
+                mesh.clearMeshData();
+            }
+        }
     }
 };
 
-/// 为一个区块生成网格数据并上传到材质缓冲区
-pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
-    const allocator = registry.allocator;
+pub fn buildChunkMesh(chunk_origin: Vec3i, chunk: *const Chunk, cache: *ChunkMeshCache, world: *BlockWorld) !void {
+    const allocator = cache.allocator;
+
+    cache.clear();
 
     for (0..CHUNK_SIZE_X) |x| {
         for (0..CHUNK_SIZE_Z) |z| {
@@ -371,7 +408,6 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                 if (block_id == BlockId.fromName("air")) continue;
                 const proto = block_id.prototype();
 
-                // 只计算一次旋转，避免每面重复计算
                 const rot = if (proto.is_directional) block_state.facing.rotation() else Quat.identity;
                 const inv_rot = if (proto.is_directional) block_state.facing.rotationInverse() else Quat.identity;
 
@@ -384,13 +420,26 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                     const nz = @as(i32, @intCast(z)) + offset.z;
 
                     var neighbor: BlockId = .fromName("air");
-                    if (nx >= 0 and nx < CHUNK_SIZE_X and
-                        ny >= 0 and ny < CHUNK_SIZE_Y and
-                        nz >= 0 and nz < CHUNK_SIZE_Z)
-                    {
-                        neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
-                    } else {
-                        neighbor = .fromName("air");
+                    if (ny >= 0 and ny < CHUNK_SIZE_Y) {
+                        if (nx >= 0 and nx < CHUNK_SIZE_X and
+                            nz >= 0 and nz < CHUNK_SIZE_Z)
+                        {
+                            neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
+                        } else {
+                            const wn_x = chunk_origin.x + nx;
+                            const wn_z = chunk_origin.z + nz;
+                            const nb_origin = BlockWorld.chunkOrigin(wn_x, wn_z);
+                            if (world.chunks.contains(nb_origin)) {
+                                neighbor = world.getBlockAt(Vec3.new(
+                                    @as(f32, @floatFromInt(wn_x)) + 0.5,
+                                    @as(f32, @floatFromInt(ny)) + 0.5,
+                                    @as(f32, @floatFromInt(wn_z)) + 0.5,
+                                ));
+                            } else {
+                                // 邻居区块未加载 → 该面永远不可见 → 不生成
+                                continue;
+                            }
+                        }
                     }
 
                     const neighbor_proto = neighbor.prototype();
@@ -406,21 +455,24 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                     const face_index = @intFromEnum(local_dir);
                     const variant = proto.face_variants[face_index];
                     const mat_key = MaterialKey{ .block_id = block_id, .variant = variant };
+                    const mat_idx = mat_key.toId();
 
-                    var cached = try registry.acquire(mat_key);
+                    _ = try cache.global_registry.acquire(mat_key);
+
+                    const mesh = try cache.getMesh(mat_idx);
 
                     const face_data = getStandardFaceData(local_dir);
                     const center = Vec3.new(
-                        @as(f32, @floatFromInt(x)) + 0.5,
-                        @as(f32, @floatFromInt(y)) + 0.5,
-                        @as(f32, @floatFromInt(z)) + 0.5,
+                        @as(f32, @floatFromInt(chunk_origin.x + @as(i32, @intCast(x)))) + 0.5,
+                        @as(f32, @floatFromInt(chunk_origin.y + @as(i32, @intCast(y)))) + 0.5,
+                        @as(f32, @floatFromInt(chunk_origin.z + @as(i32, @intCast(z)))) + 0.5,
                     );
 
-                    const start_vertex: u32 = @intCast(cached.cpu_vertices.items.len);
+                    const start_vertex: u32 = @intCast(mesh.cpu_vertices.items.len);
                     for (face_data.positions, face_data.uvs) |local_pos, uv| {
                         const world_pos = rot.rotate(local_pos).add(center);
                         const world_normal = rot.rotate(local_dir.normal());
-                        try cached.cpu_vertices.append(allocator, VertexAttribute{
+                        try mesh.cpu_vertices.append(allocator, VertexAttribute{
                             .position = world_pos,
                             .normal = world_normal,
                             .texcoord = uv,
@@ -431,7 +483,7 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                         });
                     }
 
-                    try cached.cpu_indices.appendSlice(allocator, &[_]u32{
+                    try mesh.cpu_indices.appendSlice(allocator, &[_]u32{
                         start_vertex, start_vertex + 2, start_vertex + 1,
                         start_vertex, start_vertex + 3, start_vertex + 2,
                     });
@@ -440,19 +492,17 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
         }
     }
 
-    // 统一上传网格数据，清理未使用的材质
-    try registry.uploadAndClean();
+    try cache.uploadAll();
 }
 
 pub const Direction = enum(u3) {
-    up, // +Y   (索引 0)
-    down, // -Y   (索引 1)
-    north, // -Z   (索引 2)  注意：这里定义 north 为 -Z
-    south, // +Z   (索引 3)
-    west, // -X   (索引 4)
-    east, // +X   (索引 5)
+    up,
+    down,
+    north,
+    south,
+    west,
+    east,
 
-    /// 返回该方向的单位法线向量
     pub fn normal(self: Direction) Vec3 {
         return switch (self) {
             .up => Vec3.new(0, 1, 0),
@@ -464,7 +514,6 @@ pub const Direction = enum(u3) {
         };
     }
 
-    /// 返回该方向的整数偏移向量（用于邻居查找）
     pub fn offset(self: Direction) Vec3i {
         return switch (self) {
             .up => Vec3i.new(0, 1, 0),
@@ -475,7 +524,6 @@ pub const Direction = enum(u3) {
             .east => Vec3i.new(1, 0, 0),
         };
     }
-    /// 返回将“上方向 (0,1,0)”旋转到该朝向的四元数
     pub fn rotation(self: Direction) Quat {
         return switch (self) {
             .up => Quat.identity,
@@ -487,14 +535,13 @@ pub const Direction = enum(u3) {
         };
     }
 
-    /// 返回 rotation 的逆（即从该朝向旋转回“上方向”的四元数）
     pub fn rotationInverse(self: Direction) Quat {
         return switch (self) {
             .up => Quat.identity,
-            .down => Quat.fromAxisAngle(Vec3.new(1, 0, 0), -std.math.pi), // 逆：绕 X 轴 -π
-            .north => Quat.fromAxisAngle(Vec3.new(1, 0, 0), std.math.pi / 2.0), // 原有 -π/2 的逆 = +π/2
+            .down => Quat.fromAxisAngle(Vec3.new(1, 0, 0), -std.math.pi),
+            .north => Quat.fromAxisAngle(Vec3.new(1, 0, 0), std.math.pi / 2.0),
             .south => Quat.fromAxisAngle(Vec3.new(1, 0, 0), -std.math.pi / 2.0),
-            .west => Quat.fromAxisAngle(Vec3.new(0, 0, 1), std.math.pi / 2.0), // 原有 -π/2 的逆 = +π/2
+            .west => Quat.fromAxisAngle(Vec3.new(0, 0, 1), std.math.pi / 2.0),
             .east => Quat.fromAxisAngle(Vec3.new(0, 0, 1), -std.math.pi / 2.0),
         };
     }
@@ -504,7 +551,6 @@ pub const BlockState = struct {
     block_id: BlockId = BlockId.fromName("air"),
     facing: Direction = .up,
     durability: u32 = 10,
-    /// 从一个方块ID创建默认状态（使用原型中的耐久度）
     pub fn init(block_id: BlockId) BlockState {
         return .{
             .block_id = block_id,
@@ -611,34 +657,156 @@ const AIR_FRICTION: f32 = 4.0;
 const ACCELERATION: f32 = 30.0;
 const PHYS_EPS = 1e-6;
 
+const LoadedChunk = struct {
+    chunk: *Chunk,
+    mesh_cache: ChunkMeshCache,
+};
+
 pub const BlockWorld = struct {
     allocator: std.mem.Allocator,
-    chunk: *Chunk,
+    gctx: *Gctx,
+    pipeline: *RenderPipeline,
     material_registry: MaterialRegistry,
-    collision_list: std.ArrayListUnmanaged(AABB) = .{}, // 物理碰撞列表（复用）
+    chunks: std.AutoHashMap(Vec3i, LoadedChunk),
+    collision_list: std.ArrayListUnmanaged(AABB) = .{},
 
     pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline) !BlockWorld {
-        const chunk = try allocator.create(Chunk);
-        errdefer allocator.destroy(chunk);
-        Chunk.generate(.new(0, 0, 0), chunk);
-
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
         errdefer material_registry.deinit();
 
-        try buildChunkMesh(chunk, &material_registry);
+        var chunks = std.AutoHashMap(Vec3i, LoadedChunk).init(allocator);
+        errdefer chunks.deinit();
 
         return BlockWorld{
             .allocator = allocator,
-            .chunk = chunk,
+            .gctx = gctx,
+            .pipeline = pipeline,
             .material_registry = material_registry,
-            .collision_list = .{},
+            .chunks = chunks,
         };
     }
 
     pub fn deinit(self: *BlockWorld) void {
+        self.clearAllChunks();
+        self.chunks.deinit();
         self.material_registry.deinit();
         self.collision_list.deinit(self.allocator);
-        self.allocator.destroy(self.chunk);
+    }
+
+    pub fn chunkOrigin(world_x: i32, world_z: i32) Vec3i {
+        const chunk_size_x: i32 = @intCast(CHUNK_SIZE_X);
+        const chunk_size_z: i32 = @intCast(CHUNK_SIZE_Z);
+        return Vec3i.new(
+            @divFloor(world_x, chunk_size_x) * chunk_size_x,
+            0,
+            @divFloor(world_z, chunk_size_z) * chunk_size_z,
+        );
+    }
+
+    pub fn loadChunk(self: *BlockWorld, origin: Vec3i) !void {
+        if (self.chunks.contains(origin)) return;
+        const chunk = try self.allocator.create(Chunk);
+        errdefer self.allocator.destroy(chunk);
+        Chunk.generate(origin, chunk);
+        var mesh_cache = try ChunkMeshCache.init(self.allocator, self.gctx, &self.material_registry);
+        errdefer {
+            mesh_cache.deinit();
+            self.allocator.destroy(chunk);
+        }
+        try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache });
+        const entry = self.chunks.getPtr(origin).?;
+        try buildChunkMesh(origin, entry.chunk, &entry.mesh_cache, self);
+
+        // 新区块加载后，重建已存在邻居区块的 mesh，消除它们面向新区块的多余面
+        const chunk_size_x: i32 = @intCast(CHUNK_SIZE_X);
+        const chunk_size_z: i32 = @intCast(CHUNK_SIZE_Z);
+        const neighbor_offsets = [_]struct { x: i32, z: i32 }{
+            .{ .x = -1, .z = 0 },
+            .{ .x = 1, .z = 0 },
+            .{ .x = 0, .z = -1 },
+            .{ .x = 0, .z = 1 },
+        };
+        for (neighbor_offsets) |noff| {
+            const nb_origin = Vec3i.new(
+                origin.x + noff.x * chunk_size_x,
+                0,
+                origin.z + noff.z * chunk_size_z,
+            );
+            if (nb_origin.x == origin.x and nb_origin.z == origin.z) continue;
+            // 只有在新块加载之前就已经存在的邻居才需要重建
+            if (self.chunks.getPtr(nb_origin)) |nb_loaded| {
+                if (nb_loaded.chunk != chunk) {
+                    try buildChunkMesh(nb_origin, nb_loaded.chunk, &nb_loaded.mesh_cache, self);
+                }
+            }
+        }
+    }
+
+    pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
+        if (self.chunks.fetchRemove(origin)) |kv| {
+            var loaded = kv.value;
+            loaded.mesh_cache.deinit();
+            self.allocator.destroy(loaded.chunk);
+        }
+        // 卸载后重建邻居 mesh，使被遮挡的面重新可见
+        // const chunk_size_x: i32 = @intCast(CHUNK_SIZE_X);
+        // const chunk_size_z: i32 = @intCast(CHUNK_SIZE_Z);
+        // const neighbor_offsets = [_]struct { x: i32, z: i32 }{
+        //     .{ .x = -1, .z = 0 },
+        //     .{ .x = 1, .z = 0 },
+        //     .{ .x = 0, .z = -1 },
+        //     .{ .x = 0, .z = 1 },
+        // };
+        // for (neighbor_offsets) |noff| {
+        //     const nb_origin = Vec3i.new(
+        //         origin.x + noff.x * chunk_size_x,
+        //         0,
+        //         origin.z + noff.z * chunk_size_z,
+        //     );
+        //     self.rebuildChunkMesh(nb_origin) catch {};
+        // }
+        // self.material_registry.cleanupUnused();
+    }
+
+    fn clearAllChunks(self: *BlockWorld) void {
+        var it = self.chunks.valueIterator();
+        while (it.next()) |loaded| {
+            loaded.mesh_cache.deinit();
+            self.allocator.destroy(loaded.chunk);
+        }
+        self.chunks.clearRetainingCapacity();
+        self.material_registry.cleanupUnused();
+    }
+
+    fn rebuildChunkMesh(self: *BlockWorld, origin: Vec3i) !void {
+        if (self.chunks.getPtr(origin)) |loaded| {
+            try buildChunkMesh(origin, loaded.chunk, &loaded.mesh_cache, self);
+        }
+    }
+
+    pub fn setBlock(self: *BlockWorld, world_pos: Vec3i, block_id: BlockId) !void {
+        const origin = chunkOrigin(world_pos.x, world_pos.z);
+        if (self.chunks.getPtr(origin)) |loaded| {
+            const lx: u32 = @intCast(world_pos.x - origin.x);
+            const ly: u32 = @intCast(world_pos.y - origin.y);
+            const lz: u32 = @intCast(world_pos.z - origin.z);
+            loaded.chunk.blocks[lx][ly][lz] = BlockState.init(block_id);
+            try self.rebuildChunkMesh(origin);
+
+            // 如果方块在区块边界上，也需要重建相邻区块的网格
+            const dirs = std.enums.values(Direction);
+            for (dirs) |dir| {
+                const offset = dir.offset();
+                const nx = world_pos.x + offset.x;
+                const nz = world_pos.z + offset.z;
+                const neighbor_origin = chunkOrigin(nx, nz);
+                if (neighbor_origin.x != origin.x or neighbor_origin.y != origin.y or neighbor_origin.z != origin.z) {
+                    if (self.chunks.contains(neighbor_origin)) {
+                        try self.rebuildChunkMesh(neighbor_origin);
+                    }
+                }
+            }
+        }
     }
 
     pub fn updatePhysics(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
@@ -662,10 +830,10 @@ pub const BlockWorld = struct {
             const on_ground = view.get(Comps.OnGround, entity);
             var intent = view.get(Comps.MoveIntent, entity);
 
-            const in_swimmable = isInSwimmable(pos, aabb, self.chunk);
+            const in_swimmable = self.isInSwimmable(pos, aabb);
             const resistance: f32 = if (in_swimmable) blk: {
                 const mid = pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0));
-                const block_id = getBlockAt(self.chunk, mid);
+                const block_id = self.getBlockAt(mid);
                 break :blk if (block_id.prototype().is_swimmable) block_id.prototype().fluid_resistance else 0.0;
             } else 0.0;
 
@@ -673,7 +841,6 @@ pub const BlockWorld = struct {
             const max_speed = move_speed.value * (1.0 - resistance);
             const acceleration = ACCELERATION * (1.0 - resistance);
 
-            // ---- 垂直移动 ----
             if (in_swimmable) {
                 if (intent.direction.y > 0.0) {
                     vel.vec.y = SWIM_UP_SPEED;
@@ -687,14 +854,12 @@ pub const BlockWorld = struct {
                 }
             } else {
                 vel.vec.y -= effective_gravity * dt;
-                // 跳跃
                 if (intent.jump and on_ground.value) {
                     vel.vec.y = jump_vel.value;
                     on_ground.value = false;
                 }
             }
 
-            // ---- 水平移动 ----
             var h_vel = Vec3.new(vel.vec.x, 0, vel.vec.z);
             const move_dir = Vec3.new(intent.direction.x, 0, intent.direction.z);
             if (move_dir.len2() > 0.001) {
@@ -717,13 +882,11 @@ pub const BlockWorld = struct {
             vel.vec.x = h_vel.x;
             vel.vec.z = h_vel.z;
 
-            // ---- 碰撞移动 ----
             const dx = vel.vec.x * dt;
             const dy = vel.vec.y * dt;
             const dz = vel.vec.z * dt;
-            moveEntity(pos, vel, aabb, on_ground, self.chunk, &self.collision_list, self.allocator, dx, dy, dz);
+            self.moveEntity(pos, vel, aabb, on_ground, &self.collision_list, dx, dy, dz);
 
-            // 消费跳跃意图（本帧已处理）
             intent.jump = false;
         }
     }
@@ -741,13 +904,12 @@ pub const BlockWorld = struct {
     }
 
     fn moveEntity(
+        self: *BlockWorld,
         pos: *Comps.Position,
         vel: *Comps.Velocity,
         collider: *Comps.Collider,
         on_ground: *Comps.OnGround,
-        chunk: *Chunk,
-        collision_list: *std.ArrayListUnmanaged(AABB),
-        allocator: std.mem.Allocator,
+        out_list: *std.ArrayListUnmanaged(AABB),
         xd: f32,
         yd: f32,
         zd: f32,
@@ -757,11 +919,10 @@ pub const BlockWorld = struct {
         var dz = zd;
         var box = getEntityAABB(pos.vec, collider);
 
-        collision_list.clearRetainingCapacity();
-        getCollidingBlocks(chunk, box.expand(dx, dy, dz), collision_list, allocator);
+        out_list.clearRetainingCapacity();
+        self.getCollidingBlocks(box.expand(dx, dy, dz), out_list);
 
-        // Y 轴
-        for (collision_list.items) |block| {
+        for (out_list.items) |block| {
             dy = block.clipYCollide(box, dy);
         }
         box = box.move(0, dy, 0);
@@ -770,14 +931,12 @@ pub const BlockWorld = struct {
         on_ground.value = blocked_y and was_falling;
         if (on_ground.value) vel.vec.y = 0;
 
-        // X 轴
-        for (collision_list.items) |block| {
+        for (out_list.items) |block| {
             dx = block.clipXCollide(box, dx);
         }
         box = box.move(dx, 0, 0);
 
-        // Z 轴
-        for (collision_list.items) |block| {
+        for (out_list.items) |block| {
             dz = block.clipZCollide(box, dz);
         }
         box = box.move(0, 0, dz);
@@ -787,7 +946,7 @@ pub const BlockWorld = struct {
         pos.vec.y = box.min_y;
     }
 
-    fn getCollidingBlocks(chunk: *Chunk, expanded_box: AABB, out_list: *std.ArrayListUnmanaged(AABB), allocator: std.mem.Allocator) void {
+    fn getCollidingBlocks(self: *BlockWorld, expanded_box: AABB, out_list: *std.ArrayListUnmanaged(AABB)) void {
         const min_x = @as(i32, @intFromFloat(@floor(expanded_box.min_x)));
         const max_x = @as(i32, @intFromFloat(@floor(expanded_box.max_x)));
         const min_y = @as(i32, @intFromFloat(@floor(expanded_box.min_y)));
@@ -806,7 +965,7 @@ pub const BlockWorld = struct {
                         @as(f32, @floatFromInt(y)) + 0.5,
                         @as(f32, @floatFromInt(z)) + 0.5,
                     );
-                    const block_id = getBlockAt(chunk, world_pos);
+                    const block_id = self.getBlockAt(world_pos);
                     if (block_id == BlockId.fromName("air")) continue;
                     if (!block_id.prototype().is_solid) continue;
                     const bb = AABB{
@@ -817,33 +976,41 @@ pub const BlockWorld = struct {
                         .min_z = @floatFromInt(z),
                         .max_z = @floatFromInt(z + 1),
                     };
-                    out_list.append(allocator, bb) catch continue;
+                    out_list.append(self.allocator, bb) catch continue;
                 }
             }
         }
     }
 
-    fn isInSwimmable(pos: *Comps.Position, collider: *Comps.Collider, chunk: *Chunk) bool {
+    fn isInSwimmable(self: *BlockWorld, pos: *Comps.Position, collider: *Comps.Collider) bool {
         const points = [_]Vec3{
             pos.vec.add(Vec3.new(0, 0.1, 0)),
             pos.vec.add(Vec3.new(0, collider.height * 0.5, 0)),
             pos.vec.add(Vec3.new(0, collider.height - 0.1, 0)),
         };
         for (points) |p| {
-            if (getBlockAt(chunk, p).prototype().is_swimmable) return true;
+            if (self.getBlockAt(p).prototype().is_swimmable) return true;
         }
         return false;
     }
 
-    pub fn getBlockAt(chunk: *Chunk, pos: Vec3) BlockId {
-        const x = @as(i32, @intFromFloat(@floor(pos.x)));
-        const y = @as(i32, @intFromFloat(@floor(pos.y)));
-        const z = @as(i32, @intFromFloat(@floor(pos.z)));
-        if (x >= 0 and x < CHUNK_SIZE_X and
-            y >= 0 and y < CHUNK_SIZE_Y and
-            z >= 0 and z < CHUNK_SIZE_Z)
-        {
-            return chunk.blocks[@intCast(x)][@intCast(y)][@intCast(z)].block_id;
+    pub fn getBlockAt(self: *BlockWorld, world_pos: Vec3) BlockId {
+        const x = @as(i32, @intFromFloat(@floor(world_pos.x)));
+        const y = @as(i32, @intFromFloat(@floor(world_pos.y)));
+        const z = @as(i32, @intFromFloat(@floor(world_pos.z)));
+
+        const origin = chunkOrigin(x, z);
+
+        if (self.chunks.getPtr(origin)) |loaded| {
+            const local_x = x - origin.x;
+            const local_y = y - origin.y;
+            const local_z = z - origin.z;
+            if (local_x >= 0 and local_x < CHUNK_SIZE_X and
+                local_y >= 0 and local_y < CHUNK_SIZE_Y and
+                local_z >= 0 and local_z < CHUNK_SIZE_Z)
+            {
+                return loaded.chunk.blocks[@intCast(local_x)][@intCast(local_y)][@intCast(local_z)].block_id;
+            }
         }
         return .fromName("air");
     }
@@ -899,21 +1066,17 @@ pub const AABB = struct {
 
     fn clipAxisCollide(block_min: f32, block_max: f32, box_min: f32, box_max: f32, move_dist: f32) f32 {
         if (move_dist > 0.0) {
-            // 正向移动：box_max 可能已经超过了 block_min（已穿透）
             if (box_max + move_dist > block_min) {
                 const max_allowed = block_min - box_max;
                 if (max_allowed < 0) {
-                    // 已经穿透，正向移动是脱离方向 → 允许
                     return move_dist;
                 }
                 return @min(move_dist, max_allowed - PHYS_EPS);
             }
         } else if (move_dist < 0.0) {
-            // 负向移动：box_min 可能已经穿透了 block_max
             if (box_min + move_dist < block_max) {
                 const min_allowed = block_max - box_min;
                 if (min_allowed > 0) {
-                    // 已经穿透，负向移动是脱离方向 → 允许
                     return move_dist;
                 }
                 return @max(move_dist, min_allowed + PHYS_EPS);

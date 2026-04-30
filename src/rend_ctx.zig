@@ -545,8 +545,9 @@ pub const ResManager = struct {
 pub const SceneUniform = struct {
     proj_matrix: Mat4 = undefined, // 投影矩阵
     view_matrix: Mat4 = undefined, // 视图矩阵
+    camera_pos: Vec3 = undefined, // 摄像机世界坐标
     time: f32 = undefined, // 当前时间
-    _padding: [3]f32 = undefined, // 需要对齐到16字节
+    _padding: [4]f32 = undefined, // 结构体对齐到 16 字节
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
         const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 100);
@@ -554,7 +555,9 @@ pub const SceneUniform = struct {
         return .{
             .proj_matrix = proj_matrix,
             .view_matrix = view_matrix,
+            .camera_pos = Vec3.zero,
             .time = window.time,
+            ._padding = undefined,
         };
     }
 };

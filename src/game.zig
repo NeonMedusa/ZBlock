@@ -28,6 +28,24 @@ pub fn start(self: *Game) !void {
     self.registry.add(player_entity, Comps.OnGround{ .value = false });
     self.registry.add(player_entity, Comps.MoveIntent{});
 
+    // 加载初始区块
+    {
+        const player_sx: i32 = @intFromFloat(@floor(8.0));
+        const player_sz: i32 = @intFromFloat(@floor(8.0));
+        const chunk_size_x: i32 = @intCast(BlockWorld.CHUNK_SIZE_X);
+        const chunk_size_z: i32 = @intCast(BlockWorld.CHUNK_SIZE_Z);
+        const pcx = @divFloor(player_sx, chunk_size_x);
+        const pcz = @divFloor(player_sz, chunk_size_z);
+        const range: i32 = 1;
+        var dx: i32 = -range;
+        while (dx <= range) : (dx += 1) {
+            var dz: i32 = -range;
+            while (dz <= range) : (dz += 1) {
+                try self.block_world.loadChunk(.new((pcx + dx) * chunk_size_x, 0, (pcz + dz) * chunk_size_z));
+            }
+        }
+    }
+
     // 测试用静态模型实体
     const e2 = self.registry.create();
     self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
@@ -54,6 +72,9 @@ pub fn start(self: *Game) !void {
             self.block_world.updatePhysics(&self.registry, self.window.delta_time);
             // 3. 摄像机同步
             syncCameraFromPlayer(self);
+
+            // 4. 动态加载/卸载区块
+            try updateChunks(self);
 
             if (self.input.isMouseButtonDown(.mouse_left)) {
                 try tryBreakBlock(self); // 左键破坏
@@ -179,6 +200,7 @@ fn syncCameraFromPlayer(self: *Game) void {
             const eye_offset = Vec3.new(0, 1.6, 0);
             self.camera.position = pos.vec.add(eye_offset);
             self.camera.updateFromMouse(self);
+            self.ubo.camera_pos = self.camera.position;
             break;
         }
     }
@@ -186,45 +208,38 @@ fn syncCameraFromPlayer(self: *Game) void {
 
 fn tryBreakBlock(self: *Game) !void {
     const ray = self.camera.getCursorRay();
-    const hit = Raycast.raycastWorld(self.block_world.chunk, ray, 8.0);
+    const hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
     if (hit.hit) {
-        // 将方块设为空气
-        const x = hit.block_pos.x;
-        const y = hit.block_pos.y;
-        const z = hit.block_pos.z;
-        if (x >= 0 and x < BlockWorld.CHUNK_SIZE_X and
-            y >= 0 and y < BlockWorld.CHUNK_SIZE_Y and
-            z >= 0 and z < BlockWorld.CHUNK_SIZE_Z)
-        {
-            self.block_world.chunk.blocks[@intCast(x)][@intCast(y)][@intCast(z)] = BlockWorld.BlockState.init(.fromName("air"));
-            // 重新构建网格
-            try BlockWorld.buildChunkMesh(self.block_world.chunk, &self.block_world.material_registry);
-        }
+        try self.block_world.setBlock(hit.block_pos, .fromName("air"));
     }
 }
 
 fn tryPlaceBlock(self: *Game) !void {
     const ray = self.camera.getCursorRay();
-    const hit = Raycast.raycastWorld(self.block_world.chunk, ray, 8.0);
+    const hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
     if (!hit.hit) return;
 
-    const place_x = hit.block_pos.x + hit.face_normal.x;
-    const place_y = hit.block_pos.y + hit.face_normal.y;
-    const place_z = hit.block_pos.z + hit.face_normal.z;
+    const place_pos = Vec3i.new(
+        hit.block_pos.x + hit.face_normal.x,
+        hit.block_pos.y + hit.face_normal.y,
+        hit.block_pos.z + hit.face_normal.z,
+    );
 
-    // 边界检查
-    if (place_x < 0 or place_x >= BlockWorld.CHUNK_SIZE_X or
-        place_y < 0 or place_y >= BlockWorld.CHUNK_SIZE_Y or
-        place_z < 0 or place_z >= BlockWorld.CHUNK_SIZE_Z) return;
+    // 检查目标位置的块是否已有方块
+    if (self.block_world.getBlockAt(Vec3.new(
+        @as(f32, @floatFromInt(place_pos.x)) + 0.5,
+        @as(f32, @floatFromInt(place_pos.y)) + 0.5,
+        @as(f32, @floatFromInt(place_pos.z)) + 0.5,
+    )) != BlockWorld.BlockId.fromName("air")) return;
 
     // 放置方块的 AABB
     const block_box = BlockWorld.AABB{
-        .min_x = @floatFromInt(place_x),
-        .max_x = @floatFromInt(place_x + 1),
-        .min_y = @floatFromInt(place_y),
-        .max_y = @floatFromInt(place_y + 1),
-        .min_z = @floatFromInt(place_z),
-        .max_z = @floatFromInt(place_z + 1),
+        .min_x = @floatFromInt(place_pos.x),
+        .max_x = @floatFromInt(place_pos.x + 1),
+        .min_y = @floatFromInt(place_pos.y),
+        .max_y = @floatFromInt(place_pos.y + 1),
+        .min_z = @floatFromInt(place_pos.z),
+        .max_z = @floatFromInt(place_pos.z + 1),
     };
 
     // 检查是否与任何有碰撞体积的实体重叠
@@ -247,17 +262,55 @@ fn tryPlaceBlock(self: *Game) !void {
             entity_box.min_y < block_box.max_y and entity_box.max_y > block_box.min_y and
             entity_box.min_z < block_box.max_z and entity_box.max_z > block_box.min_z)
         {
-            can_place = false;
+            can_place = true;
             break;
         }
     }
 
     if (!can_place) return;
 
-    // 放置方块
-    self.block_world.chunk.blocks[@intCast(place_x)][@intCast(place_y)][@intCast(place_z)] =
-        BlockWorld.BlockState.init(.fromName("foo"));
-    try BlockWorld.buildChunkMesh(self.block_world.chunk, &self.block_world.material_registry);
+    try self.block_world.setBlock(place_pos, .fromName("foo"));
+}
+
+fn updateChunks(self: *Game) !void {
+    var view = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        const player = view.get(Comps.Player, entity);
+        if (player.id != self.player_id) continue;
+        const pos = view.get(Comps.Position, entity);
+
+        const chunk_size_x: i32 = @intCast(BlockWorld.CHUNK_SIZE_X);
+        const chunk_size_z: i32 = @intCast(BlockWorld.CHUNK_SIZE_Z);
+        const pcx = @divFloor(@as(i32, @intFromFloat(@floor(pos.vec.x))), chunk_size_x);
+        const pcz = @divFloor(@as(i32, @intFromFloat(@floor(pos.vec.z))), chunk_size_z);
+
+        const load_range: i32 = 5;
+        var dx: i32 = -load_range;
+        while (dx <= load_range) : (dx += 1) {
+            var dz: i32 = -load_range;
+            while (dz <= load_range) : (dz += 1) {
+                try self.block_world.loadChunk(.new((pcx + dx) * chunk_size_x, 0, (pcz + dz) * chunk_size_z));
+            }
+        }
+
+        // 卸载远处区块
+        var to_unload = std.ArrayListUnmanaged(Vec3i){};
+        defer to_unload.deinit(self.allocator);
+        var chunk_it = self.block_world.chunks.keyIterator();
+        while (chunk_it.next()) |key| {
+            const kcx = @divFloor(key.x, chunk_size_x);
+            const kcz = @divFloor(key.z, chunk_size_z);
+            const dist = @max(@abs(pcx - kcx), @abs(pcz - kcz));
+            if (dist > load_range + 2) {
+                to_unload.append(self.allocator, key.*) catch continue;
+            }
+        }
+        for (to_unload.items) |key| {
+            self.block_world.unloadChunk(key);
+        }
+        break;
+    }
 }
 
 const Game = @This();
@@ -272,6 +325,7 @@ const Gltf = Imports.Gltf;
 const Algebra = Imports.Algebra;
 const Vec2 = Algebra.Vec2;
 const Vec3 = Algebra.Vec3;
+const Vec3i = Algebra.Vec3i;
 const Mat4 = Algebra.Mat4;
 
 const Gctx = Imports.Gctx;

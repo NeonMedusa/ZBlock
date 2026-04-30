@@ -153,47 +153,46 @@ pub fn draw(game: *Game) void {
         );
     }
 
-    // 绘制方块（所有不透明材质）
-    {
-        var mat_iter = game.block_world.material_registry.active_materials.iterator();
-        while (mat_iter.next()) |entry| {
-            const mat_id: u32 = @intCast(entry[0]); // MaterialIdx 实质是 u32
-            if (game.block_world.material_registry.materials[@intCast(mat_id)]) |cached| { // 直接数组索引
-                if (cached.index_count == 0) continue;
+    // 绘制所有区块
+    var chunk_it = game.block_world.chunks.valueIterator();
+    while (chunk_it.next()) |loaded| {
+        var mesh_it = loaded.mesh_cache.meshes.iterator();
+        while (mesh_it.next()) |entry| {
+            const mat_idx = entry.key_ptr.*;
+            const mesh = entry.value_ptr;
+            if (mesh.vertex_count == 0) continue;
 
-                // 设置顶点和索引缓冲区
+            if (game.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
                 Wgpu.wgpuRenderPassEncoderSetVertexBuffer(
                     pass,
                     0,
-                    cached.vertex_buffer,
+                    mesh.vertex_buffer,
                     0,
-                    Wgpu.wgpuBufferGetSize(cached.vertex_buffer),
+                    Wgpu.wgpuBufferGetSize(mesh.vertex_buffer),
                 );
                 Wgpu.wgpuRenderPassEncoderSetIndexBuffer(
                     pass,
-                    cached.index_buffer,
+                    mesh.index_buffer,
                     Wgpu.WGPUIndexFormat_Uint32,
                     0,
-                    Wgpu.wgpuBufferGetSize(cached.index_buffer),
+                    Wgpu.wgpuBufferGetSize(mesh.index_buffer),
                 );
 
-                // 设置材质绑定组（纹理、uniform常量）
                 Wgpu.wgpuRenderPassEncoderSetBindGroup(
                     pass,
                     1,
-                    cached.material.bind_group,
+                    global_mat.material.bind_group,
                     0,
                     null,
                 );
 
-                // 绘制（非实例化，最后一个参数为 0）
                 Wgpu.wgpuRenderPassEncoderDrawIndexed(
                     pass,
-                    cached.index_count,
-                    1, // instance count = 1
-                    0, // first index
-                    0, // base vertex
-                    chunk_instance_idx, // first instance = 0
+                    mesh.index_count,
+                    1,
+                    0,
+                    0,
+                    chunk_instance_idx,
                 );
             }
         }

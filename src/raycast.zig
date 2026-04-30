@@ -3,8 +3,7 @@ const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
 const Vec3i = @import("algebra.zig").Vec3i;
 const BlockId = @import("block_world.zig").BlockId;
-const Chunk = @import("block_world.zig").Chunk;
-const getBlockAt = @import("block_world.zig").BlockWorld.getBlockAt;
+const BlockWorld = @import("block_world.zig").BlockWorld;
 
 pub const Ray = struct {
     origin: Vec3,
@@ -31,17 +30,22 @@ pub const HitResult = struct {
 };
 
 /// 利用 DDA 算法在体素世界中执行射线检测。
-/// `chunk`: 当前区块（可扩展为世界查询函数）
+/// `world`: 方块世界（支持多区块）
 /// `ray`: 世界空间射线
 /// `max_dist`: 最大检测距离
-pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
+pub fn raycastWorld(world: *BlockWorld, ray: Ray, max_dist: f32) HitResult {
     const dir = ray.direction.norm();
     const origin = ray.origin;
 
     // 零方向射线直接返回未命中
-    if (dir.len2() < 1e-12) {
-        return .{ .hit = false, .block_pos = Vec3i.zero, .face_normal = Vec3i.zero, .point = Vec3.zero, .distance = 0 };
-    }
+    if (dir.len2() < 1e-12)
+        return .{
+            .hit = false,
+            .block_pos = Vec3i.zero,
+            .face_normal = Vec3i.zero,
+            .point = Vec3.zero,
+            .distance = 0,
+        };
 
     const epsilon: f32 = 1e-6;
 
@@ -96,7 +100,7 @@ pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
             @as(f32, @floatFromInt(voxel_y)) + 0.5,
             @as(f32, @floatFromInt(voxel_z)) + 0.5,
         );
-        const block_id = getBlockAt(chunk, pos);
+        const block_id = world.getBlockAt(pos);
         if (block_id != BlockId.fromName("air") and block_id.prototype().is_solid) {
             // 计算法线
             var face_normal = Vec3i.zero;
@@ -155,5 +159,11 @@ pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
         if (min_t > max_dist) break;
     }
 
-    return .{ .hit = false, .block_pos = Vec3i.zero, .face_normal = Vec3i.zero, .point = Vec3.zero, .distance = 0 };
+    return .{
+        .hit = false,
+        .block_pos = Vec3i.zero,
+        .face_normal = Vec3i.zero,
+        .point = Vec3.zero,
+        .distance = 0,
+    };
 }
