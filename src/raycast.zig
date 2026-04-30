@@ -59,27 +59,32 @@ pub fn raycastWorld(world: *BlockWorld, ray: Ray, max_dist: f32) HitResult {
     const step_y: i32 = if (dir.y > 0) 1 else -1;
     const step_z: i32 = if (dir.z > 0) 1 else -1;
 
+    // 提前判断各轴是否几乎为零
+    const is_zero_x = @abs(dir.x) < epsilon;
+    const is_zero_y = @abs(dir.y) < epsilon;
+    const is_zero_z = @abs(dir.z) < epsilon;
+
     // 到达下一个体素边界的 t 增量
-    const t_delta_x: f32 = if (@abs(dir.x) < epsilon) std.math.floatMax(f32) else @abs(1.0 / dir.x);
-    const t_delta_y: f32 = if (@abs(dir.y) < epsilon) std.math.floatMax(f32) else @abs(1.0 / dir.y);
-    const t_delta_z: f32 = if (@abs(dir.z) < epsilon) std.math.floatMax(f32) else @abs(1.0 / dir.z);
+    const t_delta_x: f32 = if (is_zero_x) std.math.floatMax(f32) else @abs(1.0 / dir.x);
+    const t_delta_y: f32 = if (is_zero_y) std.math.floatMax(f32) else @abs(1.0 / dir.y);
+    const t_delta_z: f32 = if (is_zero_z) std.math.floatMax(f32) else @abs(1.0 / dir.z);
 
     // 当前体素到下一个边界的 t
-    var t_max_x: f32 = if (@abs(dir.x) < epsilon) std.math.floatMax(f32) else blk: {
+    var t_max_x: f32 = if (is_zero_x) std.math.floatMax(f32) else blk: {
         if (step_x > 0) {
             break :blk (@as(f32, @floatFromInt(voxel_x + 1)) - origin.x) / dir.x;
         } else {
             break :blk (@as(f32, @floatFromInt(voxel_x)) - origin.x) / dir.x;
         }
     };
-    var t_max_y: f32 = if (@abs(dir.y) < epsilon) std.math.floatMax(f32) else blk: {
+    var t_max_y: f32 = if (is_zero_y) std.math.floatMax(f32) else blk: {
         if (step_y > 0) {
             break :blk (@as(f32, @floatFromInt(voxel_y + 1)) - origin.y) / dir.y;
         } else {
             break :blk (@as(f32, @floatFromInt(voxel_y)) - origin.y) / dir.y;
         }
     };
-    var t_max_z: f32 = if (@abs(dir.z) < epsilon) std.math.floatMax(f32) else blk: {
+    var t_max_z: f32 = if (is_zero_z) std.math.floatMax(f32) else blk: {
         if (step_z > 0) {
             break :blk (@as(f32, @floatFromInt(voxel_z + 1)) - origin.z) / dir.z;
         } else {
@@ -131,32 +136,32 @@ pub fn raycastWorld(world: *BlockWorld, ray: Ray, max_dist: f32) HitResult {
             };
         }
 
-        // 步进到下一个体素 (取最小的 t_max)
+        // 步进到下一个体素，一次比较确定最小 t_max
         if (t_max_x < t_max_y) {
             if (t_max_x < t_max_z) {
+                if (t_max_x > max_dist) break;
                 voxel_x += step_x;
                 t_max_x += t_delta_x;
                 last_step = .x;
             } else {
+                if (t_max_z > max_dist) break;
                 voxel_z += step_z;
                 t_max_z += t_delta_z;
                 last_step = .z;
             }
         } else {
             if (t_max_y < t_max_z) {
+                if (t_max_y > max_dist) break;
                 voxel_y += step_y;
                 t_max_y += t_delta_y;
                 last_step = .y;
             } else {
+                if (t_max_z > max_dist) break;
                 voxel_z += step_z;
                 t_max_z += t_delta_z;
                 last_step = .z;
             }
         }
-
-        // 提前终止：当前最小的 t 已经超出最大距离
-        const min_t = @min(@min(t_max_x, t_max_y), t_max_z);
-        if (min_t > max_dist) break;
     }
 
     return .{

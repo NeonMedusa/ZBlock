@@ -94,6 +94,8 @@ pub const BlockId = enum(u32) {
 pub const CHUNK_SIZE_X: u32 = 16;
 pub const CHUNK_SIZE_Y: u32 = 256;
 pub const CHUNK_SIZE_Z: u32 = 16;
+pub const CHUNK_SIZE_X_I32: i32 = CHUNK_SIZE_X;
+pub const CHUNK_SIZE_Z_I32: i32 = CHUNK_SIZE_Z;
 pub const ChunkSize = Vec3u{
     .x = CHUNK_SIZE_X,
     .y = CHUNK_SIZE_Y,
@@ -104,7 +106,7 @@ pub const Chunk = struct {
     blocks: [CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockState,
 
     pub fn generate(world_origin: Vec3i, out_chunk: *Chunk) void {
-        const noise_scale: f32 = 0.03;
+        const noise_scale: f32 = 0.02;
         const world_height: i32 = 128;
         const water_height: i32 = 64;
 
@@ -288,8 +290,8 @@ pub const MaterialRegistry = struct {
 
     pub fn releaseById(self: *Self, id: MaterialIdx) void {
         if (self.materials[@intCast(id)]) |*mat| {
+            std.debug.assert(mat.ref_count > 0);
             mat.ref_count -= 1;
-            if (mat.ref_count < 0) mat.ref_count = 0;
         }
     }
 
@@ -694,12 +696,10 @@ pub const BlockWorld = struct {
     }
 
     pub fn chunkOrigin(world_x: i32, world_z: i32) Vec3i {
-        const chunk_size_x: i32 = @intCast(CHUNK_SIZE_X);
-        const chunk_size_z: i32 = @intCast(CHUNK_SIZE_Z);
         return Vec3i.new(
-            @divFloor(world_x, chunk_size_x) * chunk_size_x,
+            @divFloor(world_x, CHUNK_SIZE_X_I32) * CHUNK_SIZE_X_I32,
             0,
-            @divFloor(world_z, chunk_size_z) * chunk_size_z,
+            @divFloor(world_z, CHUNK_SIZE_Z_I32) * CHUNK_SIZE_Z_I32,
         );
     }
 
@@ -718,8 +718,6 @@ pub const BlockWorld = struct {
         try buildChunkMesh(origin, entry.chunk, &entry.mesh_cache, self);
 
         // 新区块加载后，重建已存在邻居区块的 mesh，消除它们面向新区块的多余面
-        const chunk_size_x: i32 = @intCast(CHUNK_SIZE_X);
-        const chunk_size_z: i32 = @intCast(CHUNK_SIZE_Z);
         const neighbor_offsets = [_]struct { x: i32, z: i32 }{
             .{ .x = -1, .z = 0 },
             .{ .x = 1, .z = 0 },
@@ -728,9 +726,9 @@ pub const BlockWorld = struct {
         };
         for (neighbor_offsets) |noff| {
             const nb_origin = Vec3i.new(
-                origin.x + noff.x * chunk_size_x,
+                origin.x + noff.x * CHUNK_SIZE_X_I32,
                 0,
-                origin.z + noff.z * chunk_size_z,
+                origin.z + noff.z * CHUNK_SIZE_Z_I32,
             );
             if (nb_origin.x == origin.x and nb_origin.z == origin.z) continue;
             // 只有在新块加载之前就已经存在的邻居才需要重建
@@ -748,24 +746,7 @@ pub const BlockWorld = struct {
             loaded.mesh_cache.deinit();
             self.allocator.destroy(loaded.chunk);
         }
-        // 卸载后重建邻居 mesh，使被遮挡的面重新可见
-        // const chunk_size_x: i32 = @intCast(CHUNK_SIZE_X);
-        // const chunk_size_z: i32 = @intCast(CHUNK_SIZE_Z);
-        // const neighbor_offsets = [_]struct { x: i32, z: i32 }{
-        //     .{ .x = -1, .z = 0 },
-        //     .{ .x = 1, .z = 0 },
-        //     .{ .x = 0, .z = -1 },
-        //     .{ .x = 0, .z = 1 },
-        // };
-        // for (neighbor_offsets) |noff| {
-        //     const nb_origin = Vec3i.new(
-        //         origin.x + noff.x * chunk_size_x,
-        //         0,
-        //         origin.z + noff.z * chunk_size_z,
-        //     );
-        //     self.rebuildChunkMesh(nb_origin) catch {};
-        // }
-        // self.material_registry.cleanupUnused();
+        self.material_registry.cleanupUnused();
     }
 
     fn clearAllChunks(self: *BlockWorld) void {
@@ -834,7 +815,8 @@ pub const BlockWorld = struct {
             const resistance: f32 = if (in_swimmable) blk: {
                 const mid = pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0));
                 const block_id = self.getBlockAt(mid);
-                break :blk if (block_id.prototype().is_swimmable) block_id.prototype().fluid_resistance else 0.0;
+                const fluid_proto = block_id.prototype();
+                break :blk if (fluid_proto.is_swimmable) fluid_proto.fluid_resistance else 0.0;
             } else 0.0;
 
             const effective_gravity: f32 = if (in_swimmable) FLUID_GRAVITY else GRAVITY;
@@ -891,7 +873,7 @@ pub const BlockWorld = struct {
         }
     }
 
-    fn getEntityAABB(pos: Vec3, collider: *Comps.Collider) AABB {
+    pub fn getEntityAABB(pos: Vec3, collider: *Comps.Collider) AABB {
         const half_w = collider.width / 2.0;
         return AABB{
             .min_x = pos.x - half_w,

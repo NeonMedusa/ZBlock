@@ -65,6 +65,26 @@ pub fn draw(game: *Game) void {
     };
     ins_idx += 1;
 
+    // 上传实体/实例数据到GPU
+    if (entity_idx > 0) {
+        Wgpu.wgpuQueueWriteBuffer(
+            game.gctx.queue,
+            game.res_manager.entities_data_buffer,
+            0,
+            game.res_manager.entities_data.ptr,
+            @sizeOf(EntityData) * entity_idx,
+        );
+    }
+    if (ins_idx > 0) {
+        Wgpu.wgpuQueueWriteBuffer(
+            game.gctx.queue,
+            game.res_manager.instances_data_buffer,
+            0,
+            game.res_manager.instances_data.ptr,
+            @sizeOf(InstanceData) * ins_idx,
+        );
+    }
+
     // ========== 第二步：准备渲染通道 ==========
     const color_attachment = Wgpu.WGPURenderPassColorAttachment{
         .view = surface_texture_view,
@@ -131,26 +151,6 @@ pub fn draw(game: *Game) void {
             }
         }
         draw_entity_idx += 1;
-    }
-
-    // 更新entities_data_buffer
-    if (entity_idx > 0) {
-        Wgpu.wgpuQueueWriteBuffer(
-            game.gctx.queue,
-            game.res_manager.entities_data_buffer,
-            0,
-            game.res_manager.entities_data.ptr,
-            @sizeOf(EntityData) * entity_idx,
-        );
-    }
-    if (ins_idx > 0) {
-        Wgpu.wgpuQueueWriteBuffer(
-            game.gctx.queue,
-            game.res_manager.instances_data_buffer,
-            0,
-            game.res_manager.instances_data.ptr,
-            @sizeOf(InstanceData) * ins_idx,
-        );
     }
 
     // 绘制所有区块

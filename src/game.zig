@@ -30,18 +30,20 @@ pub fn start(self: *Game) !void {
 
     // 加载初始区块
     {
-        const player_sx: i32 = @intFromFloat(@floor(8.0));
-        const player_sz: i32 = @intFromFloat(@floor(8.0));
-        const chunk_size_x: i32 = @intCast(BlockWorld.CHUNK_SIZE_X);
-        const chunk_size_z: i32 = @intCast(BlockWorld.CHUNK_SIZE_Z);
-        const pcx = @divFloor(player_sx, chunk_size_x);
-        const pcz = @divFloor(player_sz, chunk_size_z);
+        const player_origin = BlockWorld.BlockWorld.chunkOrigin(
+            @intFromFloat(@floor(8.0)),
+            @intFromFloat(@floor(8.0)),
+        );
         const range: i32 = 1;
         var dx: i32 = -range;
         while (dx <= range) : (dx += 1) {
             var dz: i32 = -range;
             while (dz <= range) : (dz += 1) {
-                try self.block_world.loadChunk(.new((pcx + dx) * chunk_size_x, 0, (pcz + dz) * chunk_size_z));
+                try self.block_world.loadChunk(.new(
+                    player_origin.x + dx * BlockWorld.CHUNK_SIZE_X_I32,
+                    0,
+                    player_origin.z + dz * BlockWorld.CHUNK_SIZE_Z_I32,
+                ));
             }
         }
     }
@@ -249,25 +251,17 @@ fn tryPlaceBlock(self: *Game) !void {
     while (iter.next()) |entity| {
         const pos = view.get(Comps.Position, entity);
         const collider = view.get(Comps.Collider, entity);
-        const half_w = collider.width / 2.0;
-        const entity_box = BlockWorld.AABB{
-            .min_x = pos.vec.x - half_w,
-            .max_x = pos.vec.x + half_w,
-            .min_y = pos.vec.y,
-            .max_y = pos.vec.y + collider.height,
-            .min_z = pos.vec.z - half_w,
-            .max_z = pos.vec.z + half_w,
-        };
+        const entity_box = BlockWorld.BlockWorld.getEntityAABB(pos.vec, collider);
         if (entity_box.min_x < block_box.max_x and entity_box.max_x > block_box.min_x and
             entity_box.min_y < block_box.max_y and entity_box.max_y > block_box.min_y and
             entity_box.min_z < block_box.max_z and entity_box.max_z > block_box.min_z)
         {
-            can_place = true;
+            can_place = false;
             break;
         }
     }
 
-    if (!can_place) return;
+    // if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }
@@ -280,17 +274,23 @@ fn updateChunks(self: *Game) !void {
         if (player.id != self.player_id) continue;
         const pos = view.get(Comps.Position, entity);
 
-        const chunk_size_x: i32 = @intCast(BlockWorld.CHUNK_SIZE_X);
-        const chunk_size_z: i32 = @intCast(BlockWorld.CHUNK_SIZE_Z);
-        const pcx = @divFloor(@as(i32, @intFromFloat(@floor(pos.vec.x))), chunk_size_x);
-        const pcz = @divFloor(@as(i32, @intFromFloat(@floor(pos.vec.z))), chunk_size_z);
+        const player_origin = BlockWorld.BlockWorld.chunkOrigin(
+            @intFromFloat(@floor(pos.vec.x)),
+            @intFromFloat(@floor(pos.vec.z)),
+        );
+        const pcx = @divFloor(player_origin.x, BlockWorld.CHUNK_SIZE_X_I32);
+        const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_SIZE_Z_I32);
 
-        const load_range: i32 = 5;
+        const load_range: i32 = 1;
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;
             while (dz <= load_range) : (dz += 1) {
-                try self.block_world.loadChunk(.new((pcx + dx) * chunk_size_x, 0, (pcz + dz) * chunk_size_z));
+                try self.block_world.loadChunk(.new(
+                    player_origin.x + dx * BlockWorld.CHUNK_SIZE_X_I32,
+                    0,
+                    player_origin.z + dz * BlockWorld.CHUNK_SIZE_Z_I32,
+                ));
             }
         }
 
@@ -299,8 +299,8 @@ fn updateChunks(self: *Game) !void {
         defer to_unload.deinit(self.allocator);
         var chunk_it = self.block_world.chunks.keyIterator();
         while (chunk_it.next()) |key| {
-            const kcx = @divFloor(key.x, chunk_size_x);
-            const kcz = @divFloor(key.z, chunk_size_z);
+            const kcx = @divFloor(key.x, BlockWorld.CHUNK_SIZE_X_I32);
+            const kcz = @divFloor(key.z, BlockWorld.CHUNK_SIZE_Z_I32);
             const dist = @max(@abs(pcx - kcx), @abs(pcz - kcz));
             if (dist > load_range + 2) {
                 to_unload.append(self.allocator, key.*) catch continue;
