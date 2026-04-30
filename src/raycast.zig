@@ -1,3 +1,4 @@
+//racast.zig
 const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
 const Vec3i = @import("algebra.zig").Vec3i;
@@ -34,48 +35,62 @@ pub const HitResult = struct {
 /// `ray`: 世界空间射线
 /// `max_dist`: 最大检测距离
 pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
-    // 确保方向为单位向量
     const dir = ray.direction.norm();
     const origin = ray.origin;
+
+    // 零方向射线直接返回未命中
+    if (dir.len2() < 1e-12) {
+        return .{ .hit = false, .block_pos = Vec3i.zero, .face_normal = Vec3i.zero, .point = Vec3.zero, .distance = 0 };
+    }
+
+    const epsilon: f32 = 1e-6;
 
     // 当前体素坐标
     var voxel_x = @as(i32, @intFromFloat(@floor(origin.x)));
     var voxel_y = @as(i32, @intFromFloat(@floor(origin.y)));
     var voxel_z = @as(i32, @intFromFloat(@floor(origin.z)));
 
-    // 步进方向 (根据射线方向)
+    // 步进方向
     const step_x: i32 = if (dir.x > 0) 1 else -1;
     const step_y: i32 = if (dir.y > 0) 1 else -1;
     const step_z: i32 = if (dir.z > 0) 1 else -1;
 
-    // 射线到达下一个体素边界所需的距离 t
-    // 如果方向分量接近 0，设为极大值以忽略该轴
-    const t_delta_x: f32 = if (@abs(dir.x) < 1e-6) std.math.floatMax(f32) else @abs(1.0 / dir.x);
-    const t_delta_y: f32 = if (@abs(dir.y) < 1e-6) std.math.floatMax(f32) else @abs(1.0 / dir.y);
-    const t_delta_z: f32 = if (@abs(dir.z) < 1e-6) std.math.floatMax(f32) else @abs(1.0 / dir.z);
+    // 到达下一个体素边界的 t 增量
+    const t_delta_x: f32 = if (@abs(dir.x) < epsilon) std.math.floatMax(f32) else @abs(1.0 / dir.x);
+    const t_delta_y: f32 = if (@abs(dir.y) < epsilon) std.math.floatMax(f32) else @abs(1.0 / dir.y);
+    const t_delta_z: f32 = if (@abs(dir.z) < epsilon) std.math.floatMax(f32) else @abs(1.0 / dir.z);
 
     // 当前体素到下一个边界的 t
-    var t_max_x: f32 = if (step_x > 0)
-        (@as(f32, @floatFromInt(voxel_x + 1)) - origin.x) / dir.x
-    else
-        (@as(f32, @floatFromInt(voxel_x)) - origin.x) / dir.x;
-    var t_max_y: f32 = if (step_y > 0)
-        (@as(f32, @floatFromInt(voxel_y + 1)) - origin.y) / dir.y
-    else
-        (@as(f32, @floatFromInt(voxel_y)) - origin.y) / dir.y;
-    var t_max_z: f32 = if (step_z > 0)
-        (@as(f32, @floatFromInt(voxel_z + 1)) - origin.z) / dir.z
-    else
-        (@as(f32, @floatFromInt(voxel_z)) - origin.z) / dir.z;
+    var t_max_x: f32 = if (@abs(dir.x) < epsilon) std.math.floatMax(f32) else blk: {
+        if (step_x > 0) {
+            break :blk (@as(f32, @floatFromInt(voxel_x + 1)) - origin.x) / dir.x;
+        } else {
+            break :blk (@as(f32, @floatFromInt(voxel_x)) - origin.x) / dir.x;
+        }
+    };
+    var t_max_y: f32 = if (@abs(dir.y) < epsilon) std.math.floatMax(f32) else blk: {
+        if (step_y > 0) {
+            break :blk (@as(f32, @floatFromInt(voxel_y + 1)) - origin.y) / dir.y;
+        } else {
+            break :blk (@as(f32, @floatFromInt(voxel_y)) - origin.y) / dir.y;
+        }
+    };
+    var t_max_z: f32 = if (@abs(dir.z) < epsilon) std.math.floatMax(f32) else blk: {
+        if (step_z > 0) {
+            break :blk (@as(f32, @floatFromInt(voxel_z + 1)) - origin.z) / dir.z;
+        } else {
+            break :blk (@as(f32, @floatFromInt(voxel_z)) - origin.z) / dir.z;
+        }
+    };
 
     var last_step: ?enum { x, y, z } = null;
 
-    // 最大步进次数，防止无限循环
-    const max_steps = @as(usize, @intFromFloat(max_dist * 2.0)) + 10;
+    // 步数限制：3 * max_dist + 20 足够应对任何角度
+    const max_steps = @as(usize, @intFromFloat(max_dist * 3.0)) + 20;
     var steps: usize = 0;
 
     while (steps < max_steps) : (steps += 1) {
-        // 检查当前体素是否为固体
+        // 检查当前体素
         const pos = Vec3.new(
             @as(f32, @floatFromInt(voxel_x)) + 0.5,
             @as(f32, @floatFromInt(voxel_y)) + 0.5,
@@ -83,7 +98,7 @@ pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
         );
         const block_id = getBlockAt(chunk, pos);
         if (block_id != BlockId.fromName("air") and block_id.prototype().is_solid) {
-            // 命中
+            // 计算法线
             var face_normal = Vec3i.zero;
             if (last_step) |axis| {
                 switch (axis) {
@@ -91,15 +106,18 @@ pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
                     .y => face_normal.y = -step_y,
                     .z => face_normal.z = -step_z,
                 }
+            } else {
+                // 起点在方块内部：用射线反方向估计法线
+                face_normal.x = if (dir.x > 0) -1 else 1;
+                face_normal.y = if (dir.y > 0) -1 else 1;
+                face_normal.z = if (dir.z > 0) -1 else 1;
             }
 
-            // 计算精确命中点 (取当前 t_max 的最小值)
-            const t = if (t_max_x <= t_max_y and t_max_x <= t_max_z) t_max_x else if (t_max_y <= t_max_x and t_max_y <= t_max_z) t_max_y else t_max_z;
-            const hit_point = ray.pointAt(t);
-
-            // 如果距离超出最大范围，视为未命中
+            // 命中距离
+            const t = @min(@min(t_max_x, t_max_y), t_max_z);
             if (t > max_dist) break;
 
+            const hit_point = ray.pointAt(t);
             return .{
                 .hit = true,
                 .block_pos = Vec3i.new(voxel_x, voxel_y, voxel_z),
@@ -109,7 +127,7 @@ pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
             };
         }
 
-        // 步进到下一个体素
+        // 步进到下一个体素 (取最小的 t_max)
         if (t_max_x < t_max_y) {
             if (t_max_x < t_max_z) {
                 voxel_x += step_x;
@@ -132,7 +150,7 @@ pub fn raycastWorld(chunk: *Chunk, ray: Ray, max_dist: f32) HitResult {
             }
         }
 
-        // 如果当前最小 t 已经超过最大距离，停止
+        // 提前终止：当前最小的 t 已经超出最大距离
         const min_t = @min(@min(t_max_x, t_max_y), t_max_z);
         if (min_t > max_dist) break;
     }

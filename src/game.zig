@@ -75,9 +75,11 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 创建窗口
     const window = try Window.init(self, "ZigGame", 1280, 720);
     self.window = window;
+
     // 初始化输入系统
     const input = Input.init(self);
     self.input = input;
+
     // 初始化wgpu
     const gctx = try Gctx.init(self.window);
     self.gctx = gctx;
@@ -85,6 +87,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 初始化噪声系统
     const perlin = @import("perlin.zig");
     perlin.init(99);
+
     // 初始化资源管理器
     const res_manager = try ResManager.init(allocator, &self.gctx, &self.render_pipeline);
     self.res_manager = res_manager;
@@ -94,6 +97,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
         self,
         "resources/shaders/render_shader.wgsl",
     );
+
     // 线框管线（调试用）
     self.wireframe_pipeline = try WireframePipeline.init(
         self,

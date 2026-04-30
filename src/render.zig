@@ -157,8 +157,8 @@ pub fn draw(game: *Game) void {
     {
         var mat_iter = game.block_world.material_registry.active_materials.iterator();
         while (mat_iter.next()) |entry| {
-            const mat_id: MaterialId = @enumFromInt(entry[0]);
-            if (game.block_world.material_registry.materials.get(mat_id)) |cached| {
+            const mat_id: u32 = @intCast(entry[0]); // MaterialIdx 实质是 u32
+            if (game.block_world.material_registry.materials[@intCast(mat_id)]) |cached| { // 直接数组索引
                 if (cached.index_count == 0) continue;
 
                 // 设置顶点和索引缓冲区
@@ -246,4 +246,3 @@ const ECS = @import("zigecs");
 const Comps = @import("components.zig").Components;
 
 const Model = @import("rend_ctx.zig").Model;
-const MaterialId = @import("block_world.zig").MaterialId;

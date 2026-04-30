@@ -91,9 +91,9 @@ pub const BlockId = enum(u32) {
     }
 };
 
-pub const CHUNK_SIZE_X: u32 = 16;
+pub const CHUNK_SIZE_X: u32 = 128;
 pub const CHUNK_SIZE_Y: u32 = 256;
-pub const CHUNK_SIZE_Z: u32 = 16;
+pub const CHUNK_SIZE_Z: u32 = 128;
 pub const ChunkSize = Vec3u{
     .x = CHUNK_SIZE_X,
     .y = CHUNK_SIZE_Y,
@@ -140,44 +140,21 @@ pub const Chunk = struct {
     }
 };
 
-// u3 最多 8 种变体
+/// u3 最多 8 种变体
 pub const MAX_VARIANTS = 8;
-
-// 生成“材质名→索引”的枚举
-pub const MaterialId = blk: {
-    @setEvalBranchQuota(10000);
-    const block_count = block_infos.len;
-    var fields: [block_count * MAX_VARIANTS]std.builtin.Type.EnumField = undefined;
-    var idx: usize = 0;
-    for (block_infos, 0..) |info, block_idx| {
-        _ = block_idx;
-        for (0..MAX_VARIANTS) |v| {
-            const variant: u3 = @intCast(v);
-            const field_name = info.name ++ "_" ++ std.fmt.comptimePrint("{d}", .{variant});
-            fields[idx] = .{ .name = field_name, .value = idx };
-            idx += 1;
-        }
-    }
-    break :blk @Type(.{ .@"enum" = .{
-        .tag_type = u32,
-        .fields = fields[0..idx],
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
-};
 
 pub const MaterialKey = struct {
     block_id: BlockId,
     variant: u3,
-    pub fn toId(key: MaterialKey) MaterialId {
-        const base = @intFromEnum(key.block_id) * MAX_VARIANTS;
-        return @enumFromInt(base + key.variant);
+
+    pub fn toId(key: MaterialKey) u32 {
+        return @intFromEnum(key.block_id) * MAX_VARIANTS + key.variant;
     }
-    pub fn fromId(id: MaterialId) MaterialKey {
-        const val = @intFromEnum(id);
+
+    pub fn fromId(id: u32) MaterialKey {
         return .{
-            .block_id = @enumFromInt(val / MAX_VARIANTS),
-            .variant = @intCast(val % MAX_VARIANTS),
+            .block_id = @enumFromInt(id / MAX_VARIANTS),
+            .variant = @intCast(id % MAX_VARIANTS),
         };
     }
 };
@@ -189,8 +166,8 @@ pub const MaterialRegistry = struct {
     pipeline: *RenderPipeline,
     allocator: std.mem.Allocator,
 
-    materials: std.EnumArray(MaterialId, ?CachedMaterial),
-    active_materials: SparseSet(bool, MAX_MATERIALS), // 值类型改为 bool
+    materials: [MAX_MATERIALS]?CachedMaterial = [1]?CachedMaterial{null} ** MAX_MATERIALS,
+    active_materials: SparseSet(bool, MAX_MATERIALS),
 
     const Self = @This();
 
@@ -199,7 +176,6 @@ pub const MaterialRegistry = struct {
             .gctx = gctx,
             .pipeline = pipeline,
             .allocator = allocator,
-            .materials = .{ .values = .{null} ** std.enums.values(MaterialId).len },
             .active_materials = SparseSet(bool, MAX_MATERIALS).init(),
         };
     }
@@ -208,50 +184,43 @@ pub const MaterialRegistry = struct {
         var iter = self.active_materials.iterator();
         while (iter.next()) |entry| {
             const key_usize = entry[0];
-            const id: MaterialId = @enumFromInt(key_usize);
-            if (self.materials.getPtr(id).*) |*cached| {
-                cached.deinit(self.allocator); // cached 是 *CachedMaterial
+            const id: u32 = @intCast(key_usize); // 直接转为 MaterialIdx (u32)
+            if (self.materials[id]) |*cached| { // 直接用整数索引数组
+                cached.deinit(self.allocator);
             }
         }
         self.active_materials.deinit(self.allocator);
     }
 
-    /// 每帧开始时调用，重置所有活跃材质的引用计数
-    pub fn resetRefCounts(self: *Self) void {
-        var iter = self.active_materials.iterator();
-        while (iter.next()) |entry| {
-            const id: MaterialId = @enumFromInt(entry[0]);
-            if (self.materials.getPtr(id).*) |*cached| {
-                cached.ref_count = 0;
-            }
-        }
-    }
-
     /// 获取或加载材质，增加引用计数。返回可写指针以便后续操作（如更新顶点）
     pub fn acquire(self: *Self, key: MaterialKey) !*CachedMaterial {
         const id = key.toId();
-        // 检查是否未加载
-        if (self.materials.get(id) == null) {
+        if (self.materials[@intCast(id)] == null) {
             const cached = try self.loadMaterial(key);
-            self.materials.set(id, cached);
-            self.active_materials.set(self.allocator, sparseKey(id), true);
+            self.materials[@intCast(id)] = cached;
+            self.active_materials.set(self.allocator, id, true);
         }
-        // 获取可变指针并增加引用计数
-        var cached = &(self.materials.getPtr(id).*).?;
+        var cached = &(self.materials[@intCast(id)].?);
         cached.ref_count += 1;
         return cached;
     }
 
-    /// 每帧结束时调用，卸载引用计数为 0 的材质
-    pub fn removeZeroRefMaterials(self: *Self) void {
+    /// 上传所有活跃材质的网格数据（如果有），清理 CPU 缓冲，卸载无引用的材质。
+    pub fn uploadAndClean(self: *Self) !void {
         var iter = self.active_materials.iterator();
         while (iter.next()) |entry| {
-            const id: MaterialId = @enumFromInt(entry[0]);
-            if (self.materials.getPtr(id).*) |*cached| {
+            const id: u32 = @intCast(entry[0]); // entry[0] 是 usize
+            if (self.materials[@intCast(id)]) |*cached| {
                 if (cached.ref_count == 0) {
-                    cached.deinit(self.gctx);
-                    self.materials.set(id, null);
+                    cached.deinit(self.allocator);
+                    self.materials[@intCast(id)] = null;
                     _ = self.active_materials.remove(entry[0]);
+                } else {
+                    if (cached.cpu_vertices.items.len > 0) {
+                        try cached.uploadMeshData(self.gctx);
+                    }
+                    cached.ref_count = 0;
+                    cached.clearMeshData();
                 }
             }
         }
@@ -288,15 +257,12 @@ pub const MaterialRegistry = struct {
 
     fn buildTexturePath(self: *Self, base_name: [:0]const u8, variant: u3, is_normal: bool) ![]u8 {
         const suffix = if (is_normal) "_n" else "";
-        const file_name = try std.fmt.allocPrint(self.allocator, "{s}_{d}{s}.png", .{ base_name, variant, suffix });
-        errdefer self.allocator.free(file_name);
-        const full_path = try std.fs.path.join(self.allocator, &.{ "resources", "textures", file_name });
-        self.allocator.free(file_name);
+        const full_path = try std.fmt.allocPrint(
+            self.allocator,
+            "resources/textures/{s}_{d}{s}.png",
+            .{ base_name, variant, suffix },
+        );
         return full_path;
-    }
-
-    fn sparseKey(id: MaterialId) usize {
-        return @intFromEnum(id);
     }
 };
 
@@ -332,6 +298,7 @@ pub const CachedMaterial = struct {
         };
     }
     pub fn deinit(self: *CachedMaterial, allocator: std.mem.Allocator) void {
+        std.debug.print("deinit\n", .{});
         // 释放 CPU 列表
         self.cpu_vertices.deinit(allocator); // 你需要一个分配器引用，可以存入 CachedMaterial 或传入
         self.cpu_indices.deinit(allocator);
@@ -392,11 +359,10 @@ pub const CachedMaterial = struct {
     }
 };
 
-// 核心：为一个区块生成网格数据并上传到材质缓冲区
+/// 为一个区块生成网格数据并上传到材质缓冲区
 pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
     const allocator = registry.allocator;
 
-    // 遍历区块，直接向对应材质追加顶点（不再提前清零）
     for (0..CHUNK_SIZE_X) |x| {
         for (0..CHUNK_SIZE_Z) |z| {
             for (0..CHUNK_SIZE_Y) |y| {
@@ -405,10 +371,9 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                 if (block_id == BlockId.fromName("air")) continue;
                 const proto = block_id.prototype();
 
-                const rot = if (proto.is_directional)
-                    fromToRotation(Vec3.up, block_state.facing.normal())
-                else
-                    Quat.identity;
+                // 只计算一次旋转，避免每面重复计算
+                const rot = if (proto.is_directional) block_state.facing.rotation() else Quat.identity;
+                const inv_rot = if (proto.is_directional) block_state.facing.rotationInverse() else Quat.identity;
 
                 const dirs = std.enums.values(Direction);
                 for (dirs) |dir| {
@@ -434,7 +399,7 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
 
                     const local_dir = if (proto.is_directional) blk: {
                         const world_vec = world_dir.normal();
-                        const local_vec = rot.inverse().rotate(world_vec);
+                        const local_vec = inv_rot.rotate(world_vec);
                         break :blk directionFromVec(local_vec);
                     } else world_dir;
 
@@ -442,7 +407,6 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
                     const variant = proto.face_variants[face_index];
                     const mat_key = MaterialKey{ .block_id = block_id, .variant = variant };
 
-                    // acquire 会递增计数并确保材质在活跃集中
                     var cached = try registry.acquire(mat_key);
 
                     const face_data = getStandardFaceData(local_dir);
@@ -476,23 +440,8 @@ pub fn buildChunkMesh(chunk: *const Chunk, registry: *MaterialRegistry) !void {
         }
     }
 
-    // 卸载废弃材质 + 上传网格 + 清空并重置计数
-    var iter = registry.active_materials.iterator();
-    while (iter.next()) |entry| {
-        const id: MaterialId = @enumFromInt(entry[0]);
-        if (registry.materials.getPtr(id).*) |*cached| {
-            if (cached.ref_count == 0) { // 本轮构建没有用到，卸载
-                cached.deinit(allocator);
-                registry.materials.set(id, null);
-                _ = registry.active_materials.remove(entry[0]);
-            } else { // 用到了：上传数据，然后重置并清空 CPU 网格
-                if (cached.cpu_vertices.items.len > 0)
-                    try cached.uploadMeshData(registry.gctx);
-                cached.ref_count = 0;
-                cached.clearMeshData();
-            }
-        }
-    }
+    // 统一上传网格数据，清理未使用的材质
+    try registry.uploadAndClean();
 }
 
 pub const Direction = enum(u3) {
@@ -526,6 +475,29 @@ pub const Direction = enum(u3) {
             .east => Vec3i.new(1, 0, 0),
         };
     }
+    /// 返回将“上方向 (0,1,0)”旋转到该朝向的四元数
+    pub fn rotation(self: Direction) Quat {
+        return switch (self) {
+            .up => Quat.identity,
+            .down => Quat.fromAxisAngle(Vec3.new(1, 0, 0), std.math.pi),
+            .north => Quat.fromAxisAngle(Vec3.new(1, 0, 0), -std.math.pi / 2.0),
+            .south => Quat.fromAxisAngle(Vec3.new(1, 0, 0), std.math.pi / 2.0),
+            .west => Quat.fromAxisAngle(Vec3.new(0, 0, 1), -std.math.pi / 2.0),
+            .east => Quat.fromAxisAngle(Vec3.new(0, 0, 1), std.math.pi / 2.0),
+        };
+    }
+
+    /// 返回 rotation 的逆（即从该朝向旋转回“上方向”的四元数）
+    pub fn rotationInverse(self: Direction) Quat {
+        return switch (self) {
+            .up => Quat.identity,
+            .down => Quat.fromAxisAngle(Vec3.new(1, 0, 0), -std.math.pi), // 逆：绕 X 轴 -π
+            .north => Quat.fromAxisAngle(Vec3.new(1, 0, 0), std.math.pi / 2.0), // 原有 -π/2 的逆 = +π/2
+            .south => Quat.fromAxisAngle(Vec3.new(1, 0, 0), -std.math.pi / 2.0),
+            .west => Quat.fromAxisAngle(Vec3.new(0, 0, 1), std.math.pi / 2.0), // 原有 -π/2 的逆 = +π/2
+            .east => Quat.fromAxisAngle(Vec3.new(0, 0, 1), -std.math.pi / 2.0),
+        };
+    }
 };
 
 pub const BlockState = struct {
@@ -541,23 +513,6 @@ pub const BlockState = struct {
         };
     }
 };
-
-/// 返回从向量 from 到 to 的最短旋转四元数
-fn fromToRotation(from: Vec3, to: Vec3) Quat {
-    const f = from.norm();
-    const t = to.norm();
-    const dot = f.dot(t);
-    if (dot > 0.9999) return Quat.identity;
-    if (dot < -0.9999) {
-        // 180° 旋转，找一个与 from 垂直的轴
-        const perp = if (@abs(f.x) < 0.9) Vec3.new(1, 0, 0) else Vec3.new(0, 1, 0);
-        const axis = f.cross(perp).norm();
-        return Quat.fromAxisAngle(axis, std.math.pi);
-    }
-    const axis = f.cross(t).norm();
-    const angle = std.math.acos(dot);
-    return Quat.fromAxisAngle(axis, angle);
-}
 
 fn directionFromVec(v: Vec3) Direction {
     const ax = @abs(v.x);
@@ -645,11 +600,7 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
     };
 }
 
-// ---------------------------------------------------------------
-// 物理系统
-// ---------------------------------------------------------------
-
-// 物理常量（可调整）
+/// 物理常量（可调整）
 const GRAVITY: f32 = 25.0;
 const FLUID_GRAVITY: f32 = 5.0;
 const SWIM_UP_SPEED: f32 = 5.0;
