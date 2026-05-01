@@ -1,19 +1,16 @@
-// block_word.zig
+// block_world.zig
 const std = @import("std");
 const Imports = @import("imports.zig");
 const Vec2 = Imports.Vec2;
 const Vec3 = Imports.Vec3;
 const Vec3i = Imports.Vec3i;
-const Vec3u = Imports.Vec3u;
 const Vec4 = Imports.Vec4;
 const Quat = Imports.Quat;
 const Wgpu = Imports.Wgpu;
 const Material = Imports.RendCTX.Material;
-const MaterialConstants = Imports.RendCTX.MaterialConstants;
 const TextureRes = Imports.RendCTX.TextureRes;
 const Gctx = Imports.Gctx;
 const RenderPipeline = @import("render_pipeline.zig");
-const IMG = Imports.zigimg;
 const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
 const Perlin = @import("perlin.zig");
 const VertexAttribute = Imports.RendCTX.VertexAttribute;
@@ -96,11 +93,6 @@ pub const CHUNK_SIZE_Y: u32 = 256;
 pub const CHUNK_SIZE_Z: u32 = 16;
 pub const CHUNK_SIZE_X_I32: i32 = CHUNK_SIZE_X;
 pub const CHUNK_SIZE_Z_I32: i32 = CHUNK_SIZE_Z;
-pub const ChunkSize = Vec3u{
-    .x = CHUNK_SIZE_X,
-    .y = CHUNK_SIZE_Y,
-    .z = CHUNK_SIZE_Z,
-};
 
 pub const Chunk = struct {
     blocks: [CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockState,
@@ -413,7 +405,10 @@ pub fn buildChunkMeshCPU(
     allocator: std.mem.Allocator,
     chunk_origin: Vec3i,
     chunk: *const Chunk,
-    world: *BlockWorld,
+    nb_west: ?*const Chunk,
+    nb_east: ?*const Chunk,
+    nb_north: ?*const Chunk,
+    nb_south: ?*const Chunk,
 ) !MeshBuildResult {
     var result = MeshBuildResult{
         .origin = chunk_origin,
@@ -447,11 +442,24 @@ pub fn buildChunkMeshCPU(
                         {
                             neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
                         } else {
-                            const wn_x = chunk_origin.x + nx;
-                            const wn_z = chunk_origin.z + nz;
-                            const nb_origin = BlockWorld.chunkOrigin(wn_x, wn_z);
-                            if (world.chunks.getPtr(nb_origin)) |nb_loaded| {
-                                neighbor = BlockWorld.getBlockAtFromChunk(nb_loaded.chunk, nb_origin, wn_x, ny, wn_z);
+                            const nb_chunk: ?*const Chunk = switch (world_dir) {
+                                .west => nb_west,
+                                .east => nb_east,
+                                .north => nb_north,
+                                .south => nb_south,
+                                else => null,
+                            };
+                            if (nb_chunk) |nb| {
+                                const wn_x = chunk_origin.x + nx;
+                                const wn_z = chunk_origin.z + nz;
+                                const nb_origin = BlockWorld.chunkOrigin(wn_x, wn_z);
+                                const local_nx = wn_x - nb_origin.x;
+                                const local_nz = wn_z - nb_origin.z;
+                                if (local_nx >= 0 and local_nx < CHUNK_SIZE_X and
+                                    local_nz >= 0 and local_nz < CHUNK_SIZE_Z)
+                                {
+                                    neighbor = nb.blocks[@intCast(local_nx)][@intCast(ny)][@intCast(local_nz)].block_id;
+                                }
                             } else {
                                 continue;
                             }
@@ -526,12 +534,6 @@ pub fn applyMeshResult(
     }
 
     try cache.uploadAll();
-}
-
-pub fn buildChunkMesh(chunk_origin: Vec3i, chunk: *const Chunk, cache: *ChunkMeshCache, world: *BlockWorld) !void {
-    var result = try buildChunkMeshCPU(cache.allocator, chunk_origin, chunk, world);
-    defer result.deinit();
-    try applyMeshResult(cache, &result);
 }
 
 pub const Direction = enum(u3) {
@@ -709,14 +711,15 @@ pub const BlockWorld = struct {
     completed_mutex: std.Thread.Mutex = .{},
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     worker: ?std.Thread = null,
+    worker_gpa: std.heap.GeneralPurposeAllocator(.{}),
 
-    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline) !BlockWorld {
+    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, max_chunks: usize) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
         errdefer material_registry.deinit();
 
         var chunks = std.AutoHashMap(Vec3i, LoadedChunk).init(allocator);
         errdefer chunks.deinit();
-        try chunks.ensureTotalCapacity(@intCast(128));
+        try chunks.ensureTotalCapacity(@intCast(max_chunks));
 
         var pending = std.AutoHashMap(Vec3i, void).init(allocator);
         errdefer pending.deinit();
@@ -729,6 +732,7 @@ pub const BlockWorld = struct {
             .chunks = chunks,
             .pending = pending,
             .completed = .{},
+            .worker_gpa = .{},
         };
     }
 
@@ -744,15 +748,20 @@ pub const BlockWorld = struct {
         }
         self.worker = null;
 
-        // 清理剩余completed结果
+        // 清理剩余completed结果（由worker_gpa分配）
         for (self.completed.items) |*r| r.deinit();
-        self.completed.deinit(self.allocator);
+        self.completed.deinit(self.worker_gpa.allocator());
+
+        // 清空pending，否则unloadChunk会跳过这些区块导致泄漏
+        self.pending.clearRetainingCapacity();
 
         self.clearAllChunks();
         self.chunks.deinit();
         self.pending.deinit();
         self.material_registry.deinit();
         self.collision_list.deinit(self.allocator);
+
+        _ = self.worker_gpa.deinit();
     }
 
     pub fn chunkOrigin(world_x: i32, world_z: i32) Vec3i {
@@ -781,7 +790,9 @@ pub const BlockWorld = struct {
 
         for (self.completed.items) |*result| {
             if (self.chunks.getPtr(result.origin)) |loaded| {
-                applyMeshResult(&loaded.mesh_cache, result) catch {};
+                applyMeshResult(&loaded.mesh_cache, result) catch |err| {
+                    std.debug.print("applyMeshResult failed: {}\n", .{err});
+                };
             }
             result.deinit();
         }
@@ -798,25 +809,25 @@ pub const BlockWorld = struct {
             mesh_cache.deinit();
             self.allocator.destroy(chunk);
         }
-        try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache });
-        try self.enqueueMeshBuild(origin);
+        // 持锁写chunks和pending，防止与worker的HashMap读并发
+        {
+            self.pending_mutex.lock();
+            defer self.pending_mutex.unlock();
 
-        const neighbor_offsets = [_]struct { x: i32, z: i32 }{
-            .{ .x = -1, .z = 0 },
-            .{ .x = 1, .z = 0 },
-            .{ .x = 0, .z = -1 },
-            .{ .x = 0, .z = 1 },
-        };
-        for (neighbor_offsets) |noff| {
-            const nb_origin = Vec3i.new(
-                origin.x + noff.x * CHUNK_SIZE_X_I32,
-                0,
-                origin.z + noff.z * CHUNK_SIZE_Z_I32,
-            );
-            if (nb_origin.x == origin.x and nb_origin.z == origin.z) continue;
-            if (self.chunks.getPtr(nb_origin)) |nb_loaded| {
-                if (nb_loaded.chunk != chunk) {
-                    try self.enqueueMeshBuild(nb_origin);
+            try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache });
+            std.debug.assert(self.chunks.count() <= self.chunks.capacity());
+            try self.pending.put(origin, {});
+
+            for (NEIGHBOR_OFFSETS[1..]) |noff| {
+                const nb_origin = Vec3i.new(
+                    origin.x + noff.x * CHUNK_SIZE_X_I32,
+                    0,
+                    origin.z + noff.z * CHUNK_SIZE_Z_I32,
+                );
+                if (self.chunks.getPtr(nb_origin)) |nb_loaded| {
+                    if (nb_loaded.chunk != chunk) {
+                        try self.pending.put(nb_origin, {});
+                    }
                 }
             }
         }
@@ -1172,6 +1183,7 @@ pub const AABB = struct {
 };
 
 fn workerFn(world: *BlockWorld) void {
+    const alloc = world.worker_gpa.allocator();
     while (world.running.load(.acquire)) {
         // 取任务
         world.pending_mutex.lock();
@@ -1201,7 +1213,12 @@ fn workerFn(world: *BlockWorld) void {
 
         if (origin) |o| {
             if (loaded_ptr_chunks[0]) |loaded| {
-                var result = buildChunkMeshCPU(world.allocator, o, loaded.chunk, world) catch {
+                const nb_w: ?*const Chunk = if (loaded_ptr_chunks[1]) |l| l.chunk else null;
+                const nb_e: ?*const Chunk = if (loaded_ptr_chunks[2]) |l| l.chunk else null;
+                const nb_n: ?*const Chunk = if (loaded_ptr_chunks[3]) |l| l.chunk else null;
+                const nb_s: ?*const Chunk = if (loaded_ptr_chunks[4]) |l| l.chunk else null;
+
+                var result = buildChunkMeshCPU(alloc, o, loaded.chunk, nb_w, nb_e, nb_n, nb_s) catch {
                     // 释放所有build_lock
                     for (loaded_ptr_chunks) |opt_l| {
                         if (opt_l) |l| l.build_lock.store(false, .release);
@@ -1215,7 +1232,7 @@ fn workerFn(world: *BlockWorld) void {
                 }
 
                 world.completed_mutex.lock();
-                world.completed.append(world.allocator, result) catch {
+                world.completed.append(alloc, result) catch {
                     result.deinit();
                 };
                 world.completed_mutex.unlock();

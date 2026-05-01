@@ -15,8 +15,7 @@ block_world: BlockWorld.BlockWorld,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
-    var main_menu = @import("ui/main_menu.zig"){};
-
+    // var main_menu = @import("ui/main_menu.zig"){};
     // 创建玩家实体
     const player_entity = self.registry.create();
     self.registry.add(player_entity, Comps.Player{ .id = self.player_id });
@@ -50,6 +49,7 @@ pub fn start(self: *Game) !void {
     // 等待worker完成初始区块的mesh构建
     while (self.block_world.pendingCount() > 0) {
         try self.block_world.processCompletedBuilds();
+        std.Thread.yield() catch {};
     }
 
     // 测试用静态模型实体
@@ -73,61 +73,37 @@ pub fn start(self: *Game) !void {
     self.registry.add(e3, Comps.OnGround{ .value = false });
     self.registry.add(e3, Comps.MoveIntent{});
 
-    var i: ECS.Entity = undefined;
+    // var i: ECS.Entity = undefined;
 
     // 主循环
     while (!self.window.shouldClose()) {
         self.input.beginFrame();
         self.window.pollEvents();
-        if (!main_menu.visible) {
-            if (self.input.isKeyDown(.i)) {
-                const e4 = self.registry.create();
-                self.registry.add(e4, Comps.ModelName{ .id = .fromName("BarramundiFish") });
-                self.registry.add(e4, Comps.Position{ .vec = .new(0, 80, -4) });
-                self.registry.add(e4, Comps.Velocity{ .vec = Vec3.zero });
-                self.registry.add(e4, Comps.Collider{});
-                self.registry.add(e4, Comps.MoveSpeed{ .value = 4.0 });
-                self.registry.add(e4, Comps.JumpVelocity{ .value = 8.0 });
-                self.registry.add(e4, Comps.OnGround{ .value = false });
-                self.registry.add(e4, Comps.MoveIntent{});
-            }
+        // if (!main_menu.visible) {
 
-            if (self.input.isKeyDown(.o)) {
-                i = self.registry.create();
-                self.registry.add(i, Comps.ModelName{ .id = .fromName("Buggy") });
-                self.registry.add(i, Comps.Position{ .vec = .new(0, 80, 8) });
-                self.registry.add(i, Comps.Velocity{ .vec = Vec3.zero });
-                self.registry.add(i, Comps.Collider{});
-                self.registry.add(i, Comps.MoveSpeed{ .value = 4.0 });
-                self.registry.add(i, Comps.JumpVelocity{ .value = 8.0 });
-                self.registry.add(i, Comps.OnGround{ .value = false });
-                self.registry.add(i, Comps.MoveIntent{});
-            }
+        if (self.input.isKeyDown(.p))
+            self.window.setWindowShouldClose();
 
-            if (self.input.isKeyDown(.delete)) {
-                self.registry.destroy(i);
-            }
+        // 1. 输入 -> MoveIntent
+        produceMoveIntent(self);
+        // 2. 物理
+        self.block_world.updatePhysics(&self.registry, self.window.delta_time);
+        // 3. 摄像机同步
+        syncCameraFromPlayer(self);
 
-            // 1. 输入 -> MoveIntent
-            produceMoveIntent(self);
-            // 2. 物理
-            self.block_world.updatePhysics(&self.registry, self.window.delta_time);
-            // 3. 摄像机同步
-            syncCameraFromPlayer(self);
+        // 4. 动态加载/卸载区块
+        try updateChunks(self);
 
-            // 4. 动态加载/卸载区块
-            try updateChunks(self);
-
-            if (self.input.isMouseButtonDown(.mouse_left)) {
-                try tryBreakBlock(self); // 左键破坏
-            }
-            if (self.input.isMouseButtonDown(.mouse_right)) {
-                try tryPlaceBlock(self); // 右键放置
-            }
+        if (self.input.isMouseButtonDown(.mouse_left)) {
+            try tryBreakBlock(self); // 左键破坏
         }
-        self.ui_system.beginFrame();
-        main_menu.update(self);
-        try self.ui_system.endFrame(&self.gctx);
+        if (self.input.isMouseButtonDown(.mouse_right)) {
+            try tryPlaceBlock(self); // 右键放置
+        }
+        // }
+        // self.ui_system.beginFrame();
+        // main_menu.update(self);
+        // try self.ui_system.endFrame(&self.gctx);
         // 5. 处理待构建的区块mesh（可能由异步worker完成）
         try self.block_world.processCompletedBuilds();
         Render.draw(self);
@@ -181,7 +157,9 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.ui_system = ui_system;
 
     // 测试方块世界
-    self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline);
+    const load_range: i32 = 1;
+    const max_chunks: usize = @intCast((2 * load_range + 1) * (2 * load_range + 1) * 4);
+    self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
     try self.block_world.spawnWorker();
 
     // 返回实例
