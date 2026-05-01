@@ -517,14 +517,7 @@ pub const Direction = enum(u3) {
     }
 
     pub fn offset(self: Direction) Vec3i {
-        return switch (self) {
-            .up => Vec3i.new(0, 1, 0),
-            .down => Vec3i.new(0, -1, 0),
-            .north => Vec3i.new(0, 0, -1),
-            .south => Vec3i.new(0, 0, 1),
-            .west => Vec3i.new(-1, 0, 0),
-            .east => Vec3i.new(1, 0, 0),
-        };
+        return self.normal().toVec3iFloor();
     }
     pub fn rotation(self: Direction) Quat {
         return switch (self) {
@@ -576,6 +569,10 @@ const FaceData = struct {
     uvs: [4]Vec2,
 };
 
+const DEFAULT_UVS = [4]Vec2{
+    Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
+};
+
 fn getStandardFaceData(local_dir: Direction) FaceData {
     const h = 0.5;
     return switch (local_dir) {
@@ -586,9 +583,7 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
                 Vec3.new(h, h, h),
                 Vec3.new(-h, h, h),
             },
-            .uvs = .{
-                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
-            },
+            .uvs = DEFAULT_UVS,
         },
         .down => FaceData{
             .positions = .{
@@ -597,9 +592,7 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
                 Vec3.new(h, -h, -h),
                 Vec3.new(-h, -h, -h),
             },
-            .uvs = .{
-                Vec2.new(0, 0), Vec2.new(1, 0), Vec2.new(1, 1), Vec2.new(0, 1),
-            },
+            .uvs = .{ Vec2.new(0, 0), Vec2.new(1, 0), Vec2.new(1, 1), Vec2.new(0, 1) },
         },
         .north => FaceData{
             .positions = .{
@@ -608,9 +601,7 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
                 Vec3.new(h, h, -h),
                 Vec3.new(-h, h, -h),
             },
-            .uvs = .{
-                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
-            },
+            .uvs = DEFAULT_UVS,
         },
         .south => FaceData{
             .positions = .{
@@ -619,9 +610,7 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
                 Vec3.new(-h, h, h),
                 Vec3.new(h, h, h),
             },
-            .uvs = .{
-                Vec2.new(1, 1), Vec2.new(0, 1), Vec2.new(0, 0), Vec2.new(1, 0),
-            },
+            .uvs = .{ Vec2.new(1, 1), Vec2.new(0, 1), Vec2.new(0, 0), Vec2.new(1, 0) },
         },
         .east => FaceData{
             .positions = .{
@@ -630,9 +619,7 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
                 Vec3.new(h, h, h),
                 Vec3.new(h, h, -h),
             },
-            .uvs = .{
-                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
-            },
+            .uvs = DEFAULT_UVS,
         },
         .west => FaceData{
             .positions = .{
@@ -641,9 +628,7 @@ fn getStandardFaceData(local_dir: Direction) FaceData {
                 Vec3.new(-h, h, -h),
                 Vec3.new(-h, h, h),
             },
-            .uvs = .{
-                Vec2.new(0, 1), Vec2.new(1, 1), Vec2.new(1, 0), Vec2.new(0, 0),
-            },
+            .uvs = DEFAULT_UVS,
         },
     };
 }
