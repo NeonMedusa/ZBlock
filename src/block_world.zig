@@ -15,6 +15,7 @@ const AABB = @import("aabb.zig").AABB;
 const Direction = @import("direction.zig").Direction;
 const BlockId = @import("block_registry.zig").BlockId;
 const BlockState = @import("block_registry.zig").BlockState;
+const Pathfind = @import("pathfind.zig");
 
 pub const CHUNK_SIZE_X: u32 = 16;
 pub const CHUNK_SIZE_Y: u32 = 256;
@@ -408,6 +409,70 @@ pub const BlockWorld = struct {
                         vel_a.vec.z -= nz * push;
                         vel_b.vec.x += nx * push;
                         vel_b.vec.z += nz * push;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, player_pos: Vec3, dt: f32) void {
+        const DETECT_RANGE: f32 = 16.0;
+        const PATH_INTERVAL: f32 = 0.25;
+
+        var view = registry.view(.{
+            Comps.Enemy,          Comps.Position, Comps.Velocity,     Comps.MoveSpeed,
+            Comps.MoveIntent,     Comps.OnGround, Comps.JumpVelocity, Comps.Collider,
+            Comps.AttackCooldown,
+        }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            const pos = view.get(Comps.Position, entity);
+            const enemy = view.get(Comps.Enemy, entity);
+            const info = enemy.type_id.info();
+            const collider = view.get(Comps.Collider, entity);
+            var intent = view.get(Comps.MoveIntent, entity);
+            const on_ground = view.get(Comps.OnGround, entity);
+            var cooldown = view.get(Comps.AttackCooldown, entity);
+
+            const dx = player_pos.x - pos.vec.x;
+            const dz = player_pos.z - pos.vec.z;
+            const dist = @sqrt(dx * dx + dz * dz);
+
+            intent.jump = false;
+
+            if (cooldown.timer > 0) {
+                cooldown.timer -= dt;
+            }
+
+            if (dist < info.attack_range and cooldown.timer <= 0) {
+                cooldown.timer = 0.8;
+            }
+
+            if (dist < DETECT_RANGE and dist > 0.5 and cooldown.timer <= 0) {
+                cooldown.timer = PATH_INTERVAL;
+                if (Pathfind.findPathStep(self.allocator, self, pos.vec, player_pos) catch null) |dir| {
+                    const target_x = @floor(pos.vec.x + dir.x * 1.5) + 0.5;
+                    const target_z = @floor(pos.vec.z + dir.y * 1.5) + 0.5;
+                    const tdx = target_x - pos.vec.x;
+                    const tdz = target_z - pos.vec.z;
+                    const tdist = @sqrt(tdx * tdx + tdz * tdz);
+                    if (tdist > 0.05) {
+                        intent.direction = Vec3.new(tdx / tdist, 0, tdz / tdist);
+                    }
+                }
+            }
+
+            if (intent.direction.x != 0 or intent.direction.z != 0) {
+                const ahead = pos.vec.add(intent.direction.norm().scale(0.6));
+                const block_ahead = self.getBlockAt(ahead);
+                if (block_ahead.prototype().is_solid and on_ground.value) {
+                    const above = ahead.add(Vec3.new(0, collider.height + 0.1, 0));
+                    if (!self.getBlockAt(above).prototype().is_solid) {
+                        // 头顶有空间才跳（低矮隧道中抑制跳跃）
+                        const head_above = pos.vec.add(Vec3.new(0, collider.height + 0.1, 0));
+                        if (!self.getBlockAt(head_above).prototype().is_solid) {
+                            intent.jump = true;
+                        }
                     }
                 }
             }

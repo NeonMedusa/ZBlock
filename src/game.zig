@@ -69,13 +69,15 @@ pub fn start(self: *Game) !void {
             produceMoveIntent(self);
             // 2. 物理
             self.block_world.updatePhysics(&self.registry, self.window.delta_time);
-            // 3. 摄像机同步
+            // 3. AI 寻路
+            self.block_world.updateAI(&self.registry, self.camera.position, self.window.delta_time);
+            // 4. 摄像机同步
             syncCameraFromPlayer(self);
 
-            // 4. 动态加载/卸载区块
+            // 5. 动态加载/卸载区块
             try updateChunks(self);
 
-            // 5. 敌人更新
+            // 6. 敌人更新
             try updateEnemies(self);
 
             if (self.input.isMouseButtonDown(.mouse_left)) {
@@ -280,7 +282,7 @@ fn tryPlaceBlock(self: *Game) !void {
         }
     }
 
-    if (!can_place) return;
+    // if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }
@@ -334,7 +336,7 @@ fn updateEnemies(self: *Game) !void {
     // 生成敌人
     {
         var enemy_count: u32 = 0;
-        var eview = self.registry.view(.{ Comps.Enemy }, .{});
+        var eview = self.registry.view(.{Comps.Enemy}, .{});
         var eiter = eview.entityIterator();
         while (eiter.next()) |_| {
             enemy_count += 1;
