@@ -4,7 +4,6 @@ pub fn draw(game: *Game) void {
     game.res_manager.resetRefCount();
     defer game.res_manager.removeZeroRefModel();
 
-    // 获取当前帧的纹理
     var surface_texture: Wgpu.WGPUSurfaceTexture = undefined;
     Wgpu.wgpuSurfaceGetCurrentTexture(game.gctx.surface, &surface_texture);
 
@@ -14,7 +13,6 @@ pub fn draw(game: *Game) void {
     const encoder_desc = Wgpu.WGPUCommandEncoderDescriptor{};
     const encoder = Wgpu.wgpuDeviceCreateCommandEncoder(game.gctx.device, &encoder_desc);
 
-    // 更新scene_uniform_buffer
     Wgpu.wgpuQueueWriteBuffer(
         game.gctx.queue,
         game.res_manager.scene_uniform_buffer,
@@ -23,9 +21,11 @@ pub fn draw(game: *Game) void {
         Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
     );
 
-    // ========== 第一步：收集所有游戏实体和渲染实例的变换数据 ==========
+    // ========== 单次遍历：收集实体/实例数据 + 构建DrawBatch ==========
     var entity_idx: u32 = 0;
     var ins_idx: u32 = 0;
+    game.res_manager.draw_batch_count = 0;
+
     var view = game.registry.view(.{ Comps.ModelName, Comps.Position }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
@@ -33,16 +33,27 @@ pub fn draw(game: *Game) void {
         game.res_manager.entities_data[entity_idx] = EntityData{
             .transform = Mat4.fromTranslate(entity_pos.vec),
         };
+
         const model_name = view.getConst(Comps.ModelName, entity);
-        const model = game.res_manager.getOrLoadModel(model_name.string);
+        const model = game.res_manager.getOrLoadModel(model_name.id);
+
         for (model.nodes) |node| {
             if (node.mesh) |mesh_idx| {
                 const mesh = model.meshes[mesh_idx];
-                for (mesh.primitives) |_| {
+                for (mesh.primitives) |primitive| {
                     game.res_manager.instances_data[ins_idx] = .{
                         .transform = node.matrix,
                         .entity_idx = entity_idx,
                     };
+
+                    game.res_manager.draw_batches[game.res_manager.draw_batch_count] = .{
+                        .vertex_buffer = primitive.vertex_buffer,
+                        .index_buffer = primitive.index_buffer,
+                        .index_count = primitive.index_count,
+                        .bind_group = primitive.material.bind_group,
+                        .instance_idx = ins_idx,
+                    };
+                    game.res_manager.draw_batch_count += 1;
                     ins_idx += 1;
                 }
             }
@@ -50,14 +61,13 @@ pub fn draw(game: *Game) void {
         entity_idx += 1;
     }
 
-    // 为方块预留一个实体数据（单位矩阵）
+    // 为区块预留实体/实例
     const chunk_entity_idx = entity_idx;
     game.res_manager.entities_data[chunk_entity_idx] = EntityData{
         .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)),
     };
     entity_idx += 1;
 
-    // 为方块预留一个实例数据（单位矩阵 + 指针）
     const chunk_instance_idx = ins_idx;
     game.res_manager.instances_data[chunk_instance_idx] = InstanceData{
         .transform = Mat4.identity,
@@ -65,7 +75,7 @@ pub fn draw(game: *Game) void {
     };
     ins_idx += 1;
 
-    // 上传实体/实例数据到GPU
+    // 上传 GPU 数据
     if (entity_idx > 0) {
         Wgpu.wgpuQueueWriteBuffer(
             game.gctx.queue,
@@ -85,7 +95,7 @@ pub fn draw(game: *Game) void {
         );
     }
 
-    // ========== 第二步：准备渲染通道 ==========
+    // ========== 渲染通道 ==========
     const color_attachment = Wgpu.WGPURenderPassColorAttachment{
         .view = surface_texture_view,
         .loadOp = Wgpu.WGPULoadOp_Clear,
@@ -116,41 +126,15 @@ pub fn draw(game: *Game) void {
     };
 
     const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
-
-    // ========== 第三步：设置主渲染管线并开始绘制 ==========
     Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.handle);
     Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
 
-    // 重新遍历并绘制（此时GPU已经收到实例数据）
-    var draw_entity_idx: u32 = 0;
-    var draw_ins_idx: u32 = 0;
-    iter.reset(); // 重置迭代器
-    while (iter.next()) |entity| {
-        const model_name = game.registry.getConst(Comps.ModelName, entity);
-        const model = game.res_manager.getOrLoadModel(model_name.string);
-        for (model.nodes) |node| {
-            if (node.mesh) |mesh_idx| {
-                const mesh = model.meshes[mesh_idx];
-                for (mesh.primitives) |primitive| {
-                    // 设置顶点/索引缓冲区
-                    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, primitive.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(primitive.vertex_buffer));
-                    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, primitive.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(primitive.index_buffer));
-                    // 设置材质绑定组
-                    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, primitive.material.bind_group, 0, null);
-                    // 绘制
-                    Wgpu.wgpuRenderPassEncoderDrawIndexed(
-                        pass,
-                        primitive.index_count,
-                        1,
-                        0,
-                        0,
-                        draw_ins_idx,
-                    );
-                    draw_ins_idx += 1;
-                }
-            }
-        }
-        draw_entity_idx += 1;
+    // 绘制所有模型实体
+    for (game.res_manager.draw_batches[0..game.res_manager.draw_batch_count]) |batch| {
+        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, batch.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(batch.vertex_buffer));
+        Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, batch.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(batch.index_buffer));
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, batch.bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, batch.index_count, 1, 0, 0, batch.instance_idx);
     }
 
     // 绘制所有区块
@@ -177,23 +161,8 @@ pub fn draw(game: *Game) void {
                     0,
                     Wgpu.wgpuBufferGetSize(mesh.index_buffer),
                 );
-
-                Wgpu.wgpuRenderPassEncoderSetBindGroup(
-                    pass,
-                    1,
-                    global_mat.material.bind_group,
-                    0,
-                    null,
-                );
-
-                Wgpu.wgpuRenderPassEncoderDrawIndexed(
-                    pass,
-                    mesh.index_count,
-                    1,
-                    0,
-                    0,
-                    chunk_instance_idx,
-                );
+                Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, global_mat.material.bind_group, 0, null);
+                Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, mesh.index_count, 1, 0, 0, chunk_instance_idx);
             }
         }
     }
@@ -205,7 +174,6 @@ pub fn draw(game: *Game) void {
     Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.ui_system.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.ui_system.index_buffer));
     Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @as(u32, @intCast(game.ui_system.index_count)), 1, 0, 0, 0);
 
-    // 结束并释放
     Wgpu.wgpuRenderPassEncoderEnd(pass);
     Wgpu.wgpuRenderPassEncoderRelease(pass);
 
@@ -218,30 +186,18 @@ pub fn draw(game: *Game) void {
     Wgpu.wgpuTextureRelease(surface_texture.texture);
 }
 
-const std = @import("std");
+const Imports = @import("imports.zig");
 
-const Wgpu = @import("imports.zig").Wgpu;
-const Gctx = @import("gctx.zig");
+const Wgpu = Imports.Wgpu;
 
-const Algebra = @import("algebra.zig");
+const Algebra = Imports.Algebra;
 const Vec3 = Algebra.Vec3;
-const Quat = Algebra.Quat;
 const Mat4 = Algebra.Mat4;
 
-const RenderPipeline = @import("render_pipeline.zig");
-
-const RendCTX = @import("rend_ctx.zig");
-const SceneUniform = RendCTX.SceneUniform;
-const VertexAttribute = RendCTX.VertexAttribute;
+const RendCTX = Imports.RendCTX;
 const EntityData = RendCTX.EntityData;
 const InstanceData = RendCTX.InstanceData;
 
-const UiSystem = @import("ui_system.zig");
-const Imports = @import("imports.zig");
 const Game = Imports.Game;
-const Systems = @import("systems.zig");
 
-const ECS = @import("zigecs");
-const Comps = @import("components.zig").Components;
-
-const Model = @import("rend_ctx.zig").Model;
+const Comps = Imports.Comps;

@@ -1,10 +1,5 @@
-const import = @import("imports.zig");
-const ECS = import.ECS;
-const GltfData = Gltf.Data;
-const IMG = import.zigimg;
+const SparseSet = @import("sparse_set.zig").SparseSet;
 const RenderPipeline = @import("render_pipeline.zig");
-const Imports = @import("imports.zig");
-const Game = Imports.Game;
 
 const Mesh = struct {
     primitives: []Primitive,
@@ -80,7 +75,7 @@ pub const TextureRes = struct {
     }
     /// 从内存中的图像数据加载（支持 PNG、JPG 等格式）
     pub fn loadFromMemory(allocator: std.mem.Allocator, gctx: *Gctx, data: []const u8) !TextureRes {
-        var img = try IMG.Image.fromMemory(allocator, data);
+        var img = try zigimg.Image.fromMemory(allocator, data);
         defer img.deinit(allocator);
 
         if (img.pixels != .rgba32) try img.convert(allocator, .rgba32);
@@ -211,6 +206,51 @@ const Node = struct {
     parent: ?usize,
     matrix: Mat4,
     mesh: ?usize,
+};
+
+pub const ModelInfo = struct {
+    name: [:0]const u8,
+    path: [:0]const u8,
+};
+
+const model_infos = [_]ModelInfo{
+    .{ .name = "foo", .path = "resources/models/foo.glb" },
+    .{ .name = "CesiumMan", .path = "resources/models/CesiumMan.glb" },
+    .{ .name = "Wolf", .path = "resources/models/Wolf.glb" },
+    .{ .name = "Buggy", .path = "resources/models/Buggy.glb" },
+    .{ .name = "BarramundiFish", .path = "resources/models/BarramundiFish.glb" },
+    .{ .name = "Avocado", .path = "resources/models/Avocado.glb" },
+};
+
+pub const MAX_MODELS = model_infos.len;
+
+pub const ModelNames = blk: {
+    var fields: [MAX_MODELS]std.builtin.Type.EnumField = undefined;
+    for (&fields, model_infos, 0..) |*field, def, i|
+        field.* = .{ .name = def.name, .value = i };
+    break :blk @Type(.{ .@"enum" = .{
+        .tag_type = u32,
+        .fields = &fields,
+        .decls = &.{},
+        .is_exhaustive = true,
+    } });
+};
+
+pub const ModelId = enum(u32) {
+    _,
+    pub fn fromInt(i: anytype) ModelId {
+        return @enumFromInt(i);
+    }
+    pub fn fromName(comptime str: []const u8) ModelId {
+        const model_name_val = @field(ModelNames, str);
+        return @enumFromInt(@intFromEnum(model_name_val));
+    }
+    pub fn info(self: ModelId) ModelInfo {
+        return model_infos[@intFromEnum(self)];
+    }
+    pub fn name(self: ModelId) [:0]const u8 {
+        return self.info().name;
+    }
 };
 
 pub const Model = struct {
@@ -438,61 +478,64 @@ fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
     return world_matrix;
 }
 
-const ModelRef = struct {
-    name: []const u8,
-    ref_count: u32 = 0,
-    model: Model,
+pub const DrawBatch = struct {
+    vertex_buffer: Wgpu.WGPUBuffer,
+    index_buffer: Wgpu.WGPUBuffer,
+    index_count: u32,
+    bind_group: Wgpu.WGPUBindGroup,
+    instance_idx: u32,
 };
 
 pub const ResManager = struct {
-    const MAX_ENTITIES = 500; // 限制最大渲染游戏实体数
-    const MAX_INSTANCES = 3 * MAX_ENTITIES; // 限制最大渲染实例数
+    const MAX_ENTITIES = 500;
+    const MAX_INSTANCES = 3 * MAX_ENTITIES;
 
-    scene_uniform_buffer: Wgpu.WGPUBuffer, // 场景常量缓冲区
+    scene_uniform_buffer: Wgpu.WGPUBuffer,
     entities_data: []EntityData,
-    entities_data_buffer: Wgpu.WGPUBuffer, // 游戏实体的世界矩阵缓冲区
+    entities_data_buffer: Wgpu.WGPUBuffer,
     instances_data: []InstanceData,
-    instances_data_buffer: Wgpu.WGPUBuffer, // 渲染实例的世界矩阵缓冲区
+    instances_data_buffer: Wgpu.WGPUBuffer,
+
+    draw_batches: [MAX_INSTANCES]DrawBatch = undefined,
+    draw_batch_count: u32 = 0,
 
     allocator: std.mem.Allocator,
-    models: std.StringHashMap(ModelRef),
+    models: [MAX_MODELS]Model = undefined,
+    ref_counts: [MAX_MODELS]u32 = [_]u32{0} ** MAX_MODELS,
+    active_models: SparseSet(bool, MAX_MODELS),
     gctx: *Gctx,
     pipeline: *RenderPipeline,
 
-    /// 获取或加载模型，调用此函数时会增加ref_count
-    pub fn getOrLoadModel(self: *ResManager, name: []const u8) Model {
-        if (self.models.getPtr(name)) |model_ref| {
-            model_ref.ref_count += 1;
-            return model_ref.model;
-        }
-        const model_ref = ModelRef{
-            .name = name,
-            .ref_count = 1,
-            .model = Model.load(
+    pub fn getOrLoadModel(self: *ResManager, id: ModelId) *const Model {
+        const idx = @intFromEnum(id);
+        self.ref_counts[idx] += 1;
+        if (!self.active_models.has(idx)) {
+            self.models[idx] = Model.load(
                 self.allocator,
                 self.gctx,
-                name,
+                id.name(),
                 self.pipeline,
-            ) catch unreachable,
-        };
-        self.models.put(name, model_ref) catch unreachable;
-        return self.models.getPtr(name).?.model;
+            ) catch |err| {
+                std.debug.print("Failed to load model '{s}': {}\n", .{ id.name(), err });
+                if (idx == 0) @panic("Cannot load default model");
+                return self.getOrLoadModel(ModelId.fromInt(0));
+            };
+            self.active_models.set(self.allocator, idx, true);
+        }
+        return &self.models[idx];
     }
 
-    /// 归零所有模型的引用计数，应该在每帧开始时调用
     pub fn resetRefCount(self: *ResManager) void {
-        var iter = self.*.models.iterator();
-        while (iter.next()) |entry|
-            entry.value_ptr.ref_count = 0;
+        @memset(&self.ref_counts, 0);
     }
 
-    /// 卸载所有引用为0的模型，应该在每帧结束时调用
     pub fn removeZeroRefModel(self: *ResManager) void {
-        var iter = self.*.models.iterator();
+        var iter = self.active_models.iterator();
         while (iter.next()) |entry| {
-            if (entry.value_ptr.ref_count == 0) {
-                entry.value_ptr.model.deinit(self.allocator);
-                _ = self.models.remove(entry.key_ptr.*);
+            const idx = entry[0];
+            if (self.ref_counts[idx] == 0) {
+                self.models[idx].deinit(self.allocator);
+                _ = self.active_models.remove(idx);
             }
         }
     }
@@ -524,7 +567,7 @@ pub const ResManager = struct {
             .allocator = allocator,
             .pipeline = pipeline,
             .gctx = gctx,
-            .models = std.StringHashMap(ModelRef).init(allocator),
+            .active_models = SparseSet(bool, MAX_MODELS).init(),
         };
     }
 
@@ -535,10 +578,11 @@ pub const ResManager = struct {
         allocator.free(self.instances_data);
         Wgpu.wgpuBufferRelease(self.instances_data_buffer);
 
-        var models_it = self.models.iterator();
-        while (models_it.next()) |entry|
-            entry.value_ptr.model.deinit(self.allocator);
-        self.models.deinit();
+        var iter = self.active_models.iterator();
+        while (iter.next()) |entry| {
+            self.models[entry[0]].deinit(self.allocator);
+        }
+        self.active_models.deinit(self.allocator);
     }
 };
 
@@ -582,17 +626,19 @@ pub const InstanceData = struct {
     _padding: [3]f32 = undefined,
 };
 
-const std = @import("std");
-const Gctx = @import("gctx.zig");
+const Imports = @import("imports.zig");
 
-const Algebra = @import("algebra.zig");
+const std = @import("std");
+const Gctx = Imports.Gctx;
+
+const Algebra = Imports.Algebra;
 const Vec2 = Algebra.Vec2;
 const Vec3 = Algebra.Vec3;
 const Vec4 = Algebra.Vec4;
 const Quat = Algebra.Quat;
 const Mat4 = Algebra.Mat4;
 
-const Window = @import("window.zig");
-const Gltf = @import("zgltf").Gltf;
-const Wgpu = @import("imports.zig").Wgpu;
-const zigimg = @import("zigimg");
+const Window = Imports.Window;
+const Gltf = Imports.Gltf;
+const Wgpu = Imports.Wgpu;
+const zigimg = Imports.zigimg;

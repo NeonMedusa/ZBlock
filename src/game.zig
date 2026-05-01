@@ -50,7 +50,7 @@ pub fn start(self: *Game) !void {
 
     // 测试用静态模型实体
     const e2 = self.registry.create();
-    self.registry.add(e2, Comps.ModelName{ .string = "CesiumMan" });
+    self.registry.add(e2, Comps.ModelName{ .id = .fromName("CesiumMan") });
     self.registry.add(e2, Comps.Position{ .vec = Vec3.new(8, 100, 8) });
     self.registry.add(e2, Comps.Velocity{ .vec = Vec3.zero });
     self.registry.add(e2, Comps.Collider{});
@@ -60,14 +60,50 @@ pub fn start(self: *Game) !void {
     self.registry.add(e2, Comps.MoveIntent{});
 
     const e3 = self.registry.create();
-    self.registry.add(e3, Comps.ModelName{ .string = "CesiumMan" });
-    self.registry.add(e3, Comps.Position{ .vec = .new(0, 2, 0) });
+    self.registry.add(e3, Comps.ModelName{ .id = .fromName("Wolf") });
+    self.registry.add(e3, Comps.Position{ .vec = .new(3, 80, 3) });
+    self.registry.add(e3, Comps.Velocity{ .vec = Vec3.zero });
+    self.registry.add(e3, Comps.Collider{});
+    self.registry.add(e3, Comps.MoveSpeed{ .value = 4.0 });
+    self.registry.add(e3, Comps.JumpVelocity{ .value = 8.0 });
+    self.registry.add(e3, Comps.OnGround{ .value = false });
+    self.registry.add(e3, Comps.MoveIntent{});
+
+    var i: ECS.Entity = undefined;
 
     // 主循环
     while (!self.window.shouldClose()) {
         self.input.beginFrame();
         self.window.pollEvents();
         if (!main_menu.visible) {
+            if (self.input.isKeyDown(.i)) {
+                const e4 = self.registry.create();
+                self.registry.add(e4, Comps.ModelName{ .id = .fromName("BarramundiFish") });
+                self.registry.add(e4, Comps.Position{ .vec = .new(0, 80, -4) });
+                self.registry.add(e4, Comps.Velocity{ .vec = Vec3.zero });
+                self.registry.add(e4, Comps.Collider{});
+                self.registry.add(e4, Comps.MoveSpeed{ .value = 4.0 });
+                self.registry.add(e4, Comps.JumpVelocity{ .value = 8.0 });
+                self.registry.add(e4, Comps.OnGround{ .value = false });
+                self.registry.add(e4, Comps.MoveIntent{});
+            }
+
+            if (self.input.isKeyDown(.o)) {
+                i = self.registry.create();
+                self.registry.add(i, Comps.ModelName{ .id = .fromName("Buggy") });
+                self.registry.add(i, Comps.Position{ .vec = .new(0, 80, 8) });
+                self.registry.add(i, Comps.Velocity{ .vec = Vec3.zero });
+                self.registry.add(i, Comps.Collider{});
+                self.registry.add(i, Comps.MoveSpeed{ .value = 4.0 });
+                self.registry.add(i, Comps.JumpVelocity{ .value = 8.0 });
+                self.registry.add(i, Comps.OnGround{ .value = false });
+                self.registry.add(i, Comps.MoveIntent{});
+            }
+
+            if (self.input.isKeyDown(.delete)) {
+                self.registry.destroy(i);
+            }
+
             // 1. 输入 -> MoveIntent
             produceMoveIntent(self);
             // 2. 物理
@@ -261,7 +297,7 @@ fn tryPlaceBlock(self: *Game) !void {
         }
     }
 
-    // if (!can_place) return;
+    if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }

@@ -3,11 +3,12 @@ const std = @import("std");
 const Imports = @import("imports.zig");
 const Algebra = Imports.Algebra;
 const Vec3 = Algebra.Vec3;
+const ModelId = Imports.RendCTX.ModelId;
 // 在这里定义所有组件类型
 pub const Components = struct {
     // ---- 身份 ----
     pub const Player = struct { id: u32 = 0 }; // 标记哪个实体是玩家
-    pub const ModelName = struct { string: []const u8 }; // 渲染用模型
+    pub const ModelName = struct { id: ModelId }; // 渲染用模型
 
     // ---- 物理状态 ----
     pub const Position = struct { vec: Vec3 };
