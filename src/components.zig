@@ -4,11 +4,13 @@ const Imports = @import("imports.zig");
 const Algebra = Imports.Algebra;
 const Vec3 = Algebra.Vec3;
 const ModelId = Imports.RendCTX.ModelId;
+const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 // 在这里定义所有组件类型
 pub const Components = struct {
     // ---- 身份 ----
     pub const Player = struct { id: u32 = 0 }; // 标记哪个实体是玩家
     pub const ModelName = struct { id: ModelId }; // 渲染用模型
+    pub const Enemy = struct { type_id: EntityTypeId }; // 标记为敌对实体
 
     // ---- 物理状态 ----
     pub const Position = struct { vec: Vec3 };
@@ -29,6 +31,10 @@ pub const Components = struct {
         jump: bool = false, // 是否按下跳跃
     };
 
-    // 其它
+    // ---- 战斗/生命 ----
     pub const Health = struct { current: f32, max: f32 };
+    pub const AttackCooldown = struct { timer: f32 = 0 }; // 攻击间隔倒计时
+
+    // ---- 玩法 ----
+    pub const SpawnPos = struct { pos: Vec3 }; // 重生点
 };

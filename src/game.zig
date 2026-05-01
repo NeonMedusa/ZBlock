@@ -26,6 +26,8 @@ pub fn start(self: *Game) !void {
     self.registry.add(player_entity, Comps.JumpVelocity{ .value = 8.0 });
     self.registry.add(player_entity, Comps.OnGround{ .value = false });
     self.registry.add(player_entity, Comps.MoveIntent{});
+    self.registry.add(player_entity, Comps.Health{ .current = 100, .max = 100 });
+    self.registry.add(player_entity, Comps.SpawnPos{ .pos = Vec3.new(8, 130, 8) });
 
     // 加载初始区块
     {
@@ -52,29 +54,9 @@ pub fn start(self: *Game) !void {
         std.Thread.yield() catch {};
     }
 
-    // 测试用静态模型实体
-    const e2 = self.registry.create();
-    self.registry.add(e2, Comps.ModelName{ .id = .fromName("CesiumMan") });
-    self.registry.add(e2, Comps.Position{ .vec = Vec3.new(8, 100, 8) });
-    self.registry.add(e2, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(e2, Comps.Collider{ .width = 0.5, .height = 1.4 });
-    self.registry.add(e2, Comps.MoveSpeed{ .value = 4.0 });
-    self.registry.add(e2, Comps.JumpVelocity{ .value = 8.0 });
-    self.registry.add(e2, Comps.OnGround{ .value = false });
-    self.registry.add(e2, Comps.MoveIntent{});
-
-    self.registry.add(e2, Comps.Health{ .current = 50, .max = 50 });
-
-    const e3 = self.registry.create();
-    self.registry.add(e3, Comps.ModelName{ .id = .fromName("Wolf") });
-    self.registry.add(e3, Comps.Position{ .vec = .new(3, 80, 3) });
-    self.registry.add(e3, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(e3, Comps.Collider{ .width = 0.5, .height = 0.5 });
-    self.registry.add(e3, Comps.MoveSpeed{ .value = 4.0 });
-    self.registry.add(e3, Comps.JumpVelocity{ .value = 8.0 });
-    self.registry.add(e3, Comps.OnGround{ .value = false });
-    self.registry.add(e3, Comps.MoveIntent{});
-    self.registry.add(e3, Comps.Health{ .current = 30, .max = 30 });
+    // 测试敌对实体
+    spawnEnemy(self, "zombie", Vec3.new(12, 130, 12)) catch {};
+    spawnEnemy(self, "wolf", Vec3.new(20, 130, 20)) catch {};
 
     // var i: ECS.Entity = undefined;
 
@@ -93,6 +75,9 @@ pub fn start(self: *Game) !void {
             // 4. 动态加载/卸载区块
             try updateChunks(self);
 
+            // 5. 敌人更新
+            try updateEnemies(self);
+
             if (self.input.isMouseButtonDown(.mouse_left)) {
                 try handleLeftClick(self);
             }
@@ -103,7 +88,7 @@ pub fn start(self: *Game) !void {
         self.ui_system.beginFrame();
         main_menu.update(self);
         try self.ui_system.endFrame(&self.gctx);
-        // 5. 处理待构建的区块mesh（可能由异步worker完成）
+        // 6. 处理待构建的区块mesh（可能由异步worker完成）
         try self.block_world.processCompletedBuilds();
         Render.draw(self);
     }
@@ -266,10 +251,10 @@ fn tryPlaceBlock(self: *Game) !void {
         @as(f32, @floatFromInt(place_pos.x)) + 0.5,
         @as(f32, @floatFromInt(place_pos.y)) + 0.5,
         @as(f32, @floatFromInt(place_pos.z)) + 0.5,
-    )) != BlockWorld.BlockId.fromName("air")) return;
+    )) != BlockRegistry.BlockId.fromName("air")) return;
 
     // 放置方块的 AABB
-    const block_box = BlockWorld.AABB{
+    const block_box = AABB{
         .min_x = @floatFromInt(place_pos.x),
         .max_x = @floatFromInt(place_pos.x + 1),
         .min_y = @floatFromInt(place_pos.y),
@@ -298,6 +283,98 @@ fn tryPlaceBlock(self: *Game) !void {
     if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
+}
+
+fn updateEnemies(self: *Game) !void {
+    // 敌人接触伤害
+    {
+        var view = self.registry.view(.{ Comps.Enemy, Comps.Position, Comps.Collider }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |enemy_entity| {
+            const enemy_pos = view.get(Comps.Position, enemy_entity);
+            const enemy_col = view.get(Comps.Collider, enemy_entity);
+            const enemy = view.get(Comps.Enemy, enemy_entity);
+            const info = enemy.type_id.info();
+            const ebox = BlockWorld.BlockWorld.getEntityAABB(enemy_pos.vec, enemy_col);
+
+            var pview = self.registry.view(.{ Comps.Player, Comps.Position, Comps.Collider, Comps.Health }, .{});
+            var piter = pview.entityIterator();
+            while (piter.next()) |player_entity| {
+                const ppos = pview.get(Comps.Position, player_entity);
+                const pcol = pview.get(Comps.Collider, player_entity);
+                var hp = pview.get(Comps.Health, player_entity);
+                const pbox = BlockWorld.BlockWorld.getEntityAABB(ppos.vec, pcol);
+
+                if (ebox.min_x < pbox.max_x and ebox.max_x > pbox.min_x and
+                    ebox.min_y < pbox.max_y and ebox.max_y > pbox.min_y and
+                    ebox.min_z < pbox.max_z and ebox.max_z > pbox.min_z)
+                {
+                    hp.current -= info.attack_damage * self.window.delta_time;
+                    std.debug.print("Player took {d:.2} damage, HP: {d:.1}/{d:.1}\n", .{ info.attack_damage * self.window.delta_time, hp.current, hp.max });
+                }
+            }
+        }
+    }
+
+    // 玩家死亡复活
+    {
+        var view = self.registry.view(.{ Comps.Player, Comps.Position, Comps.Health, Comps.SpawnPos }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            var hp = view.get(Comps.Health, entity);
+            if (hp.current <= 0) {
+                hp.current = hp.max;
+                var pos = view.get(Comps.Position, entity);
+                const spawn = view.get(Comps.SpawnPos, entity);
+                pos.vec = spawn.pos;
+            }
+        }
+    }
+
+    // 生成敌人
+    {
+        var enemy_count: u32 = 0;
+        var eview = self.registry.view(.{ Comps.Enemy }, .{});
+        var eiter = eview.entityIterator();
+        while (eiter.next()) |_| {
+            enemy_count += 1;
+        }
+
+        const MAX_ENEMIES: u32 = 10;
+        if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
+            var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+            var piter = pview.entityIterator();
+            while (piter.next()) |entity| {
+                const ppos = pview.get(Comps.Position, entity);
+                const angle = @as(f32, @floatFromInt(std.crypto.random.int(u32) % 360)) * std.math.pi / 180.0;
+                const r: f32 = 16 + @as(f32, @floatFromInt(std.crypto.random.int(u32) % 16));
+                const sx: f32 = ppos.vec.x + @cos(angle) * r;
+                const sz: f32 = ppos.vec.z + @sin(angle) * r;
+                const sy = Pathfind.getSurfaceY(&self.block_world, @intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
+                if (sy) |y| {
+                    try spawnEnemy(self, "zombie", Vec3.new(sx, @as(f32, @floatFromInt(y)), sz));
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
+    const eid = EntityTypeId.fromName(type_name);
+    const info = eid.info();
+    const entity = self.registry.create();
+    self.registry.add(entity, Comps.Enemy{ .type_id = eid });
+    self.registry.add(entity, Comps.ModelName{ .id = info.model_id });
+    self.registry.add(entity, Comps.Position{ .vec = pos });
+    self.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
+    self.registry.add(entity, Comps.Collider{ .width = info.collider_width, .height = info.collider_height });
+    self.registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });
+    self.registry.add(entity, Comps.JumpVelocity{ .value = info.jump_vel });
+    self.registry.add(entity, Comps.OnGround{ .value = false });
+    self.registry.add(entity, Comps.MoveIntent{});
+    self.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
+    self.registry.add(entity, Comps.AttackCooldown{});
 }
 
 fn updateChunks(self: *Game) !void {
@@ -386,3 +463,7 @@ const Raycast = @import("raycast.zig");
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
 
 const BlockWorld = @import("block_world.zig");
+const BlockRegistry = @import("block_registry.zig");
+const AABB = @import("aabb.zig").AABB;
+const Pathfind = @import("pathfind.zig");
+const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
