@@ -4,6 +4,8 @@ const Vec3 = @import("algebra.zig").Vec3;
 const Vec3i = @import("algebra.zig").Vec3i;
 const BlockId = @import("block_world.zig").BlockId;
 const BlockWorld = @import("block_world.zig").BlockWorld;
+const ECS = @import("zigecs");
+const Comps = @import("components.zig").Components;
 
 pub const Ray = struct {
     origin: Vec3,
@@ -171,4 +173,63 @@ pub fn raycastWorld(world: *BlockWorld, ray: Ray, max_dist: f32) HitResult {
         .point = Vec3.zero,
         .distance = 0,
     };
+}
+
+pub const EntityHitResult = struct {
+    hit: bool,
+    entity: ECS.Entity,
+    distance: f32,
+    point: Vec3,
+};
+
+/// 射线与实体碰撞箱的检测，返回最近的命中实体
+pub fn raycastEntities(registry: *ECS.Registry, ray: Ray, max_dist: f32) EntityHitResult {
+    var closest: EntityHitResult = .{ .hit = false, .entity = undefined, .distance = max_dist, .point = Vec3.zero };
+    var view = registry.view(.{ Comps.Position, Comps.Collider }, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        const pos = view.get(Comps.Position, entity);
+        const col = view.get(Comps.Collider, entity);
+        const half_w = col.width / 2.0;
+        const min_x = pos.vec.x - half_w;
+        const max_x = pos.vec.x + half_w;
+        const min_y = pos.vec.y;
+        const max_y = pos.vec.y + col.height;
+        const min_z = pos.vec.z - half_w;
+        const max_z = pos.vec.z + half_w;
+
+        const t = rayAABB(ray, min_x, max_x, min_y, max_y, min_z, max_z);
+        if (t != null and t.? < closest.distance and t.? > 0) {
+            closest = .{
+                .hit = true,
+                .entity = entity,
+                .distance = t.?,
+                .point = ray.pointAt(t.?),
+            };
+        }
+    }
+    return closest;
+}
+
+fn rayAABB(ray: Ray, min_x: f32, max_x: f32, min_y: f32, max_y: f32, min_z: f32, max_z: f32) ?f32 {
+    const d = ray.direction;
+    const o = ray.origin;
+
+    const tx1 = (min_x - o.x) / d.x;
+    const tx2 = (max_x - o.x) / d.x;
+    var tmin = @min(tx1, tx2);
+    var tmax = @max(tx1, tx2);
+
+    const ty1 = (min_y - o.y) / d.y;
+    const ty2 = (max_y - o.y) / d.y;
+    tmin = @max(tmin, @min(ty1, ty2));
+    tmax = @min(tmax, @max(ty1, ty2));
+
+    const tz1 = (min_z - o.z) / d.z;
+    const tz2 = (max_z - o.z) / d.z;
+    tmin = @max(tmin, @min(tz1, tz2));
+    tmax = @min(tmax, @max(tz1, tz2));
+
+    if (tmax >= tmin) return tmin;
+    return null;
 }

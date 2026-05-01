@@ -15,7 +15,7 @@ block_world: BlockWorld.BlockWorld,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
-    // var main_menu = @import("ui/main_menu.zig"){};
+    var main_menu = @import("ui/main_menu.zig"){};
     // 创建玩家实体
     const player_entity = self.registry.create();
     self.registry.add(player_entity, Comps.Player{ .id = self.player_id });
@@ -57,21 +57,24 @@ pub fn start(self: *Game) !void {
     self.registry.add(e2, Comps.ModelName{ .id = .fromName("CesiumMan") });
     self.registry.add(e2, Comps.Position{ .vec = Vec3.new(8, 100, 8) });
     self.registry.add(e2, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(e2, Comps.Collider{});
+    self.registry.add(e2, Comps.Collider{ .width = 0.5, .height = 1.4 });
     self.registry.add(e2, Comps.MoveSpeed{ .value = 4.0 });
     self.registry.add(e2, Comps.JumpVelocity{ .value = 8.0 });
     self.registry.add(e2, Comps.OnGround{ .value = false });
     self.registry.add(e2, Comps.MoveIntent{});
 
+    self.registry.add(e2, Comps.Health{ .current = 50, .max = 50 });
+
     const e3 = self.registry.create();
     self.registry.add(e3, Comps.ModelName{ .id = .fromName("Wolf") });
     self.registry.add(e3, Comps.Position{ .vec = .new(3, 80, 3) });
     self.registry.add(e3, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(e3, Comps.Collider{});
+    self.registry.add(e3, Comps.Collider{ .width = 0.5, .height = 0.5 });
     self.registry.add(e3, Comps.MoveSpeed{ .value = 4.0 });
     self.registry.add(e3, Comps.JumpVelocity{ .value = 8.0 });
     self.registry.add(e3, Comps.OnGround{ .value = false });
     self.registry.add(e3, Comps.MoveIntent{});
+    self.registry.add(e3, Comps.Health{ .current = 30, .max = 30 });
 
     // var i: ECS.Entity = undefined;
 
@@ -79,31 +82,27 @@ pub fn start(self: *Game) !void {
     while (!self.window.shouldClose()) {
         self.input.beginFrame();
         self.window.pollEvents();
-        // if (!main_menu.visible) {
+        if (!main_menu.visible) {
+            // 1. 输入 -> MoveIntent
+            produceMoveIntent(self);
+            // 2. 物理
+            self.block_world.updatePhysics(&self.registry, self.window.delta_time);
+            // 3. 摄像机同步
+            syncCameraFromPlayer(self);
 
-        if (self.input.isKeyDown(.p))
-            self.window.setWindowShouldClose();
+            // 4. 动态加载/卸载区块
+            try updateChunks(self);
 
-        // 1. 输入 -> MoveIntent
-        produceMoveIntent(self);
-        // 2. 物理
-        self.block_world.updatePhysics(&self.registry, self.window.delta_time);
-        // 3. 摄像机同步
-        syncCameraFromPlayer(self);
-
-        // 4. 动态加载/卸载区块
-        try updateChunks(self);
-
-        if (self.input.isMouseButtonDown(.mouse_left)) {
-            try tryBreakBlock(self); // 左键破坏
+            if (self.input.isMouseButtonDown(.mouse_left)) {
+                try handleLeftClick(self);
+            }
+            if (self.input.isMouseButtonDown(.mouse_right)) {
+                try tryPlaceBlock(self); // 右键放置
+            }
         }
-        if (self.input.isMouseButtonDown(.mouse_right)) {
-            try tryPlaceBlock(self); // 右键放置
-        }
-        // }
-        // self.ui_system.beginFrame();
-        // main_menu.update(self);
-        // try self.ui_system.endFrame(&self.gctx);
+        self.ui_system.beginFrame();
+        main_menu.update(self);
+        try self.ui_system.endFrame(&self.gctx);
         // 5. 处理待构建的区块mesh（可能由异步worker完成）
         try self.block_world.processCompletedBuilds();
         Render.draw(self);
@@ -229,11 +228,25 @@ fn syncCameraFromPlayer(self: *Game) void {
     }
 }
 
-fn tryBreakBlock(self: *Game) !void {
+fn handleLeftClick(self: *Game) !void {
     const ray = self.camera.getCursorRay();
-    const hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
-    if (hit.hit) {
-        try self.block_world.setBlock(hit.block_pos, .fromName("air"));
+
+    // 先检测实体
+    const entity_hit = Raycast.raycastEntities(&self.registry, ray, 8.0);
+    if (entity_hit.hit) {
+        if (self.registry.tryGet(Comps.Health, entity_hit.entity)) |health| {
+            health.current -= 10;
+            if (health.current <= 0) {
+                self.registry.destroy(entity_hit.entity);
+            }
+        }
+        return;
+    }
+
+    // 未命中实体，尝试破坏方块
+    const block_hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
+    if (block_hit.hit) {
+        try self.block_world.setBlock(block_hit.block_pos, .fromName("air"));
     }
 }
 
@@ -282,7 +295,7 @@ fn tryPlaceBlock(self: *Game) !void {
         }
     }
 
-    // if (!can_place) return;
+    if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }

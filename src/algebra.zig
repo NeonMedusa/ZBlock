@@ -745,6 +745,21 @@ pub const Mat4 = struct {
         };
     }
 
+    /// 反向深度投影矩阵——近平面映射到1，远平面映射到0。
+    /// 配合 Greater 深度比较和 clear=0.0，解决远处Z-fighting。
+    /// 适用于 Vulkan/D3D12 NDC [0,1]，右手坐标系，相机-Z方向。
+    pub fn perspectiveReversedZ(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
+        const f = 1.0 / @tan(fovy * 0.5 * PI / 180.0);
+        return Mat4{
+            .m = .{
+                .{ f / aspect, 0, 0, 0 },
+                .{ 0, f, 0, 0 },
+                .{ 0, 0, near / (far - near), -1 },
+                .{ 0, 0, (far * near) / (far - near), 0 },
+            },
+        };
+    }
+
     pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
         var result = zero();
 

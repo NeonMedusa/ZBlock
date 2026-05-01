@@ -752,11 +752,15 @@ pub const BlockWorld = struct {
         for (self.completed.items) |*r| r.deinit();
         self.completed.deinit(self.worker_gpa.allocator());
 
-        // 清空pending，否则unloadChunk会跳过这些区块导致泄漏
-        self.pending.clearRetainingCapacity();
-
-        self.clearAllChunks();
-        self.chunks.deinit();
+        // 直接释放所有区块（不走unloadChunk的pending/build_lock检查）
+        {
+            var it = self.chunks.valueIterator();
+            while (it.next()) |loaded| {
+                loaded.mesh_cache.deinit();
+                self.allocator.destroy(loaded.chunk);
+            }
+            self.chunks.clearAndFree();
+        }
         self.pending.deinit();
         self.material_registry.deinit();
         self.collision_list.deinit(self.allocator);
@@ -858,20 +862,6 @@ pub const BlockWorld = struct {
             _ = self.chunks.remove(origin);
         }
         self.material_registry.cleanupUnused();
-    }
-
-    fn clearAllChunks(self: *BlockWorld) void {
-        var origins = std.ArrayListUnmanaged(Vec3i){};
-        defer origins.deinit(self.allocator);
-        {
-            var iter = self.chunks.keyIterator();
-            while (iter.next()) |key_ptr| {
-                origins.append(self.allocator, key_ptr.*) catch continue;
-            }
-        }
-        for (origins.items) |origin| {
-            self.unloadChunk(origin);
-        }
     }
 
     pub fn setBlock(self: *BlockWorld, world_pos: Vec3i, block_id: BlockId) !void {
@@ -978,6 +968,48 @@ pub const BlockWorld = struct {
             self.moveEntity(pos, vel, aabb, on_ground, &self.collision_list, dx, dy, dz);
 
             intent.jump = false;
+        }
+
+        // 实体间碰撞：基于重叠深度的排斥力，不改变位置
+        {
+            const REPEL_FORCE: f32 = 3.0;
+            var push_view = registry.view(.{ Comps.Position, Comps.Collider, Comps.Velocity }, .{});
+            var push_iter_a = push_view.entityIterator();
+            while (push_iter_a.next()) |entity_a| {
+                const pos_a = push_view.get(Comps.Position, entity_a);
+                const col_a = push_view.get(Comps.Collider, entity_a);
+                const vel_a = push_view.get(Comps.Velocity, entity_a);
+                const box_a = getEntityAABB(pos_a.vec, col_a);
+
+                var push_iter_b = push_view.entityIterator();
+                while (push_iter_b.next()) |entity_b| {
+                    if (@as(u32, @bitCast(entity_b)) <= @as(u32, @bitCast(entity_a))) continue;
+                    const pos_b = push_view.get(Comps.Position, entity_b);
+                    const col_b = push_view.get(Comps.Collider, entity_b);
+                    const vel_b = push_view.get(Comps.Velocity, entity_b);
+                    const box_b = getEntityAABB(pos_b.vec, col_b);
+
+                    if (box_a.min_x < box_b.max_x and box_a.max_x > box_b.min_x and
+                        box_a.min_y < box_b.max_y and box_a.max_y > box_b.min_y and
+                        box_a.min_z < box_b.max_z and box_a.max_z > box_b.min_z)
+                    {
+                        const dx = pos_b.vec.x - pos_a.vec.x;
+                        const dz = pos_b.vec.z - pos_a.vec.z;
+                        const dist = @max(@sqrt(dx * dx + dz * dz), 0.001);
+                        const nx = dx / dist;
+                        const nz = dz / dist;
+
+                        const overlap_x = @min(box_a.max_x - box_b.min_x, box_b.max_x - box_a.min_x);
+                        const overlap_z = @min(box_a.max_z - box_b.min_z, box_b.max_z - box_a.min_z);
+                        const push = @max(overlap_x, overlap_z) * REPEL_FORCE;
+
+                        vel_a.vec.x -= nx * push;
+                        vel_a.vec.z -= nz * push;
+                        vel_b.vec.x += nx * push;
+                        vel_b.vec.z += nz * push;
+                    }
+                }
+            }
         }
     }
 
