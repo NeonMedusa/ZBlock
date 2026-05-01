@@ -8,14 +8,6 @@ pub fn SparseSet(comptime T: type, comptime MAX_ENTITIES: usize) type {
         dense: std.ArrayList(T),
         sparse: [MAX_ENTITIES]usize = [_]usize{NULL_INDEX} ** MAX_ENTITIES,
         index_to_key: std.ArrayList(usize),
-        /// 初始化
-        pub fn init() Self {
-            return Self{
-                .dense = std.ArrayList(T){},
-                .sparse = [_]usize{NULL_INDEX} ** MAX_ENTITIES, // 初始化为NULL_INDEX
-                .index_to_key = std.ArrayList(usize){},
-            };
-        }
         /// 释放内存
         pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
             self.dense.deinit(allocator);
@@ -101,6 +93,63 @@ pub fn SparseSet(comptime T: type, comptime MAX_ENTITIES: usize) type {
         /// 检查是否为空
         pub fn isEmpty(self: *Self) bool {
             return self.dense.items.len == 0;
+        }
+    };
+}
+
+pub fn SparseIndexSet(comptime MAX: usize) type {
+    return struct {
+        const Self = @This();
+        keys: std.ArrayListUnmanaged(usize) = .{},
+        key_to_index: [MAX]usize = [_]usize{NULL_INDEX} ** MAX,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+            self.keys.deinit(allocator);
+        }
+
+        pub fn add(self: *Self, allocator: std.mem.Allocator, key: usize) void {
+            if (self.key_to_index[key] != NULL_INDEX) return;
+            const idx = self.keys.items.len;
+            self.keys.append(allocator, key) catch unreachable;
+            self.key_to_index[key] = idx;
+        }
+
+        pub fn has(self: *Self, key: usize) bool {
+            return self.key_to_index[key] != NULL_INDEX;
+        }
+
+        pub fn remove(self: *Self, key: usize) bool {
+            const idx = self.key_to_index[key];
+            if (idx == NULL_INDEX) return false;
+
+            const last = self.keys.items.len - 1;
+            if (idx < last) {
+                const last_key = self.keys.items[last];
+                self.keys.items[idx] = last_key;
+                self.key_to_index[last_key] = idx;
+            }
+            _ = self.keys.pop();
+            self.key_to_index[key] = NULL_INDEX;
+            return true;
+        }
+
+        const Iterator = struct {
+            set: *Self,
+            index: usize = 0,
+            pub fn next(self: *Iterator) ?usize {
+                if (self.index >= self.set.keys.items.len) return null;
+                const key = self.set.keys.items[self.index];
+                self.index += 1;
+                return key;
+            }
+        };
+
+        pub fn iterator(self: *Self) Iterator {
+            return Iterator{ .set = self };
         }
     };
 }

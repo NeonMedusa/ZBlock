@@ -1,4 +1,4 @@
-const SparseSet = @import("sparse_set.zig").SparseSet;
+const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
 const RenderPipeline = @import("render_pipeline.zig");
 
 const Mesh = struct {
@@ -502,7 +502,7 @@ pub const ResManager = struct {
     allocator: std.mem.Allocator,
     models: [MAX_MODELS]Model = undefined,
     ref_counts: [MAX_MODELS]u32 = [_]u32{0} ** MAX_MODELS,
-    active_models: SparseSet(bool, MAX_MODELS),
+    active_models: SparseIndexSet(MAX_MODELS) = .{},
     gctx: *Gctx,
     pipeline: *RenderPipeline,
 
@@ -520,7 +520,7 @@ pub const ResManager = struct {
                 if (idx == 0) @panic("Cannot load default model");
                 return self.getOrLoadModel(ModelId.fromInt(0));
             };
-            self.active_models.set(self.allocator, idx, true);
+            self.active_models.add(self.allocator, idx);
         }
         return &self.models[idx];
     }
@@ -531,8 +531,7 @@ pub const ResManager = struct {
 
     pub fn removeZeroRefModel(self: *ResManager) void {
         var iter = self.active_models.iterator();
-        while (iter.next()) |entry| {
-            const idx = entry[0];
+        while (iter.next()) |idx| {
             if (self.ref_counts[idx] == 0) {
                 self.models[idx].deinit(self.allocator);
                 _ = self.active_models.remove(idx);
@@ -552,7 +551,7 @@ pub const ResManager = struct {
             .usage = Wgpu.WGPUBufferUsage_Storage | Wgpu.WGPUBufferUsage_CopyDst,
             .mappedAtCreation = 0,
         });
-        const instances_data = try allocator.alloc(InstanceData, MAX_ENTITIES);
+        const instances_data = try allocator.alloc(InstanceData, MAX_INSTANCES);
         const instances_data_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &Wgpu.WGPUBufferDescriptor{
             .size = @sizeOf(InstanceData) * MAX_INSTANCES,
             .usage = Wgpu.WGPUBufferUsage_Storage | Wgpu.WGPUBufferUsage_CopyDst,
@@ -567,7 +566,6 @@ pub const ResManager = struct {
             .allocator = allocator,
             .pipeline = pipeline,
             .gctx = gctx,
-            .active_models = SparseSet(bool, MAX_MODELS).init(),
         };
     }
 
@@ -579,8 +577,8 @@ pub const ResManager = struct {
         Wgpu.wgpuBufferRelease(self.instances_data_buffer);
 
         var iter = self.active_models.iterator();
-        while (iter.next()) |entry| {
-            self.models[entry[0]].deinit(self.allocator);
+        while (iter.next()) |idx| {
+            self.models[idx].deinit(self.allocator);
         }
         self.active_models.deinit(self.allocator);
     }

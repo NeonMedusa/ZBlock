@@ -14,7 +14,7 @@ const TextureRes = Imports.RendCTX.TextureRes;
 const Gctx = Imports.Gctx;
 const RenderPipeline = @import("render_pipeline.zig");
 const IMG = Imports.zigimg;
-const SparseSet = @import("sparse_set.zig").SparseSet;
+const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
 const Perlin = @import("perlin.zig");
 const VertexAttribute = Imports.RendCTX.VertexAttribute;
 const ECS = Imports.ECS;
@@ -251,7 +251,7 @@ pub const MaterialRegistry = struct {
     allocator: std.mem.Allocator,
 
     materials: [MAX_MATERIALS]?GlobalMaterial = [1]?GlobalMaterial{null} ** MAX_MATERIALS,
-    active_materials: SparseSet(bool, MAX_MATERIALS),
+    active_materials: SparseIndexSet(MAX_MATERIALS),
 
     const Self = @This();
 
@@ -260,15 +260,14 @@ pub const MaterialRegistry = struct {
             .gctx = gctx,
             .pipeline = pipeline,
             .allocator = allocator,
-            .active_materials = SparseSet(bool, MAX_MATERIALS).init(),
+            .active_materials = SparseIndexSet(MAX_MATERIALS).init(),
         };
     }
 
     pub fn deinit(self: *Self) void {
         var iter = self.active_materials.iterator();
-        while (iter.next()) |entry| {
-            const key_usize = entry[0];
-            const id: u32 = @intCast(key_usize);
+        while (iter.next()) |key| {
+            const id: u32 = @intCast(key);
             if (self.materials[id]) |*mat| {
                 mat.deinit();
             }
@@ -281,7 +280,7 @@ pub const MaterialRegistry = struct {
         if (self.materials[@intCast(id)] == null) {
             const global_mat = try self.loadGlobalMaterial(key);
             self.materials[@intCast(id)] = global_mat;
-            self.active_materials.set(self.allocator, id, true);
+            self.active_materials.add(self.allocator, id);
         }
         var global_mat = &(self.materials[@intCast(id)].?);
         global_mat.ref_count += 1;
@@ -297,14 +296,13 @@ pub const MaterialRegistry = struct {
 
     pub fn cleanupUnused(self: *Self) void {
         var iter = self.active_materials.iterator();
-        while (iter.next()) |entry| {
-            const key_usize = entry[0];
-            const id: u32 = @intCast(key_usize);
+        while (iter.next()) |key| {
+            const id: u32 = @intCast(key);
             if (self.materials[@intCast(id)]) |*mat| {
                 if (mat.ref_count == 0) {
                     mat.deinit();
                     self.materials[@intCast(id)] = null;
-                    _ = self.active_materials.remove(key_usize);
+                    _ = self.active_materials.remove(key);
                 }
             }
         }
