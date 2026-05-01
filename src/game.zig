@@ -47,6 +47,10 @@ pub fn start(self: *Game) !void {
             }
         }
     }
+    // 等待worker完成初始区块的mesh构建
+    while (self.block_world.pendingCount() > 0) {
+        try self.block_world.processCompletedBuilds();
+    }
 
     // 测试用静态模型实体
     const e2 = self.registry.create();
@@ -124,6 +128,8 @@ pub fn start(self: *Game) !void {
         self.ui_system.beginFrame();
         main_menu.update(self);
         try self.ui_system.endFrame(&self.gctx);
+        // 5. 处理待构建的区块mesh（可能由异步worker完成）
+        try self.block_world.processCompletedBuilds();
         Render.draw(self);
     }
 }
@@ -176,6 +182,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 测试方块世界
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline);
+    try self.block_world.spawnWorker();
 
     // 返回实例
     return self;
@@ -297,7 +304,7 @@ fn tryPlaceBlock(self: *Game) !void {
         }
     }
 
-    if (!can_place) return;
+    // if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }
@@ -317,7 +324,7 @@ fn updateChunks(self: *Game) !void {
         const pcx = @divFloor(player_origin.x, BlockWorld.CHUNK_SIZE_X_I32);
         const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_SIZE_Z_I32);
 
-        const load_range: i32 = 1;
+        const load_range: i32 = 4;
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;

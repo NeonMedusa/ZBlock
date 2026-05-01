@@ -1,6 +1,3 @@
-const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
-const RenderPipeline = @import("render_pipeline.zig");
-
 const Mesh = struct {
     primitives: []Primitive,
 };
@@ -640,3 +637,6 @@ const Window = Imports.Window;
 const Gltf = Imports.Gltf;
 const Wgpu = Imports.Wgpu;
 const zigimg = Imports.zigimg;
+
+const SparseIndexSet = Imports.SparseIndexSet;
+const RenderPipeline = Imports.RenderPipeline;
