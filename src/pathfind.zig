@@ -1,5 +1,4 @@
-// pathfind.zig — 三维 A* 寻路 (Minecraft 风格)
-// 基于 https://www.gamedev.net/reference/articles/article2003.asp
+// pathfind.zig — 三维 A* 寻路
 // 优化：8 方向 + 高度感知 + 步进/跌落检查
 const std = @import("std");
 const Vec2 = @import("algebra.zig").Vec2;
@@ -149,7 +148,10 @@ pub fn findPathStep(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3
             const n = nodes.get(node_pos).?;
             const h = heuristic(node_pos.x - end_x, node_pos.z - end_z, n.foot_y - end_y);
             const f = n.g + h;
-            if (f < best_f) { best_f = f; best_idx = i; }
+            if (f < best_f) {
+                best_f = f;
+                best_idx = i;
+            }
         }
         const current = open_set.swapRemove(best_idx);
         const cur_node = nodes.get(current).?;
@@ -193,7 +195,10 @@ pub fn findPathStep(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3
                 try nodes.put(neighbor, .{ .g = tent_g, .foot_y = reach, .parent = current });
                 var found = false;
                 for (open_set.items) |item| {
-                    if (item.eql(neighbor)) { found = true; break; }
+                    if (item.eql(neighbor)) {
+                        found = true;
+                        break;
+                    }
                 }
                 if (!found) try open_set.append(allocator, neighbor);
             }

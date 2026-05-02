@@ -69,15 +69,17 @@ pub fn start(self: *Game) !void {
             produceMoveIntent(self);
             // 2. 物理
             self.block_world.updatePhysics(&self.registry, self.window.delta_time);
-            // 3. AI 寻路
-            self.block_world.updateAI(&self.registry, self.camera.position, self.window.delta_time);
-            // 4. 摄像机同步
+            // 3. AI — 目标选择
+            BlockWorld.BlockWorld.updateAIAgent(&self.registry, self.camera.position, self.window.delta_time);
+            // 4. AI — 寻路执行
+            self.block_world.updateAI(&self.registry, self.window.delta_time);
+            // 5. 摄像机同步
             syncCameraFromPlayer(self);
 
-            // 5. 动态加载/卸载区块
+            // 6. 动态加载/卸载区块
             try updateChunks(self);
 
-            // 6. 敌人更新
+            // 7. 敌人更新
             try updateEnemies(self);
 
             if (self.input.isMouseButtonDown(.mouse_left)) {
@@ -282,21 +284,42 @@ fn tryPlaceBlock(self: *Game) !void {
         }
     }
 
-    // if (!can_place) return;
+    if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }
 
 fn updateEnemies(self: *Game) !void {
-    // 敌人接触伤害
+    const DESPAWN_DISTANCE: f32 = 24.0;
+
+    // 敌人接触伤害 + 远距离销毁
     {
-        var view = self.registry.view(.{ Comps.Enemy, Comps.Position, Comps.Collider }, .{});
+        var view = self.registry.view(.{ Comps.AIAgent, Comps.Position, Comps.Collider }, .{});
         var iter = view.entityIterator();
         while (iter.next()) |enemy_entity| {
             const enemy_pos = view.get(Comps.Position, enemy_entity);
             const enemy_col = view.get(Comps.Collider, enemy_entity);
-            const enemy = view.get(Comps.Enemy, enemy_entity);
-            const info = enemy.type_id.info();
+            const agent = view.get(Comps.AIAgent, enemy_entity);
+            const info = agent.type_id.info();
+
+            // 远距离销毁
+            var pv = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+            var pi = pv.entityIterator();
+            var despawn = false;
+            while (pi.next()) |pe| {
+                const pp = pv.get(Comps.Position, pe);
+                const dx = pp.vec.x - enemy_pos.vec.x;
+                const dz = pp.vec.z - enemy_pos.vec.z;
+                if (@sqrt(dx * dx + dz * dz) > DESPAWN_DISTANCE) {
+                    despawn = true;
+                }
+            }
+            if (despawn) {
+                // TODO: 存档前记录 despawn 信息（type_id, pos, chunk_origin, health 等）
+                self.registry.destroy(enemy_entity);
+                continue;
+            }
+
             const ebox = BlockWorld.BlockWorld.getEntityAABB(enemy_pos.vec, enemy_col);
 
             var pview = self.registry.view(.{ Comps.Player, Comps.Position, Comps.Collider, Comps.Health }, .{});
@@ -336,7 +359,7 @@ fn updateEnemies(self: *Game) !void {
     // 生成敌人
     {
         var enemy_count: u32 = 0;
-        var eview = self.registry.view(.{Comps.Enemy}, .{});
+        var eview = self.registry.view(.{Comps.AIAgent}, .{});
         var eiter = eview.entityIterator();
         while (eiter.next()) |_| {
             enemy_count += 1;
@@ -366,7 +389,7 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     const eid = EntityTypeId.fromName(type_name);
     const info = eid.info();
     const entity = self.registry.create();
-    self.registry.add(entity, Comps.Enemy{ .type_id = eid });
+    self.registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
     self.registry.add(entity, Comps.ModelName{ .id = info.model_id });
     self.registry.add(entity, Comps.Position{ .vec = pos });
     self.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
@@ -376,7 +399,7 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     self.registry.add(entity, Comps.OnGround{ .value = false });
     self.registry.add(entity, Comps.MoveIntent{});
     self.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
-    self.registry.add(entity, Comps.AttackCooldown{});
+    self.registry.add(entity, Comps.AttackCooldown{ .interval = info.attack_interval });
 }
 
 fn updateChunks(self: *Game) !void {

@@ -10,7 +10,11 @@ pub const Components = struct {
     // ---- 身份 ----
     pub const Player = struct { id: u32 = 0 }; // 标记哪个实体是玩家
     pub const ModelName = struct { id: ModelId }; // 渲染用模型
-    pub const Enemy = struct { type_id: EntityTypeId }; // 标记为敌对实体
+    pub const AIAgent = struct {
+        type_id: EntityTypeId,
+        target: Vec3 = Vec3.zero,
+        path_timer: f32 = 0,
+    };
 
     // ---- 物理状态 ----
     pub const Position = struct { vec: Vec3 };
@@ -33,7 +37,7 @@ pub const Components = struct {
 
     // ---- 战斗/生命 ----
     pub const Health = struct { current: f32, max: f32 };
-    pub const AttackCooldown = struct { timer: f32 = 0 }; // 攻击间隔倒计时
+    pub const AttackCooldown = struct { interval: f32 = 1.0, timer: f32 = 0 };
 
     // ---- 玩法 ----
     pub const SpawnPos = struct { pos: Vec3 }; // 重生点

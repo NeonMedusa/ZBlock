@@ -415,27 +415,51 @@ pub const BlockWorld = struct {
         }
     }
 
-    pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, player_pos: Vec3, dt: f32) void {
-        const DETECT_RANGE: f32 = 16.0;
-        const PATH_INTERVAL: f32 = 0.25;
+    pub fn updateAIAgent(registry: *ECS.Registry, player_pos: Vec3, dt: f32) void {
+        var view = registry.view(.{ Comps.AIAgent, Comps.Position }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            var agent = view.get(Comps.AIAgent, entity);
+            const pos = view.get(Comps.Position, entity);
+            const info = agent.type_id.info();
+
+            const dx = player_pos.x - pos.vec.x;
+            const dz = player_pos.z - pos.vec.z;
+            const dist = @sqrt(dx * dx + dz * dz);
+
+            agent.path_timer -= dt;
+
+            if (dist < info.detect_range) {
+                agent.target = player_pos;
+            } else if (agent.path_timer <= 0) {
+                agent.path_timer = info.wander_interval;
+                const angle = @as(f32, @floatFromInt(@mod(@as(i64, @intCast(std.time.microTimestamp())), 360))) * std.math.pi / 180.0;
+                const r: f32 = 4.0 + @as(f32, @floatFromInt(@mod(@as(i64, @intCast(std.time.microTimestamp() >> 8)), 8)));
+                agent.target = Vec3.new(pos.vec.x + @cos(angle) * r, pos.vec.y, pos.vec.z + @sin(angle) * r);
+            }
+        }
+    }
+
+    pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
+        const PATH_INTERVAL: f32 = 0.15;
 
         var view = registry.view(.{
-            Comps.Enemy,          Comps.Position, Comps.Velocity,     Comps.MoveSpeed,
-            Comps.MoveIntent,     Comps.OnGround, Comps.JumpVelocity, Comps.Collider,
+            Comps.AIAgent, Comps.Position, Comps.Velocity, Comps.MoveSpeed,
+            Comps.MoveIntent, Comps.OnGround, Comps.JumpVelocity, Comps.Collider,
             Comps.AttackCooldown,
         }, .{});
         var iter = view.entityIterator();
         while (iter.next()) |entity| {
             const pos = view.get(Comps.Position, entity);
-            const enemy = view.get(Comps.Enemy, entity);
-            const info = enemy.type_id.info();
+            var agent = view.get(Comps.AIAgent, entity);
+            const info = agent.type_id.info();
             const collider = view.get(Comps.Collider, entity);
             var intent = view.get(Comps.MoveIntent, entity);
             const on_ground = view.get(Comps.OnGround, entity);
             var cooldown = view.get(Comps.AttackCooldown, entity);
 
-            const dx = player_pos.x - pos.vec.x;
-            const dz = player_pos.z - pos.vec.z;
+            const dx = agent.target.x - pos.vec.x;
+            const dz = agent.target.z - pos.vec.z;
             const dist = @sqrt(dx * dx + dz * dz);
 
             intent.jump = false;
@@ -445,12 +469,12 @@ pub const BlockWorld = struct {
             }
 
             if (dist < info.attack_range and cooldown.timer <= 0) {
-                cooldown.timer = 0.8;
+                cooldown.timer = cooldown.interval;
             }
 
-            if (dist < DETECT_RANGE and dist > 0.5 and cooldown.timer <= 0) {
-                cooldown.timer = PATH_INTERVAL;
-                if (Pathfind.findPathStep(self.allocator, self, pos.vec, player_pos) catch null) |dir| {
+            if (dist > 0.5 and agent.path_timer <= 0) {
+                agent.path_timer = PATH_INTERVAL;
+                if (Pathfind.findPathStep(self.allocator, self, pos.vec, agent.target) catch null) |dir| {
                     const target_x = @floor(pos.vec.x + dir.x * 1.5) + 0.5;
                     const target_z = @floor(pos.vec.z + dir.y * 1.5) + 0.5;
                     const tdx = target_x - pos.vec.x;
@@ -468,7 +492,6 @@ pub const BlockWorld = struct {
                 if (block_ahead.prototype().is_solid and on_ground.value) {
                     const above = ahead.add(Vec3.new(0, collider.height + 0.1, 0));
                     if (!self.getBlockAt(above).prototype().is_solid) {
-                        // 头顶有空间才跳（低矮隧道中抑制跳跃）
                         const head_above = pos.vec.add(Vec3.new(0, collider.height + 0.1, 0));
                         if (!self.getBlockAt(head_above).prototype().is_solid) {
                             intent.jump = true;
