@@ -79,8 +79,8 @@ pub fn start(self: *Game) !void {
             // 6. 动态加载/卸载区块
             try updateChunks(self);
 
-            // 7. 敌人更新
-            try updateEnemies(self);
+            // 7. 实体更新
+            try updateEntities(self);
 
             if (self.input.isMouseButtonDown(.mouse_left)) {
                 try handleLeftClick(self);
@@ -289,10 +289,35 @@ fn tryPlaceBlock(self: *Game) !void {
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }
 
-fn updateEnemies(self: *Game) !void {
+fn updateEntities(self: *Game) !void {
     const DESPAWN_DISTANCE: f32 = 24.0;
 
-    // 敌人接触伤害 + 远距离销毁
+    // 1. 销毁远离所有玩家的 AI 实体
+    {
+        var view = self.registry.view(.{ Comps.AIAgent, Comps.Position }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            const pos = view.get(Comps.Position, entity);
+            var pv = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+            var pi = pv.entityIterator();
+            var despawn = true;
+            while (pi.next()) |pe| {
+                const pp = pv.get(Comps.Position, pe);
+                const dx = pp.vec.x - pos.vec.x;
+                const dz = pp.vec.z - pos.vec.z;
+                if (@sqrt(dx * dx + dz * dz) < DESPAWN_DISTANCE) {
+                    despawn = false;
+                    break;
+                }
+            }
+            if (despawn) {
+                // TODO: 存档前记录 despawn 信息（type_id, pos, chunk_origin, health 等）
+                self.registry.destroy(entity);
+            }
+        }
+    }
+
+    // 2. 敌人接触伤害
     {
         var view = self.registry.view(.{ Comps.AIAgent, Comps.Position, Comps.Collider }, .{});
         var iter = view.entityIterator();
@@ -301,25 +326,6 @@ fn updateEnemies(self: *Game) !void {
             const enemy_col = view.get(Comps.Collider, enemy_entity);
             const agent = view.get(Comps.AIAgent, enemy_entity);
             const info = agent.type_id.info();
-
-            // 远距离销毁
-            var pv = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
-            var pi = pv.entityIterator();
-            var despawn = false;
-            while (pi.next()) |pe| {
-                const pp = pv.get(Comps.Position, pe);
-                const dx = pp.vec.x - enemy_pos.vec.x;
-                const dz = pp.vec.z - enemy_pos.vec.z;
-                if (@sqrt(dx * dx + dz * dz) > DESPAWN_DISTANCE) {
-                    despawn = true;
-                }
-            }
-            if (despawn) {
-                // TODO: 存档前记录 despawn 信息（type_id, pos, chunk_origin, health 等）
-                self.registry.destroy(enemy_entity);
-                continue;
-            }
-
             const ebox = BlockWorld.BlockWorld.getEntityAABB(enemy_pos.vec, enemy_col);
 
             var pview = self.registry.view(.{ Comps.Player, Comps.Position, Comps.Collider, Comps.Health }, .{});
@@ -341,7 +347,7 @@ fn updateEnemies(self: *Game) !void {
         }
     }
 
-    // 玩家死亡复活
+    // 3. 玩家死亡复活
     {
         var view = self.registry.view(.{ Comps.Player, Comps.Position, Comps.Health, Comps.SpawnPos }, .{});
         var iter = view.entityIterator();
@@ -356,7 +362,7 @@ fn updateEnemies(self: *Game) !void {
         }
     }
 
-    // 生成敌人
+    // 4. 生成敌人
     {
         var enemy_count: u32 = 0;
         var eview = self.registry.view(.{Comps.AIAgent}, .{});
