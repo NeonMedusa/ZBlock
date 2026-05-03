@@ -589,7 +589,7 @@ pub const SceneUniform = struct {
     _padding: [4]f32 = undefined, // 结构体对齐到 16 字节
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
-        const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 100);
+        const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 200);
         const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero, Vec3.up);
         return .{
             .proj_matrix = proj_matrix,

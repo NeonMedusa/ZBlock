@@ -117,7 +117,7 @@ fn windowSizeCallback(glfw_window: ?*Glfw.GLFWwindow, width: i32, height: i32) c
                 70,
                 aspect_ratio,
                 0.001,
-                100,
+                200,
             );
             // 更新UiUniform
             game.ui_system.ubo.ortho_matrix = Mat4.orthographic(

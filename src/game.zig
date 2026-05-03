@@ -69,10 +69,12 @@ pub fn start(self: *Game) !void {
             produceMoveIntent(self);
             // 2. 物理
             self.block_world.updatePhysics(&self.registry, self.window.delta_time);
+
             // 3. AI — 目标选择
             BlockWorld.BlockWorld.updateAIAgent(&self.registry, self.camera.position, self.window.delta_time);
             // 4. AI — 寻路执行
             self.block_world.updateAI(&self.registry, self.window.delta_time);
+
             // 5. 摄像机同步
             syncCameraFromPlayer(self);
 
@@ -284,7 +286,7 @@ fn tryPlaceBlock(self: *Game) !void {
         }
     }
 
-    if (!can_place) return;
+    // if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }
@@ -371,7 +373,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 10;
+        const MAX_ENEMIES: u32 = 1;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

@@ -21,24 +21,6 @@ const GridPos = struct {
     }
 };
 
-/// 返回 (x,z) 列从最高处向下扫描找到的可站立方块顶部 Y
-pub fn getSurfaceY(world: *BlockWorld, x: i32, z: i32) ?i32 {
-    var y: i32 = @intCast(CHUNK_SIZE_Y - 1);
-    while (y >= 0) : (y -= 1) {
-        const pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
-        const block = world.getBlockAt(pos);
-        if (block.prototype().is_solid) {
-            const above: i32 = y + 1;
-            if (above >= CHUNK_SIZE_Y) return null;
-            const above_pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(above)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
-            const above_block = world.getBlockAt(above_pos);
-            if (!above_block.prototype().is_solid) return above;
-            return null;
-        }
-    }
-    return null;
-}
-
 /// 检查脚底 Y 处是否可站立：脚底和头顶（+1,+2）都是非固体
 fn isSolidAt(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
     return world.getBlockAt(Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5)).prototype().is_solid;
@@ -211,4 +193,22 @@ pub fn findPathStep(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3
     const len = @sqrt(dx * dx + dz * dz);
     if (len < 0.001) return null;
     return Vec2.new(dx / len, dz / len);
+}
+
+/// 返回 (x,z) 列从最高处向下扫描找到的可站立方块顶部 Y
+pub fn getSurfaceY(world: *BlockWorld, x: i32, z: i32) ?i32 {
+    var y: i32 = @intCast(CHUNK_SIZE_Y - 1);
+    while (y >= 0) : (y -= 1) {
+        const pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
+        const block = world.getBlockAt(pos);
+        if (block.prototype().is_solid) {
+            const above: i32 = y + 1;
+            if (above >= CHUNK_SIZE_Y) return null;
+            const above_pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(above)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
+            const above_block = world.getBlockAt(above_pos);
+            if (!above_block.prototype().is_solid) return above;
+            return null;
+        }
+    }
+    return null;
 }

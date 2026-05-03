@@ -444,8 +444,8 @@ pub const BlockWorld = struct {
         const PATH_INTERVAL: f32 = 0.15;
 
         var view = registry.view(.{
-            Comps.AIAgent, Comps.Position, Comps.Velocity, Comps.MoveSpeed,
-            Comps.MoveIntent, Comps.OnGround, Comps.JumpVelocity, Comps.Collider,
+            Comps.AIAgent,        Comps.Position, Comps.Velocity,     Comps.MoveSpeed,
+            Comps.MoveIntent,     Comps.OnGround, Comps.JumpVelocity, Comps.Collider,
             Comps.AttackCooldown,
         }, .{});
         var iter = view.entityIterator();
@@ -459,8 +459,9 @@ pub const BlockWorld = struct {
             var cooldown = view.get(Comps.AttackCooldown, entity);
 
             const dx = agent.target.x - pos.vec.x;
+            const dy = agent.target.y - pos.vec.y;
             const dz = agent.target.z - pos.vec.z;
-            const dist = @sqrt(dx * dx + dz * dz);
+            const dist_3d = @sqrt(dx * dx + dy * dy + dz * dz);
 
             intent.jump = false;
 
@@ -468,11 +469,12 @@ pub const BlockWorld = struct {
                 cooldown.timer -= dt;
             }
 
-            if (dist < info.attack_range and cooldown.timer <= 0) {
+            if (dist_3d < info.attack_range and cooldown.timer <= 0) {
                 cooldown.timer = cooldown.interval;
             }
 
-            if (dist > 0.5 and agent.path_timer <= 0) {
+            // 三维距离 > 阈值且计时到期时，重新寻路
+            if (dist_3d > 0.5 and agent.path_timer <= 0) {
                 agent.path_timer = PATH_INTERVAL;
                 if (Pathfind.findPathStep(self.allocator, self, pos.vec, agent.target) catch null) |dir| {
                     const target_x = @floor(pos.vec.x + dir.x * 1.5) + 0.5;
@@ -502,6 +504,8 @@ pub const BlockWorld = struct {
         }
     }
 
+    /// 获取实体的轴对齐包围盒 (AABB)
+    /// pos 是实体的脚底中心位置 (即 min_y = pos.y)
     pub fn getEntityAABB(pos: Vec3, collider: *Comps.Collider) AABB {
         const half_w = collider.width / 2.0;
         return AABB{
