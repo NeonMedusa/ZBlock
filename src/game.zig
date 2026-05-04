@@ -228,6 +228,7 @@ fn handleLeftClick(self: *Game) !void {
         if (self.registry.tryGet(Comps.Health, entity_hit.entity)) |health| {
             health.current -= 10;
             if (health.current <= 0) {
+                self.block_world.cleanupEntity(&self.registry, entity_hit.entity);
                 self.registry.destroy(entity_hit.entity);
             }
         }
@@ -314,6 +315,7 @@ fn updateEntities(self: *Game) !void {
             }
             if (despawn) {
                 // TODO: 存档前记录 despawn 信息（type_id, pos, chunk_origin, health 等）
+                self.block_world.cleanupEntity(&self.registry, entity);
                 self.registry.destroy(entity);
             }
         }

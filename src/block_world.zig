@@ -114,6 +114,7 @@ pub const BlockWorld = struct {
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     worker: ?std.Thread = null,
     worker_gpa: std.heap.GeneralPurposeAllocator(.{}),
+    astar_states: std.AutoHashMap(ECS.Entity, Pathfind.AStarState),
 
     pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, max_chunks: usize) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
@@ -126,6 +127,9 @@ pub const BlockWorld = struct {
         var pending = std.AutoHashMap(Vec3i, void).init(allocator);
         errdefer pending.deinit();
 
+        var astar_states = std.AutoHashMap(ECS.Entity, Pathfind.AStarState).init(allocator);
+        errdefer astar_states.deinit();
+
         return BlockWorld{
             .allocator = allocator,
             .gctx = gctx,
@@ -135,6 +139,7 @@ pub const BlockWorld = struct {
             .pending = pending,
             .completed = .{},
             .worker_gpa = .{},
+            .astar_states = astar_states,
         };
     }
 
@@ -166,6 +171,14 @@ pub const BlockWorld = struct {
         self.pending.deinit();
         self.material_registry.deinit();
         self.collision_list.deinit(self.allocator);
+
+        {
+            var it = self.astar_states.valueIterator();
+            while (it.next()) |state| {
+                Pathfind.deinitAStar(state);
+            }
+            self.astar_states.deinit();
+        }
 
         _ = self.worker_gpa.deinit();
     }
@@ -441,7 +454,9 @@ pub const BlockWorld = struct {
     }
 
     pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
-        const PATH_INTERVAL: f32 = 0.15;
+        const PATH_INTERVAL: f32 = 0.3;
+        const STUCK_TIMEOUT: f32 = 4.0;
+        const ASTAR_STEPS_PER_FRAME: u16 = 50;
 
         var view = registry.view(.{
             Comps.AIAgent,        Comps.Position, Comps.Velocity,     Comps.MoveSpeed,
@@ -473,21 +488,106 @@ pub const BlockWorld = struct {
                 cooldown.timer = cooldown.interval;
             }
 
-            // 三维距离 > 阈值且计时到期时，重新寻路
-            if (dist_3d > 0.5 and agent.path_timer <= 0) {
+            // Step ongoing A* if any
+            if (self.astar_states.getPtr(entity)) |astar| {
+                if (astar.result == .pending) {
+                    Pathfind.stepAStar(astar, self, ASTAR_STEPS_PER_FRAME);
+                }
+                if (astar.result == .found) {
+                    if (Pathfind.buildAStarPath(astar)) |new_path| {
+                        if (agent.path) |*p| p.deinit(self.allocator);
+                        agent.path = new_path;
+                        agent.path_index = 0;
+                        agent.stuck_timer = STUCK_TIMEOUT;
+                        agent.last_pos = pos.vec;
+                    } else |_| {
+                        astar.result = .failed;
+                    }
+                    Pathfind.deinitAStar(astar);
+                    _ = self.astar_states.remove(entity);
+                } else if (astar.result == .failed) {
+                    Pathfind.deinitAStar(astar);
+                    _ = self.astar_states.remove(entity);
+                }
+            }
+
+            // Follow path if exists
+            if (agent.path) |*path| {
                 agent.path_timer = PATH_INTERVAL;
-                if (Pathfind.findPathStep(self.allocator, self, pos.vec, agent.target) catch null) |dir| {
-                    const target_x = @floor(pos.vec.x + dir.x * 1.5) + 0.5;
-                    const target_z = @floor(pos.vec.z + dir.y * 1.5) + 0.5;
-                    const tdx = target_x - pos.vec.x;
-                    const tdz = target_z - pos.vec.z;
-                    const tdist = @sqrt(tdx * tdx + tdz * tdz);
-                    if (tdist > 0.05) {
-                        intent.direction = Vec3.new(tdx / tdist, 0, tdz / tdist);
+
+                var blocked = false;
+                if (agent.path_index < path.items.len) {
+                    const wp = path.items[agent.path_index];
+                    const wpx = @as(i32, @intFromFloat(@floor(wp.x)));
+                    const wpz = @as(i32, @intFromFloat(@floor(wp.z)));
+                    const wpfy = @as(i32, @intFromFloat(@round(wp.y)));
+                    if (Pathfind.reachableFootY(self, wpx, wpz, wpfy) == null) {
+                        blocked = true;
+                    }
+                }
+
+                const moved = @sqrt(
+                    (pos.vec.x - agent.last_pos.x) * (pos.vec.x - agent.last_pos.x) +
+                    (pos.vec.z - agent.last_pos.z) * (pos.vec.z - agent.last_pos.z)
+                );
+                agent.last_pos = pos.vec;
+                if (moved < 0.05) {
+                    agent.stuck_timer -= dt;
+                } else {
+                    agent.stuck_timer = STUCK_TIMEOUT;
+                }
+
+                if (blocked or agent.stuck_timer <= 0) {
+                    path.deinit(self.allocator);
+                    agent.path = null;
+                } else if (agent.path_index < path.items.len) {
+                    const waypoint = path.items[agent.path_index];
+                    const wdx = waypoint.x - pos.vec.x;
+                    const wdz = waypoint.z - pos.vec.z;
+                    const wdist = @sqrt(wdx * wdx + wdz * wdz);
+
+                    if (wdist < 0.5) {
+                        agent.path_index += 1;
+                        agent.stuck_timer = STUCK_TIMEOUT;
+                    } else {
+                        intent.direction = Vec3.new(wdx / wdist, 0, wdz / wdist);
+                    }
+                } else {
+                    path.deinit(self.allocator);
+                    agent.path = null;
+                }
+            }
+
+            // If no path, consider starting pathfinding
+            if (agent.path == null and !self.astar_states.contains(entity)) {
+                agent.path_timer -= dt;
+                if (dist_3d > 0.5 and agent.path_timer <= 0) {
+                    agent.path_timer = PATH_INTERVAL;
+                    const start_grid = Pathfind.GridPos{
+                        .x = @intFromFloat(@floor(pos.vec.x)),
+                        .z = @intFromFloat(@floor(pos.vec.z)),
+                    };
+                    const end_grid = Pathfind.GridPos{
+                        .x = @intFromFloat(@floor(agent.target.x)),
+                        .z = @intFromFloat(@floor(agent.target.z)),
+                    };
+                    if (!start_grid.eql(end_grid)) {
+                        var astar = Pathfind.initAStar(self.allocator, pos.vec, agent.target) catch {
+                            if (@abs(dx) > 0.01 or @abs(dz) > 0.01) {
+                                const d = @sqrt(dx * dx + dz * dz);
+                                intent.direction = Vec3.new(dx / d, 0, dz / d);
+                            }
+                            continue;
+                        };
+                        self.astar_states.put(entity, astar) catch {
+                            Pathfind.deinitAStar(&astar);
+                            continue;
+                        };
                     }
                 }
             }
 
+            // Jump logic
             if (intent.direction.x != 0 or intent.direction.z != 0) {
                 const ahead = pos.vec.add(intent.direction.norm().scale(0.6));
                 const block_ahead = self.getBlockAt(ahead);
@@ -500,6 +600,19 @@ pub const BlockWorld = struct {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    pub fn cleanupEntity(self: *BlockWorld, registry: *ECS.Registry, entity: ECS.Entity) void {
+        if (self.astar_states.getPtr(entity)) |astar| {
+            Pathfind.deinitAStar(astar);
+            _ = self.astar_states.remove(entity);
+        }
+        if (registry.tryGet(Comps.AIAgent, entity)) |agent| {
+            if (agent.path) |*p| {
+                p.deinit(self.allocator);
+                agent.path = null;
             }
         }
     }

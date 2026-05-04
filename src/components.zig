@@ -14,6 +14,10 @@ pub const Components = struct {
         type_id: EntityTypeId,
         target: Vec3 = Vec3.zero,
         path_timer: f32 = 0,
+        path: ?std.ArrayListUnmanaged(Vec3) = null,
+        path_index: u32 = 0,
+        stuck_timer: f32 = 0,
+        last_pos: Vec3 = Vec3.zero,
     };
 
     // ---- 物理状态 ----
