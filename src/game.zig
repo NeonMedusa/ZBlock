@@ -175,6 +175,13 @@ pub fn deinit(self: *@This()) void {
     self.gctx.deinit();
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
+    {
+        var view = self.registry.view(.{Comps.AIAgent}, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            self.block_world.cleanupEntity(&self.registry, entity);
+        }
+    }
     self.registry.deinit();
     self.ui_system.deinit();
     self.block_world.deinit();
