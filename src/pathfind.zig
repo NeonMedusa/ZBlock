@@ -166,16 +166,16 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                     isSolidAt(world, fx, current.y + 1, fz)) continue;
             }
 
-            // 邻居列当前高度和头顶高度必须是空气
-            if (isSolidAt(world, nx, current.y, nz) or
-                isSolidAt(world, nx, current.y + 1, nz)) continue;
-
-            // 找到落点：从当前脚底往下找第一个固体方块
-            const landing = findGroundBelow(world, nx, nz, current.y - 1) orelse continue;
+            // 先找落点：从当前脚底高度开始向下扫描（能扫到高处 1 格的方块）
+            const landing = findGroundBelow(world, nx, nz, current.y) orelse continue;
 
             // 高度差：向上最多 1 格（跳跃），向下不限（重力下落）
             const height_diff = landing - current.y;
             if (height_diff > 1) continue;
+
+            // 用落点高度验空间：脚底和头顶必须是空气
+            if (isSolidAt(world, nx, landing, nz) or
+                isSolidAt(world, nx, landing + 1, nz)) continue;
 
             const neighbor = GridPos{ .x = nx, .y = landing, .z = nz };
             const tent_g = cur_g + dir.cost;
