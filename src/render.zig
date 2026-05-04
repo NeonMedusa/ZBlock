@@ -1,8 +1,8 @@
 // render.zig
 pub fn draw(game: *Game) void {
     // 每帧开始时重置模型的引用计数，每帧结束时卸载引用计数为0的模型
-    game.res_manager.resetRefCount();
-    defer game.res_manager.removeZeroRefModel();
+    // game.res_manager.resetRefCount();
+    // defer game.res_manager.removeZeroRefModel();
 
     var surface_texture: Wgpu.WGPUSurfaceTexture = undefined;
     Wgpu.wgpuSurfaceGetCurrentTexture(game.gctx.surface, &surface_texture);

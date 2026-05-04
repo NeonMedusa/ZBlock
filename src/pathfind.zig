@@ -1,82 +1,52 @@
 // pathfind.zig — 三维 A* 寻路
-// 优化：8 方向 + 高度感知 + 步进/跌落检查
+// GridPos 为 3D (x,y,z)，邻居通过 findGroundBelow 找落点
 const std = @import("std");
-const Vec2 = @import("algebra.zig").Vec2;
 const Vec3 = @import("algebra.zig").Vec3;
-const Vec3i = @import("algebra.zig").Vec3i;
 const BlockWorld = @import("block_world.zig").BlockWorld;
 const CHUNK_SIZE_Y = @import("block_world.zig").CHUNK_SIZE_Y;
 
 const G_CARDINAL = 10;
 const G_DIAGONAL = 14;
 const H_MULT = 10;
-const H_HEIGHT_MULT = 15; // 高度差的额外权重，倾向于保持同高度
+const H_HEIGHT_MULT = 15;
 
 pub const GridPos = struct {
     x: i32,
+    y: i32,
     z: i32,
 
     pub fn eql(a: GridPos, b: GridPos) bool {
-        return a.x == b.x and a.z == b.z;
+        return a.x == b.x and a.y == b.y and a.z == b.z;
     }
 };
 
-/// 检查脚底 Y 处是否可站立：脚底和头顶（+1,+2）都是非固体
 fn isSolidAt(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
-    return world.getBlockAt(Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5)).prototype().is_solid;
+    return world.getBlockAt(Vec3.new(
+        @as(f32, @floatFromInt(x)) + 0.5,
+        @as(f32, @floatFromInt(y)) + 0.5,
+        @as(f32, @floatFromInt(z)) + 0.5,
+    )).prototype().is_solid;
 }
 
-pub fn reachableFootY(world: *BlockWorld, x: i32, z: i32, from_foot_y: i32) ?i32 {
-    // 1. 目标列有实体方块 → 直接站在它上面（如果头顶没有被阻挡）
-    for ([_]i32{ 0, -1, 1 }) |dy| {
-        const fy = from_foot_y + dy;
-        if (fy <= 0 or fy + 2 >= CHUNK_SIZE_Y) continue;
-        const block = world.getBlockAt(Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(fy)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5));
-        if (block.prototype().is_solid) {
-            // 脚底站这个方块上方
-            const foot = fy + 1;
-            if (foot + 2 >= CHUNK_SIZE_Y) continue;
+/// 从 from_y 向下扫描，找到第一个固体方块，返回其上方可站立的脚底 Y (方块 y+1)。
+/// 只返回 foot 和 foot+1 都是空气的位置，保证实体（2格高）能站立。
+pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32) ?i32 {
+    var y: i32 = from_y;
+    while (y >= 0) : (y -= 1) {
+        if (isSolidAt(world, x, y, z)) {
+            const foot = y + 1;
+            if (foot + 2 >= CHUNK_SIZE_Y) return null;
             if (!isSolidAt(world, x, foot, z) and !isSolidAt(world, x, foot + 1, z)) {
-                // 检查落差：不能超过 1 格高差
-                const diff = foot - from_foot_y;
-                if (diff >= -3 and diff <= 1) return foot;
+                return foot;
             }
+            return null;
         }
     }
-
-    // 2. 目标列没有实体方块 → 向下寻找地面
-    var fy = from_foot_y;
-    while (fy > 0) : (fy -= 1) {
-        if (isSolidAt(world, x, fy, z)) {
-            const foot = fy + 1;
-            if (foot + 2 >= CHUNK_SIZE_Y) break;
-            if (!isSolidAt(world, x, foot, z) and !isSolidAt(world, x, foot + 1, z)) {
-                const diff = foot - from_foot_y;
-                if (diff >= -3 and diff <= 1) return foot;
-            }
-            break;
-        }
-    }
-
-    // 3. 向上找阶梯地面
-    fy = from_foot_y;
-    while (fy + 2 < CHUNK_SIZE_Y) : (fy += 1) {
-        if (isSolidAt(world, x, fy, z)) {
-            const foot = fy + 1;
-            if (foot + 2 >= CHUNK_SIZE_Y) break;
-            if (!isSolidAt(world, x, foot, z) and !isSolidAt(world, x, foot + 1, z)) {
-                const diff = foot - from_foot_y;
-                if (diff <= 1) return foot;
-            }
-        }
-    }
-
     return null;
 }
 
 pub const Node = struct {
     g: i32,
-    foot_y: i32,
     parent: ?GridPos,
 };
 
@@ -91,10 +61,11 @@ const DIRS = [_]struct { dx: i32, dz: i32, cost: i32 }{
     .{ .dx = -1, .dz = -1, .cost = G_DIAGONAL },
 };
 
-fn heuristic(dx: i32, dz: i32, h_diff: i32) i32 {
-    const manhattan: i32 = (@as(i32, @intCast(@abs(dx))) + @as(i32, @intCast(@abs(dz)))) * H_MULT;
-    const h_pen: i32 = @as(i32, @intCast(@abs(h_diff))) * H_HEIGHT_MULT;
-    return manhattan + h_pen;
+fn heuristic(a: GridPos, b: GridPos) i32 {
+    const dx: i32 = @intCast(@abs(a.x - b.x));
+    const dz: i32 = @intCast(@abs(a.z - b.z));
+    const dy: i32 = @intCast(@abs(a.y - b.y));
+    return (dx + dz) * H_MULT + dy * H_HEIGHT_MULT;
 }
 
 pub const AStarResult = enum { pending, found, failed };
@@ -103,8 +74,6 @@ pub const AStarState = struct {
     allocator: std.mem.Allocator,
     start: GridPos,
     end: GridPos,
-    start_y: i32,
-    end_y: i32,
     open_set: std.ArrayListUnmanaged(GridPos),
     nodes: std.AutoHashMapUnmanaged(GridPos, Node),
     steps_done: u32,
@@ -112,23 +81,26 @@ pub const AStarState = struct {
     result: AStarResult,
 };
 
-pub fn initAStar(allocator: std.mem.Allocator, from: Vec3, to: Vec3) !AStarState {
-    const start_x: i32 = @intFromFloat(@floor(from.x));
-    const start_z: i32 = @intFromFloat(@floor(from.z));
-    const start_y: i32 = @intFromFloat(@round(from.y));
+pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, to: Vec3) !AStarState {
+    const start = GridPos{
+        .x = @intFromFloat(@floor(from.x)),
+        .y = @intFromFloat(@round(from.y)),
+        .z = @intFromFloat(@floor(from.z)),
+    };
     const end_x: i32 = @intFromFloat(@floor(to.x));
     const end_z: i32 = @intFromFloat(@floor(to.z));
-    const end_y: i32 = @intFromFloat(@round(to.y));
-
-    const start = GridPos{ .x = start_x, .z = start_z };
-    const end = GridPos{ .x = end_x, .z = end_z };
+    const end_y = findGroundBelow(world, end_x, end_z, @as(i32, @intFromFloat(@round(to.y))) - 1) orelse
+        @as(i32, @intFromFloat(@round(to.y)));
+    const end = GridPos{
+        .x = end_x,
+        .y = end_y,
+        .z = end_z,
+    };
 
     var state = AStarState{
         .allocator = allocator,
         .start = start,
         .end = end,
-        .start_y = start_y,
-        .end_y = end_y,
         .open_set = .{},
         .nodes = .{},
         .steps_done = 0,
@@ -141,7 +113,7 @@ pub fn initAStar(allocator: std.mem.Allocator, from: Vec3, to: Vec3) !AStarState
     }
 
     try state.open_set.append(allocator, start);
-    try state.nodes.put(allocator, start, .{ .g = 0, .foot_y = start_y, .parent = null });
+    try state.nodes.put(allocator, start, .{ .g = 0, .parent = null });
 
     return state;
 }
@@ -163,7 +135,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
         var best_f: i32 = std.math.maxInt(i32);
         for (state.open_set.items, 0..) |npos, i| {
             const n = state.nodes.get(npos).?;
-            const h = heuristic(npos.x - state.end.x, npos.z - state.end.z, n.foot_y - state.end_y);
+            const h = heuristic(npos, state.end);
             const f = n.g + h;
             if (f < best_f) {
                 best_f = f;
@@ -171,7 +143,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
             }
         }
         const current = state.open_set.swapRemove(best_idx);
-        const cur_node = state.nodes.get(current).?;
+        const cur_g = state.nodes.get(current).?.g;
 
         if (current.eql(state.end)) {
             state.result = .found;
@@ -181,22 +153,35 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
         for (DIRS) |dir| {
             const nx = current.x + dir.dx;
             const nz = current.z + dir.dz;
-            const neighbor = GridPos{ .x = nx, .z = nz };
 
+            // 对角线检查：中间列必须两格空气，防止穿墙
             if (dir.dx != 0 and dir.dz != 0) {
                 const cx = current.x + dir.dx;
                 const cz = current.z;
-                if (reachableFootY(world, cx, cz, cur_node.foot_y) == null) continue;
+                if (isSolidAt(world, cx, current.y, cz) or
+                    isSolidAt(world, cx, current.y + 1, cz)) continue;
                 const fx = current.x;
                 const fz = current.z + dir.dz;
-                if (reachableFootY(world, fx, fz, cur_node.foot_y) == null) continue;
+                if (isSolidAt(world, fx, current.y, fz) or
+                    isSolidAt(world, fx, current.y + 1, fz)) continue;
             }
 
-            const reach = reachableFootY(world, nx, nz, cur_node.foot_y) orelse continue;
-            const tent_g = cur_node.g + dir.cost;
+            // 邻居列当前高度和头顶高度必须是空气
+            if (isSolidAt(world, nx, current.y, nz) or
+                isSolidAt(world, nx, current.y + 1, nz)) continue;
+
+            // 找到落点：从当前脚底往下找第一个固体方块
+            const landing = findGroundBelow(world, nx, nz, current.y - 1) orelse continue;
+
+            // 高度差：向上最多 1 格（跳跃），向下不限（重力下落）
+            const height_diff = landing - current.y;
+            if (height_diff > 1) continue;
+
+            const neighbor = GridPos{ .x = nx, .y = landing, .z = nz };
+            const tent_g = cur_g + dir.cost;
             const old_g = if (state.nodes.get(neighbor)) |n| n.g else std.math.maxInt(i32);
             if (tent_g < old_g) {
-                state.nodes.put(state.allocator, neighbor, .{ .g = tent_g, .foot_y = reach, .parent = current }) catch {
+                state.nodes.put(state.allocator, neighbor, .{ .g = tent_g, .parent = current }) catch {
                     state.result = .failed;
                     return;
                 };
@@ -228,10 +213,9 @@ pub fn buildAStarPath(state: *AStarState) !std.ArrayListUnmanaged(Vec3) {
 
     var node: GridPos = state.end;
     while (state.nodes.get(node).?.parent) |prev| {
-        const foot = state.nodes.get(node).?.foot_y;
         try path.append(state.allocator, Vec3.new(
             @as(f32, @floatFromInt(node.x)) + 0.5,
-            @as(f32, @floatFromInt(foot)),
+            @as(f32, @floatFromInt(node.y)),
             @as(f32, @floatFromInt(node.z)) + 0.5,
         ));
         node = prev;
@@ -239,120 +223,4 @@ pub fn buildAStarPath(state: *AStarState) !std.ArrayListUnmanaged(Vec3) {
 
     std.mem.reverse(Vec3, path.items);
     return path;
-}
-
-/// 三维 A* 寻路，返回下一步移动方向（XZ 单位向量）。失败返回 null。
-pub fn findPathStep(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, to: Vec3) !?Vec2 {
-    const start_x: i32 = @intFromFloat(@floor(from.x));
-    const start_z: i32 = @intFromFloat(@floor(from.z));
-    const start_y: i32 = @intFromFloat(@round(from.y));
-    const end_x: i32 = @intFromFloat(@floor(to.x));
-    const end_z: i32 = @intFromFloat(@floor(to.z));
-    const end_y: i32 = @intFromFloat(@round(to.y));
-
-    const start = GridPos{ .x = start_x, .z = start_z };
-    const end = GridPos{ .x = end_x, .z = end_z };
-
-    if (start.eql(end)) return null;
-
-    var open_set = std.ArrayListUnmanaged(GridPos){};
-    defer open_set.deinit(allocator);
-    var nodes = std.AutoHashMap(GridPos, Node).init(allocator);
-    defer nodes.deinit();
-
-    try open_set.append(allocator, start);
-    try nodes.put(start, .{ .g = 0, .foot_y = start_y, .parent = null });
-
-    var steps: u32 = 0;
-    const max_steps: u32 = 300;
-
-    while (open_set.items.len > 0 and steps < max_steps) : (steps += 1) {
-        // 找最小 F 值
-        var best_idx: usize = 0;
-        var best_f: i32 = std.math.maxInt(i32);
-        for (open_set.items, 0..) |node_pos, i| {
-            const n = nodes.get(node_pos).?;
-            const h = heuristic(node_pos.x - end_x, node_pos.z - end_z, n.foot_y - end_y);
-            const f = n.g + h;
-            if (f < best_f) {
-                best_f = f;
-                best_idx = i;
-            }
-        }
-        const current = open_set.swapRemove(best_idx);
-        const cur_node = nodes.get(current).?;
-
-        // 到达终点？
-        if (current.eql(end)) {
-            var node = current;
-            while (nodes.get(node).?.parent) |prev| {
-                if (prev.eql(start)) {
-                    const dx = @as(f32, @floatFromInt(node.x - start_x));
-                    const dz = @as(f32, @floatFromInt(node.z - start_z));
-                    const len = @sqrt(dx * dx + dz * dz);
-                    if (len < 0.001) return null;
-                    return Vec2.new(dx / len, dz / len);
-                }
-                node = prev;
-            }
-            return null;
-        }
-
-        // 展开邻居
-        for (DIRS) |dir| {
-            const nx = current.x + dir.dx;
-            const nz = current.z + dir.dz;
-            const neighbor = GridPos{ .x = nx, .z = nz };
-
-            // 对角线检查：两边必须都可通行
-            if (dir.dx != 0 and dir.dz != 0) {
-                const cx = current.x + dir.dx;
-                const cz = current.z;
-                if (reachableFootY(world, cx, cz, cur_node.foot_y) == null) continue;
-                const fx = current.x;
-                const fz = current.z + dir.dz;
-                if (reachableFootY(world, fx, fz, cur_node.foot_y) == null) continue;
-            }
-
-            const reach = reachableFootY(world, nx, nz, cur_node.foot_y) orelse continue;
-            const tent_g = cur_node.g + dir.cost;
-            const old_g = if (nodes.get(neighbor)) |n| n.g else std.math.maxInt(i32);
-            if (tent_g < old_g) {
-                try nodes.put(neighbor, .{ .g = tent_g, .foot_y = reach, .parent = current });
-                var found = false;
-                for (open_set.items) |item| {
-                    if (item.eql(neighbor)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) try open_set.append(allocator, neighbor);
-            }
-        }
-    }
-
-    // 兜底：贪心方向
-    const dx = @as(f32, @floatFromInt(end_x - start_x));
-    const dz = @as(f32, @floatFromInt(end_z - start_z));
-    const len = @sqrt(dx * dx + dz * dz);
-    if (len < 0.001) return null;
-    return Vec2.new(dx / len, dz / len);
-}
-
-/// 返回 (x,z) 列从最高处向下扫描找到的可站立方块顶部 Y
-pub fn getSurfaceY(world: *BlockWorld, x: i32, z: i32) ?i32 {
-    var y: i32 = @intCast(CHUNK_SIZE_Y - 1);
-    while (y >= 0) : (y -= 1) {
-        const pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
-        const block = world.getBlockAt(pos);
-        if (block.prototype().is_solid) {
-            const above: i32 = y + 1;
-            if (above >= CHUNK_SIZE_Y) return null;
-            const above_pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(above)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
-            const above_block = world.getBlockAt(above_pos);
-            if (!above_block.prototype().is_solid) return above;
-            return null;
-        }
-    }
-    return null;
 }

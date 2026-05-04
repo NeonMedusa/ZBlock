@@ -428,7 +428,7 @@ pub const BlockWorld = struct {
         }
     }
 
-    pub fn updateAIAgent(registry: *ECS.Registry, player_pos: Vec3, dt: f32) void {
+    pub fn updateAIAgent(registry: *ECS.Registry, player_pos: Vec3) void {
         var view = registry.view(.{ Comps.AIAgent, Comps.Position }, .{});
         var iter = view.entityIterator();
         while (iter.next()) |entity| {
@@ -440,21 +440,13 @@ pub const BlockWorld = struct {
             const dz = player_pos.z - pos.vec.z;
             const dist = @sqrt(dx * dx + dz * dz);
 
-            agent.path_timer -= dt;
-
             if (dist < info.detect_range) {
                 agent.target = player_pos;
-            } else if (agent.path_timer <= 0) {
-                agent.path_timer = info.wander_interval;
-                const angle = @as(f32, @floatFromInt(@mod(@as(i64, @intCast(std.time.microTimestamp())), 360))) * std.math.pi / 180.0;
-                const r: f32 = 4.0 + @as(f32, @floatFromInt(@mod(@as(i64, @intCast(std.time.microTimestamp() >> 8)), 8)));
-                agent.target = Vec3.new(pos.vec.x + @cos(angle) * r, pos.vec.y, pos.vec.z + @sin(angle) * r);
             }
         }
     }
 
     pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
-        const PATH_INTERVAL: f32 = 0.3;
         const STUCK_TIMEOUT: f32 = 4.0;
         const ASTAR_STEPS_PER_FRAME: u16 = 50;
 
@@ -479,6 +471,7 @@ pub const BlockWorld = struct {
             const dist_3d = @sqrt(dx * dx + dy * dy + dz * dz);
 
             intent.jump = false;
+            intent.direction = Vec3.zero;
 
             if (cooldown.timer > 0) {
                 cooldown.timer -= dt;
@@ -500,9 +493,7 @@ pub const BlockWorld = struct {
                         agent.path_index = 0;
                         agent.stuck_timer = STUCK_TIMEOUT;
                         agent.last_pos = pos.vec;
-                    } else |_| {
-                        astar.result = .failed;
-                    }
+                    } else |_| {}
                     Pathfind.deinitAStar(astar);
                     _ = self.astar_states.remove(entity);
                 } else if (astar.result == .failed) {
@@ -511,27 +502,24 @@ pub const BlockWorld = struct {
                 }
             }
 
-            // Follow path if exists
+            // Movement: follow path if available, otherwise greedy
             if (agent.path) |*path| {
-                agent.path_timer = PATH_INTERVAL;
-
                 var blocked = false;
                 if (agent.path_index < path.items.len) {
                     const wp = path.items[agent.path_index];
                     const wpx = @as(i32, @intFromFloat(@floor(wp.x)));
                     const wpz = @as(i32, @intFromFloat(@floor(wp.z)));
-                    const wpfy = @as(i32, @intFromFloat(@round(wp.y)));
-                    if (Pathfind.reachableFootY(self, wpx, wpz, wpfy) == null) {
+                    const wpy = @as(i32, @intFromFloat(@round(wp.y)));
+                    const ground = Pathfind.findGroundBelow(self, wpx, wpz, wpy - 1);
+                    if (ground == null or ground.? != wpy) {
                         blocked = true;
                     }
                 }
 
-                const moved = @sqrt(
-                    (pos.vec.x - agent.last_pos.x) * (pos.vec.x - agent.last_pos.x) +
-                    (pos.vec.z - agent.last_pos.z) * (pos.vec.z - agent.last_pos.z)
-                );
+                const moved = @sqrt((pos.vec.x - agent.last_pos.x) * (pos.vec.x - agent.last_pos.x) +
+                    (pos.vec.z - agent.last_pos.z) * (pos.vec.z - agent.last_pos.z));
                 agent.last_pos = pos.vec;
-                if (moved < 0.05) {
+                if (moved < 0.01) {
                     agent.stuck_timer -= dt;
                 } else {
                     agent.stuck_timer = STUCK_TIMEOUT;
@@ -556,40 +544,37 @@ pub const BlockWorld = struct {
                     path.deinit(self.allocator);
                     agent.path = null;
                 }
+                // } else if (dist_3d > 0.5) {
+                //     const d = @sqrt(dx * dx + dz * dz);
+                //     if (d > 0.01) {
+                //         intent.direction = Vec3.new(dx / d, 0, dz / d);
+                //     }
             }
 
-            // If no path, consider starting pathfinding
+            // If no path, start pathfinding
             if (agent.path == null and !self.astar_states.contains(entity)) {
-                agent.path_timer -= dt;
-                if (dist_3d > 0.5 and agent.path_timer <= 0) {
-                    agent.path_timer = PATH_INTERVAL;
-                    const start_grid = Pathfind.GridPos{
-                        .x = @intFromFloat(@floor(pos.vec.x)),
-                        .z = @intFromFloat(@floor(pos.vec.z)),
+                const start_grid = Pathfind.GridPos{
+                    .x = @intFromFloat(@floor(pos.vec.x)),
+                    .y = @intFromFloat(@round(pos.vec.y)),
+                    .z = @intFromFloat(@floor(pos.vec.z)),
+                };
+                const end_grid = Pathfind.GridPos{
+                    .x = @intFromFloat(@floor(agent.target.x)),
+                    .y = @intFromFloat(@round(agent.target.y)),
+                    .z = @intFromFloat(@floor(agent.target.z)),
+                };
+                if (!start_grid.eql(end_grid)) {
+                    var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target) catch continue;
+                    self.astar_states.put(entity, astar) catch {
+                        Pathfind.deinitAStar(&astar);
+                        continue;
                     };
-                    const end_grid = Pathfind.GridPos{
-                        .x = @intFromFloat(@floor(agent.target.x)),
-                        .z = @intFromFloat(@floor(agent.target.z)),
-                    };
-                    if (!start_grid.eql(end_grid)) {
-                        var astar = Pathfind.initAStar(self.allocator, pos.vec, agent.target) catch {
-                            if (@abs(dx) > 0.01 or @abs(dz) > 0.01) {
-                                const d = @sqrt(dx * dx + dz * dz);
-                                intent.direction = Vec3.new(dx / d, 0, dz / d);
-                            }
-                            continue;
-                        };
-                        self.astar_states.put(entity, astar) catch {
-                            Pathfind.deinitAStar(&astar);
-                            continue;
-                        };
-                    }
                 }
             }
 
             // Jump logic
             if (intent.direction.x != 0 or intent.direction.z != 0) {
-                const ahead = pos.vec.add(intent.direction.norm().scale(0.6));
+                const ahead = pos.vec.add(intent.direction.norm().scale(0.55));
                 const block_ahead = self.getBlockAt(ahead);
                 if (block_ahead.prototype().is_solid and on_ground.value) {
                     const above = ahead.add(Vec3.new(0, collider.height + 0.1, 0));

@@ -71,7 +71,18 @@ pub fn start(self: *Game) !void {
             self.block_world.updatePhysics(&self.registry, self.window.delta_time);
 
             // 3. AI — 目标选择
-            BlockWorld.BlockWorld.updateAIAgent(&self.registry, self.camera.position, self.window.delta_time);
+            {
+                var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+                var piter = pview.entityIterator();
+                while (piter.next()) |entity| {
+                    const player = pview.get(Comps.Player, entity);
+                    if (player.id == self.player_id) {
+                        const ppos = pview.get(Comps.Position, entity);
+                        BlockWorld.BlockWorld.updateAIAgent(&self.registry, ppos.vec);
+                        break;
+                    }
+                }
+            }
             // 4. AI — 寻路执行
             self.block_world.updateAI(&self.registry, self.window.delta_time);
 
@@ -385,7 +396,7 @@ fn updateEntities(self: *Game) !void {
                 const r: f32 = 16 + @as(f32, @floatFromInt(std.crypto.random.int(u32) % 16));
                 const sx: f32 = ppos.vec.x + @cos(angle) * r;
                 const sz: f32 = ppos.vec.z + @sin(angle) * r;
-                const sy = Pathfind.getSurfaceY(&self.block_world, @intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
+                const sy = getSurfaceY(&self.block_world, @intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
                 if (sy) |y| {
                     try spawnEnemy(self, "zombie", Vec3.new(sx, @as(f32, @floatFromInt(y)), sz));
                 }
@@ -500,5 +511,21 @@ const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
 const BlockWorld = @import("block_world.zig");
 const BlockRegistry = @import("block_registry.zig");
 const AABB = @import("aabb.zig").AABB;
-const Pathfind = @import("pathfind.zig");
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
+
+fn getSurfaceY(world: *BlockWorld.BlockWorld, x: i32, z: i32) ?i32 {
+    var y: i32 = @intCast(BlockWorld.CHUNK_SIZE_Y - 1);
+    while (y >= 0) : (y -= 1) {
+        const pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
+        const block = world.getBlockAt(pos);
+        if (block.prototype().is_solid) {
+            const above: i32 = y + 1;
+            if (above >= BlockWorld.CHUNK_SIZE_Y) return null;
+            const above_pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(above)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
+            const above_block = world.getBlockAt(above_pos);
+            if (!above_block.prototype().is_solid) return above;
+            return null;
+        }
+    }
+    return null;
+}

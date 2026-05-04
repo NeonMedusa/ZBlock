@@ -29,7 +29,7 @@ const entity_infos = [_]EntityTypeInfo{
         .attack_interval = 1.0,
         .wander_interval = 3.0,
         .detect_range = 16.0,
-        .collider_width = 0.6,
+        .collider_width = 0.4,
         .collider_height = 1.8,
     },
     .{
@@ -43,7 +43,7 @@ const entity_infos = [_]EntityTypeInfo{
         .attack_interval = 0.6,
         .wander_interval = 2.0,
         .detect_range = 20.0,
-        .collider_width = 0.6,
+        .collider_width = 0.4,
         .collider_height = 1.2,
     },
 };
