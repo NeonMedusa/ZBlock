@@ -473,6 +473,7 @@ pub const BlockWorld = struct {
             var agent = view.get(Comps.AIAgent, entity);
             const info = agent.type_id.info();
             const collider = view.get(Comps.Collider, entity);
+            const entity_height_blocks: i32 = @intFromFloat(@ceil(collider.height));
             var intent = view.get(Comps.MoveIntent, entity);
             const on_ground = view.get(Comps.OnGround, entity);
             var cooldown = view.get(Comps.AttackCooldown, entity);
@@ -525,7 +526,7 @@ pub const BlockWorld = struct {
                     const wpx = @as(i32, @intFromFloat(@floor(wp.x)));
                     const wpz = @as(i32, @intFromFloat(@floor(wp.z)));
                     const wpy = @as(i32, @intFromFloat(@round(wp.y)));
-                    const ground = Pathfind.findGroundBelow(self, wpx, wpz, wpy - 1);
+                    const ground = Pathfind.findGroundBelow(self, wpx, wpz, wpy - 1, entity_height_blocks);
                     if (ground == null or ground.? != wpy) {
                         blocked = true;
                     }
@@ -594,7 +595,7 @@ pub const BlockWorld = struct {
                     .z = @intFromFloat(@floor(agent.target.z)),
                 };
                 if (!start_grid.eql(end_grid)) {
-                    var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target) catch continue;
+                    var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks) catch continue;
                     self.astar_states.put(entity, astar) catch {
                         Pathfind.deinitAStar(&astar);
                         continue;
@@ -607,9 +608,9 @@ pub const BlockWorld = struct {
                 const ahead = pos.vec.add(intent.direction.norm().scale(0.55));
                 const block_ahead = self.getBlockAt(ahead);
                 if (block_ahead.prototype().is_solid and on_ground.value) {
-                    const above = ahead.add(Vec3.new(0, collider.height + 0.1, 0));
+                    const above = ahead.add(Vec3.new(0, @max(collider.height + 0.1, 1.0), 0));
                     if (!self.getBlockAt(above).prototype().is_solid) {
-                        const head_above = pos.vec.add(Vec3.new(0, collider.height + 0.1, 0));
+                        const head_above = pos.vec.add(Vec3.new(0, @max(collider.height + 0.1, 1.0), 0));
                         if (!self.getBlockAt(head_above).prototype().is_solid) {
                             intent.jump = true;
                         }

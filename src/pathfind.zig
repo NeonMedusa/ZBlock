@@ -40,18 +40,19 @@ fn isSolidAt(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
 }
 
 /// 从 from_y 向下扫描，找到第一个固体方块，返回其上方可站立的脚底 Y（方块 y+1）。
-/// 保证 foot 和 foot+1（实体两格高）都是空气。
+/// 保证 foot 开始的 entity_height_blocks 格都是空气（匹配实体身高）。
 /// 向下不限落差（重力自然下落），用于邻居列的落点计算。
-pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32) ?i32 {
+pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32, entity_height_blocks: i32) ?i32 {
     var y: i32 = from_y;
     while (y >= 0) : (y -= 1) {
         if (isSolidAt(world, x, y, z)) {
             const foot = y + 1;
-            if (foot + 2 >= CHUNK_SIZE_Y) return null;
-            if (!isSolidAt(world, x, foot, z) and !isSolidAt(world, x, foot + 1, z)) {
-                return foot;
+            if (foot + entity_height_blocks >= CHUNK_SIZE_Y) return null;
+            var fy: i32 = foot;
+            while (fy < foot + entity_height_blocks) : (fy += 1) {
+                if (isSolidAt(world, x, fy, z)) return null;
             }
-            return null;
+            return foot;
         }
     }
     return null;
@@ -99,11 +100,13 @@ pub const AStarState = struct {
     steps_done: u32,   // 已执行步数
     max_steps: u32,    // 最大步数（超过后取最近可达点）
     result: AStarResult,
+    entity_height_blocks: i32, // 实体占用的竖直方块数：ceil(collider_height)
 };
 
 /// 初始化 A* 寻路状态。
 /// end 的 y 通过 findGroundBelow 计算，确保目标站在实际地面上，而非空中或墙内。
-pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, to: Vec3) !AStarState {
+/// entity_height_blocks = ceil(collider_height)，决定需要的竖直空间格数。
+pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, to: Vec3, entity_height_blocks: i32) !AStarState {
     const start = GridPos{
         .x = @intFromFloat(@floor(from.x)),
         .y = @intFromFloat(@round(from.y)),
@@ -112,7 +115,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
     // 终点的 y 需要找实际地面，因为传入的 to.y 可能是眼高或空中坐标
     const end_x: i32 = @intFromFloat(@floor(to.x));
     const end_z: i32 = @intFromFloat(@floor(to.z));
-    const end_y = findGroundBelow(world, end_x, end_z, @as(i32, @intFromFloat(@round(to.y))) - 1) orelse
+    const end_y = findGroundBelow(world, end_x, end_z, @as(i32, @intFromFloat(@round(to.y))) - 1, entity_height_blocks) orelse
         @as(i32, @intFromFloat(@round(to.y)));
     const end = GridPos{
         .x = end_x,
@@ -129,6 +132,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .steps_done = 0,
         .max_steps = 1000,
         .result = .pending,
+        .entity_height_blocks = entity_height_blocks,
     };
     errdefer {
         state.open_set.deinit(allocator);
@@ -184,28 +188,42 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
             const nx = current.x + dir.dx;
             const nz = current.z + dir.dz;
 
-            // 对角线防穿墙：中间两个列必须两格空气
+            // 对角线防穿墙：中间两个列必须 entity_height_blocks 格空气
             if (dir.dx != 0 and dir.dz != 0) {
                 const cx = current.x + dir.dx;
                 const cz = current.z;
-                if (isSolidAt(world, cx, current.y, cz) or
-                    isSolidAt(world, cx, current.y + 1, cz)) continue;
+                var pass_cx: bool = true;
+                var fy: i32 = current.y;
+                while (fy < current.y + state.entity_height_blocks) : (fy += 1) {
+                    if (isSolidAt(world, cx, fy, cz)) { pass_cx = false; break; }
+                }
+                if (!pass_cx) continue;
                 const fx = current.x;
                 const fz = current.z + dir.dz;
-                if (isSolidAt(world, fx, current.y, fz) or
-                    isSolidAt(world, fx, current.y + 1, fz)) continue;
+                var pass_fz: bool = true;
+                fy = current.y;
+                while (fy < current.y + state.entity_height_blocks) : (fy += 1) {
+                    if (isSolidAt(world, fx, fy, fz)) { pass_fz = false; break; }
+                }
+                if (!pass_fz) continue;
             }
 
             // 先找落点（从当前脚底高度扫描，能发现上方 1 格的方块）
-            const landing = findGroundBelow(world, nx, nz, current.y) orelse continue;
+            const landing = findGroundBelow(world, nx, nz, current.y, state.entity_height_blocks) orelse continue;
 
             // 高度差：向上最多 1 格（自动跳跃），向下不限（重力下落）
             const height_diff = landing - current.y;
             if (height_diff > 1) continue;
 
-            // 落点空间验证：脚底和头顶必须是空气
-            if (isSolidAt(world, nx, landing, nz) or
-                isSolidAt(world, nx, landing + 1, nz)) continue;
+            // 落点空间验证：需要 entity_height_blocks 格空气
+            {
+                var fy: i32 = landing;
+                var pass: bool = true;
+                while (fy < landing + state.entity_height_blocks) : (fy += 1) {
+                    if (isSolidAt(world, nx, fy, nz)) { pass = false; break; }
+                }
+                if (!pass) continue;
+            }
 
             const neighbor = GridPos{ .x = nx, .y = landing, .z = nz };
             const tent_g = cur_g + dir.cost;

@@ -21,7 +21,7 @@ pub fn start(self: *Game) !void {
     self.registry.add(player_entity, Comps.Player{ .id = self.player_id });
     self.registry.add(player_entity, Comps.Position{ .vec = Vec3.new(8, 130, 8) });
     self.registry.add(player_entity, Comps.Velocity{ .vec = Vec3.zero });
-    self.registry.add(player_entity, Comps.Collider{});
+    self.registry.add(player_entity, Comps.Collider{ .width = 0.6, .height = 1.8 });
     self.registry.add(player_entity, Comps.MoveSpeed{ .value = 4.0 });
     self.registry.add(player_entity, Comps.JumpVelocity{ .value = 8.0 });
     self.registry.add(player_entity, Comps.OnGround{ .value = false });
