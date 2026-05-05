@@ -94,14 +94,14 @@ pub const AStarResult = enum { pending, found, failed };
 pub const AStarState = struct {
     allocator: std.mem.Allocator,
     start: GridPos, // 起点
-    end: GridPos,   // 目标（搜索中可能被折中终点覆盖）
+    end: GridPos, // 目标（搜索中可能被折中终点覆盖）
     open_set: std.ArrayListUnmanaged(GridPos),
     nodes: std.AutoHashMapUnmanaged(GridPos, Node),
-    steps_done: u32,   // 已执行步数
-    max_steps: u32,    // 最大步数（超过后取最近可达点）
+    steps_done: u32, // 已执行步数
+    max_steps: u32, // 最大步数（超过后取最近可达点）
     result: AStarResult,
     entity_height_blocks: i32, // 实体占用的竖直方块数：ceil(collider_height)
-    max_step_up: i32,           // 最大向上跳跃高度（方块数）
+    max_step_up: i32, // 最大向上跳跃高度（方块数）
 };
 
 /// 初始化 A* 寻路状态。
@@ -132,7 +132,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .open_set = .{},
         .nodes = .{},
         .steps_done = 0,
-        .max_steps = 1000,
+        .max_steps = 3000,
         .result = .pending,
         .entity_height_blocks = entity_height_blocks,
         .max_step_up = max_step_up,
@@ -198,7 +198,10 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 var pass_cx: bool = true;
                 var fy: i32 = current.y;
                 while (fy < current.y + state.entity_height_blocks) : (fy += 1) {
-                    if (isSolidAt(world, cx, fy, cz)) { pass_cx = false; break; }
+                    if (isSolidAt(world, cx, fy, cz)) {
+                        pass_cx = false;
+                        break;
+                    }
                 }
                 if (!pass_cx) continue;
                 const fx = current.x;
@@ -206,7 +209,10 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 var pass_fz: bool = true;
                 fy = current.y;
                 while (fy < current.y + state.entity_height_blocks) : (fy += 1) {
-                    if (isSolidAt(world, fx, fy, fz)) { pass_fz = false; break; }
+                    if (isSolidAt(world, fx, fy, fz)) {
+                        pass_fz = false;
+                        break;
+                    }
                 }
                 if (!pass_fz) continue;
             }
@@ -232,7 +238,10 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 var valid: bool = true;
                 var fy: i32 = foot;
                 while (fy < foot + state.entity_height_blocks) : (fy += 1) {
-                    if (isSolidAt(world, nx, fy, nz)) { valid = false; break; }
+                    if (isSolidAt(world, nx, fy, nz)) {
+                        valid = false;
+                        break;
+                    }
                 }
                 if (!valid) continue;
 
