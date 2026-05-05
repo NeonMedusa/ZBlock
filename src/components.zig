@@ -12,11 +12,10 @@ pub const Components = struct {
     pub const ModelName = struct { id: ModelId }; // 渲染用模型
     pub const AIAgent = struct {
         type_id: EntityTypeId,                          // 实体类型（僵尸/狼等）
-        target: Vec3 = Vec3.zero,                       // 当前追逐目标（玩家位置或游荡目标）
+        target: Vec3 = Vec3.zero,                       // 当前追逐目标（玩家脚底位置）
         path: ?std.ArrayListUnmanaged(Vec3) = null,     // 当前路径 waypoint 列表（世界坐标）
         path_index: u32 = 0,                            // 当前正在走向的 waypoint 索引
-        stuck_timer: f32 = 0,                           // 卡住计时器，超过 4 秒重建路径
-        last_pos: Vec3 = Vec3.zero,                     // 上一帧位置，用于卡住检测
+        stuck_timer: f32 = 0,                           // waypoint 超时计时器，正计时，到达时归零
     };
 
     // ---- 物理状态 ----

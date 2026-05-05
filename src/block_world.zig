@@ -506,8 +506,7 @@ pub const BlockWorld = struct {
                         if (agent.path) |*p| p.deinit(self.allocator);
                         agent.path = new_path;
                         agent.path_index = 0;
-                        agent.stuck_timer = STUCK_TIMEOUT;
-                        agent.last_pos = pos.vec;
+                        agent.stuck_timer = 0;
                     } else |_| {}
                     Pathfind.deinitAStar(astar);
                     _ = self.astar_states.remove(entity);
@@ -532,18 +531,10 @@ pub const BlockWorld = struct {
                     }
                 }
 
-                // 卡住检测：上一帧到这一帧的移动距离
-                const moved = @sqrt((pos.vec.x - agent.last_pos.x) * (pos.vec.x - agent.last_pos.x) +
-                    (pos.vec.z - agent.last_pos.z) * (pos.vec.z - agent.last_pos.z));
-                agent.last_pos = pos.vec;
-                if (moved < 0.01) {
-                    agent.stuck_timer -= dt; // 近乎未移动，累计卡住时间
-                } else {
-                    agent.stuck_timer = STUCK_TIMEOUT;
-                }
+                // 路径超时计时：到达 waypoint 时归零，超时则放弃当前路径
+                agent.stuck_timer += dt;
 
-                // waypoint 不可达或卡住超时 → 放弃当前路径
-                if (blocked or agent.stuck_timer <= 0) {
+                if (blocked or agent.stuck_timer > STUCK_TIMEOUT) {
                     path.deinit(self.allocator);
                     agent.path = null;
                 } else if (agent.path_index < path.items.len) {
@@ -551,12 +542,11 @@ pub const BlockWorld = struct {
                     const wdx = waypoint.x - pos.vec.x;
                     const wdz = waypoint.z - pos.vec.z;
                     const wdy = waypoint.y - pos.vec.y;
-                    // 水平和垂直方向都接近才算到达（防止脚底和悬空平台碰撞前误判到达）
                     const wdist = @sqrt(wdx * wdx + wdz * wdz + wdy * wdy);
 
                     if (wdist < 0.5) {
-                        agent.path_index += 1; // 到达 waypoint，前进到下一个
-                        agent.stuck_timer = STUCK_TIMEOUT;
+                        agent.path_index += 1;
+                        agent.stuck_timer = 0; // 到达 waypoint，重置超时计时
                     } else {
                         // 朝 waypoint 移动（仅水平方向，垂直由重力/跳跃处理）
                         const hdist = @sqrt(wdx * wdx + wdz * wdz);
