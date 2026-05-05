@@ -39,13 +39,22 @@ fn isSolidAt(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
     )).prototype().is_solid;
 }
 
-/// 从 from_y 向下扫描，找到第一个固体方块，返回其上方可站立的脚底 Y（方块 y+1）。
-/// 保证 foot 开始的 entity_height_blocks 格都是空气（匹配实体身高）。
+/// 判断指定位置是否为可游泳方块（水）
+fn isSwimmableBlock(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
+    return world.getBlockAt(Vec3.new(
+        @as(f32, @floatFromInt(x)) + 0.5,
+        @as(f32, @floatFromInt(y)) + 0.5,
+        @as(f32, @floatFromInt(z)) + 0.5,
+    )).prototype().is_swimmable;
+}
+
+/// 从 from_y 向下扫描，找到第一个固体/水方块，返回其上方可站立的脚底 Y（方块 y+1）。
+/// 保证 foot 开始的 entity_height_blocks 格都不是固体（水可以），匹配实体身高。
 /// 向下不限落差（重力自然下落），用于邻居列的落点计算。
 pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32, entity_height_blocks: i32) ?i32 {
     var y: i32 = from_y;
     while (y >= 0) : (y -= 1) {
-        if (isSolidAt(world, x, y, z)) {
+        if (isSolidAt(world, x, y, z) or isSwimmableBlock(world, x, y, z)) {
             const foot = y + 1;
             if (foot + entity_height_blocks >= CHUNK_SIZE_Y) return null;
             var fy: i32 = foot;
@@ -217,17 +226,23 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 if (!pass_fz) continue;
             }
 
-            // 扫描该列所有固体方块，为每个有效落点生成一个邻居节点
+            // 水中限制跳跃高度为 0：脚底下方是水 → 只能平走上岸，不能跳高墙
+            const eff_max_step_up: i32 = if (isSwimmableBlock(world, current.x, current.y - 1, current.z))
+                0
+            else
+                state.max_step_up;
+
+            // 扫描该列所有固体/水方块，为每个有效落点生成一个邻居节点
             var found_down: bool = false;
-            var solid_y: i32 = current.y + state.max_step_up;
+            var solid_y: i32 = current.y + eff_max_step_up;
             while (solid_y >= 0) : (solid_y -= 1) {
-                if (!isSolidAt(world, nx, solid_y, nz)) continue;
+                if (!isSolidAt(world, nx, solid_y, nz) and !isSwimmableBlock(world, nx, solid_y, nz)) continue;
 
                 const foot = solid_y + 1;
                 const height_diff = foot - current.y;
 
                 // 向上超过跳跃能力 → 跳过（继续往下扫）
-                if (height_diff > state.max_step_up) continue;
+                if (height_diff > eff_max_step_up) continue;
 
                 // 向下：只取第一个（最高的落点，避免生成过多低处节点）
                 if (height_diff < 0 and found_down) continue;

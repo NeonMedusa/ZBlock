@@ -487,6 +487,9 @@ pub const BlockWorld = struct {
             intent.direction = Vec3.zero;
             var need_repath = false;
 
+            // 水中自动上浮保持在水面，超时翻倍（游泳慢）
+            const in_water = self.isInSwimmable(pos, collider);
+
             // 攻击冷却
             if (cooldown.timer > 0) {
                 cooldown.timer -= dt;
@@ -534,7 +537,7 @@ pub const BlockWorld = struct {
                 // 路径超时计时：到达 waypoint 时归零，超时则放弃当前路径
                 agent.stuck_timer += dt;
 
-                if (blocked or agent.stuck_timer > STUCK_TIMEOUT) {
+                if (blocked or agent.stuck_timer > if (in_water) STUCK_TIMEOUT * 2.0 else STUCK_TIMEOUT) {
                     path.deinit(self.allocator);
                     agent.path = null;
                 } else if (agent.path_index < path.items.len) {
@@ -635,6 +638,11 @@ pub const BlockWorld = struct {
                         }
                     }
                 }
+            }
+
+            // 水中自动上浮：游泳时保持在水面（放末尾，不被路径跟随覆盖 y 分量）
+            if (in_water and !on_ground.value) {
+                intent.direction.y = 1.0;
             }
         }
     }
@@ -748,9 +756,9 @@ pub const BlockWorld = struct {
 
     fn isInSwimmable(self: *BlockWorld, pos: *Comps.Position, collider: *Comps.Collider) bool {
         const points = [_]Vec3{
-            pos.vec.add(Vec3.new(0, 0.1, 0)),
+            pos.vec.add(Vec3.new(0, 0.3, 0)),
             pos.vec.add(Vec3.new(0, collider.height * 0.5, 0)),
-            pos.vec.add(Vec3.new(0, collider.height - 0.1, 0)),
+            pos.vec.add(Vec3.new(0, collider.height - 0.3, 0)),
         };
         for (points) |p| {
             if (self.getBlockAt(p).prototype().is_swimmable) return true;
