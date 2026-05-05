@@ -70,7 +70,7 @@ pub fn start(self: *Game) !void {
             // 2. 物理
             self.block_world.updatePhysics(&self.registry, self.window.delta_time);
 
-            // 3. AI — 目标选择
+            // 3.AI 目标选择：从 ECS 读取玩家脚底坐标传给所有 AI 实体
             {
                 var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
                 var piter = pview.entityIterator();
@@ -83,7 +83,7 @@ pub fn start(self: *Game) !void {
                     }
                 }
             }
-            // 4. AI — 寻路执行
+            // 4. AI — 寻路执行：分步 A* + 路径跟随 + 跳跃
             self.block_world.updateAI(&self.registry, self.window.delta_time);
 
             // 5. 摄像机同步
@@ -175,6 +175,7 @@ pub fn deinit(self: *@This()) void {
     self.gctx.deinit();
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
+    // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
     {
         var view = self.registry.view(.{Comps.AIAgent}, .{});
         var iter = view.entityIterator();
@@ -246,6 +247,7 @@ fn handleLeftClick(self: *Game) !void {
         if (self.registry.tryGet(Comps.Health, entity_hit.entity)) |health| {
             health.current -= 10;
             if (health.current <= 0) {
+                // 销毁前清理 AI 数据（路径 + 寻路状态）
                 self.block_world.cleanupEntity(&self.registry, entity_hit.entity);
                 self.registry.destroy(entity_hit.entity);
             }
@@ -333,6 +335,7 @@ fn updateEntities(self: *Game) !void {
             }
             if (despawn) {
                 // TODO: 存档前记录 despawn 信息（type_id, pos, chunk_origin, health 等）
+                // 销毁前清理 AI 数据
                 self.block_world.cleanupEntity(&self.registry, entity);
                 self.registry.destroy(entity);
             }
@@ -361,6 +364,7 @@ fn updateEntities(self: *Game) !void {
                 if (ebox.min_x < pbox.max_x and ebox.max_x > pbox.min_x and
                     ebox.min_y < pbox.max_y and ebox.max_y > pbox.min_y and
                     ebox.min_z < pbox.max_z and ebox.max_z > pbox.min_z)
+                // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
                 {
                     hp.current -= info.attack_damage * self.window.delta_time;
                     std.debug.print("Player took {d:.2} damage, HP: {d:.1}/{d:.1}\n", .{ info.attack_damage * self.window.delta_time, hp.current, hp.max });
@@ -405,6 +409,7 @@ fn updateEntities(self: *Game) !void {
                 const sz: f32 = ppos.vec.z + @sin(angle) * r;
                 const sy = getSurfaceY(&self.block_world, @intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
                 if (sy) |y| {
+                    // 在方块表面生成敌人（脚底 = 表面方块顶 +1）
                     try spawnEnemy(self, "zombie", Vec3.new(sx, @as(f32, @floatFromInt(y)), sz));
                 }
                 break;

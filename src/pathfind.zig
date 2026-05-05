@@ -1,10 +1,20 @@
 // pathfind.zig — 三维 A* 寻路
-// GridPos 为 3D (x,y,z)，邻居通过 findGroundBelow 找落点
+//
+// GridPos 为 3D (x,y,z)，不同高度视为不同节点，支持多层建筑内寻路。
+// 邻居展开通过 findGroundBelow 找落点，向上最多 1 格（跳跃），向下不限（重力下落）。
+// 分步执行（stepAStar），每帧推进有限步数，不阻塞主循环。
+//
+// 核心数据结构：
+//   AStarState  — 持久化寻路状态，跨帧保存 open_set / nodes / 搜索进度
+//   GridPos      — 3D 网格坐标 {x, y, z}，y 是脚底高度
+//   Node         — A* 节点，存 g 值和父节点引用
+
 const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
 const BlockWorld = @import("block_world.zig").BlockWorld;
 const CHUNK_SIZE_Y = @import("block_world.zig").CHUNK_SIZE_Y;
 
+// 移动成本：轴向 10，对角线 14（≈10×√2，与 1.41 对应）
 const G_CARDINAL = 10;
 const G_DIAGONAL = 14;
 const H_MULT = 10;
@@ -12,7 +22,7 @@ const H_HEIGHT_MULT = 15;
 
 pub const GridPos = struct {
     x: i32,
-    y: i32,
+    y: i32, // 脚底高度
     z: i32,
 
     pub fn eql(a: GridPos, b: GridPos) bool {
@@ -20,6 +30,7 @@ pub const GridPos = struct {
     }
 };
 
+/// 判断指定位置是否为固体方块
 fn isSolidAt(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
     return world.getBlockAt(Vec3.new(
         @as(f32, @floatFromInt(x)) + 0.5,
@@ -28,8 +39,9 @@ fn isSolidAt(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
     )).prototype().is_solid;
 }
 
-/// 从 from_y 向下扫描，找到第一个固体方块，返回其上方可站立的脚底 Y (方块 y+1)。
-/// 只返回 foot 和 foot+1 都是空气的位置，保证实体（2格高）能站立。
+/// 从 from_y 向下扫描，找到第一个固体方块，返回其上方可站立的脚底 Y（方块 y+1）。
+/// 保证 foot 和 foot+1（实体两格高）都是空气。
+/// 向下不限落差（重力自然下落），用于邻居列的落点计算。
 pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32) ?i32 {
     var y: i32 = from_y;
     while (y >= 0) : (y -= 1) {
@@ -45,11 +57,13 @@ pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32) ?i32 {
     return null;
 }
 
+/// A* 节点：g 值和父节点引用（高度信息已包含在 GridPos.y 中）
 pub const Node = struct {
     g: i32,
     parent: ?GridPos,
 };
 
+// 8 方向邻居：4 个轴向 + 4 个对角线
 const DIRS = [_]struct { dx: i32, dz: i32, cost: i32 }{
     .{ .dx = 1, .dz = 0, .cost = G_CARDINAL },
     .{ .dx = -1, .dz = 0, .cost = G_CARDINAL },
@@ -61,6 +75,8 @@ const DIRS = [_]struct { dx: i32, dz: i32, cost: i32 }{
     .{ .dx = -1, .dz = -1, .cost = G_DIAGONAL },
 };
 
+/// Octile 距离启发函数：对角方向用对角线成本，剩余轴向用直线成本。
+/// 加上高度差的权重，使 A* 倾向于同高度移动，同时在多层建筑中能向上/下搜索。
 fn heuristic(a: GridPos, b: GridPos) i32 {
     const dx: i32 = @intCast(@abs(a.x - b.x));
     const dz: i32 = @intCast(@abs(a.z - b.z));
@@ -73,23 +89,27 @@ fn heuristic(a: GridPos, b: GridPos) i32 {
 
 pub const AStarResult = enum { pending, found, failed };
 
+/// 持久化寻路状态，跨帧保存
 pub const AStarState = struct {
     allocator: std.mem.Allocator,
-    start: GridPos,
-    end: GridPos,
+    start: GridPos, // 起点
+    end: GridPos,   // 目标（搜索中可能被折中终点覆盖）
     open_set: std.ArrayListUnmanaged(GridPos),
     nodes: std.AutoHashMapUnmanaged(GridPos, Node),
-    steps_done: u32,
-    max_steps: u32,
+    steps_done: u32,   // 已执行步数
+    max_steps: u32,    // 最大步数（超过后取最近可达点）
     result: AStarResult,
 };
 
+/// 初始化 A* 寻路状态。
+/// end 的 y 通过 findGroundBelow 计算，确保目标站在实际地面上，而非空中或墙内。
 pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, to: Vec3) !AStarState {
     const start = GridPos{
         .x = @intFromFloat(@floor(from.x)),
         .y = @intFromFloat(@round(from.y)),
         .z = @intFromFloat(@floor(from.z)),
     };
+    // 终点的 y 需要找实际地面，因为传入的 to.y 可能是眼高或空中坐标
     const end_x: i32 = @intFromFloat(@floor(to.x));
     const end_z: i32 = @intFromFloat(@floor(to.z));
     const end_y = findGroundBelow(world, end_x, end_z, @as(i32, @intFromFloat(@round(to.y))) - 1) orelse
@@ -121,11 +141,15 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
     return state;
 }
 
+/// 释放 A* 状态的内部内存
 pub fn deinitAStar(state: *AStarState) void {
     state.open_set.deinit(state.allocator);
     state.nodes.deinit(state.allocator);
 }
 
+/// 分步推进 A*，每帧调用一次，最多执行 max_steps_this_frame 步。
+/// 找到终点 → result = .found
+/// 步数耗尽或 open_set 空 → 用已探索中离目标最近的节点作为折中终点
 pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u16) void {
     if (state.result != .pending) return;
 
@@ -134,6 +158,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
         frame_steps += 1;
         state.steps_done += 1;
 
+        // 从 open_set 中选 F = g + h 最小的节点
         var best_idx: usize = 0;
         var best_f: i32 = std.math.maxInt(i32);
         for (state.open_set.items, 0..) |npos, i| {
@@ -148,16 +173,18 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
         const current = state.open_set.swapRemove(best_idx);
         const cur_g = state.nodes.get(current).?.g;
 
+        // 到达目标
         if (current.eql(state.end)) {
             state.result = .found;
             return;
         }
 
+        // 展开 8 方向邻居
         for (DIRS) |dir| {
             const nx = current.x + dir.dx;
             const nz = current.z + dir.dz;
 
-            // 对角线检查：中间列必须两格空气，防止穿墙
+            // 对角线防穿墙：中间两个列必须两格空气
             if (dir.dx != 0 and dir.dz != 0) {
                 const cx = current.x + dir.dx;
                 const cz = current.z;
@@ -169,14 +196,14 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                     isSolidAt(world, fx, current.y + 1, fz)) continue;
             }
 
-            // 先找落点：从当前脚底高度开始向下扫描（能扫到高处 1 格的方块）
+            // 先找落点（从当前脚底高度扫描，能发现上方 1 格的方块）
             const landing = findGroundBelow(world, nx, nz, current.y) orelse continue;
 
-            // 高度差：向上最多 1 格（跳跃），向下不限（重力下落）
+            // 高度差：向上最多 1 格（自动跳跃），向下不限（重力下落）
             const height_diff = landing - current.y;
             if (height_diff > 1) continue;
 
-            // 用落点高度验空间：脚底和头顶必须是空气
+            // 落点空间验证：脚底和头顶必须是空气
             if (isSolidAt(world, nx, landing, nz) or
                 isSolidAt(world, nx, landing + 1, nz)) continue;
 
@@ -205,8 +232,8 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
         }
     }
 
+    // 步数耗尽或无可达节点：选已探索中离目标最近的作为折中终点
     if (state.open_set.items.len == 0 or state.steps_done >= state.max_steps) {
-        // 取最接近目标的已探索节点作为折中终点
         var best_key: ?GridPos = null;
         var best_h: i32 = std.math.maxInt(i32);
         var it = state.nodes.keyIterator();
@@ -226,6 +253,9 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
     }
 }
 
+/// 从 end 回溯父链，生成完整路径（世界坐标 waypoint 列表）。
+/// 路径包含从起点之后的第一步到终点，不含起点（实体已在起点位置）。
+/// waypoint 位于方块中心 (x+0.5, foot_y, z+0.5)。
 pub fn buildAStarPath(state: *AStarState) !std.ArrayListUnmanaged(Vec3) {
     var path = std.ArrayListUnmanaged(Vec3){};
     errdefer path.deinit(state.allocator);

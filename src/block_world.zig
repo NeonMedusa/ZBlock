@@ -428,6 +428,9 @@ pub const BlockWorld = struct {
         }
     }
 
+    /// 每帧更新 AI 目标选择。
+    /// 玩家在探测范围内 → 目标设为玩家位置（脚底）。
+    /// player_pos 来自 ECS 的 Player.Position（脚底），不是摄像机（眼高）。
     pub fn updateAIAgent(registry: *ECS.Registry, player_pos: Vec3) void {
         var view = registry.view(.{ Comps.AIAgent, Comps.Position }, .{});
         var iter = view.entityIterator();
@@ -446,6 +449,15 @@ pub const BlockWorld = struct {
         }
     }
 
+    /// 每帧更新 AI 行为：管理 A* 寻路状态、跟随路径、触发跳跃。
+    ///
+    /// 流程：
+    ///   1. 推进进行中的 A*（每帧 ASTAR_STEPS_PER_FRAME 步）
+    ///   2. A* 完成后构建路径，替换到 agent.path
+    ///   3. 有路径 → 沿 waypoint 移动；路径过时 → 标记重算
+    ///   4. 无路径且无进行中 A* → 发起新寻路
+    ///   5. 路径阻塞/卡住超时 → 清除路径
+    ///   6. 前方有方块 → 自动跳跃
     pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
         const STUCK_TIMEOUT: f32 = 4.0;
         const ASTAR_STEPS_PER_FRAME: u16 = 10;
@@ -472,7 +484,9 @@ pub const BlockWorld = struct {
 
             intent.jump = false;
             intent.direction = Vec3.zero;
+            var need_repath = false;
 
+            // 攻击冷却
             if (cooldown.timer > 0) {
                 cooldown.timer -= dt;
             }
@@ -481,7 +495,7 @@ pub const BlockWorld = struct {
                 cooldown.timer = cooldown.interval;
             }
 
-            // Step ongoing A* if any
+            // 管理进行中的 A* 寻路：推进、检查结果、构建路径
             if (self.astar_states.getPtr(entity)) |astar| {
                 if (astar.result == .pending) {
                     Pathfind.stepAStar(astar, self, ASTAR_STEPS_PER_FRAME);
@@ -502,9 +516,10 @@ pub const BlockWorld = struct {
                 }
             }
 
-            // Movement: follow path if available, otherwise greedy
+            // 路径跟随：沿 waypoint 逐格移动
             if (agent.path) |*path| {
                 var blocked = false;
+                // 检查当前 waypoint 是否仍可达（地面是否被改变）
                 if (agent.path_index < path.items.len) {
                     const wp = path.items[agent.path_index];
                     const wpx = @as(i32, @intFromFloat(@floor(wp.x)));
@@ -516,15 +531,17 @@ pub const BlockWorld = struct {
                     }
                 }
 
+                // 卡住检测：上一帧到这一帧的移动距离
                 const moved = @sqrt((pos.vec.x - agent.last_pos.x) * (pos.vec.x - agent.last_pos.x) +
                     (pos.vec.z - agent.last_pos.z) * (pos.vec.z - agent.last_pos.z));
                 agent.last_pos = pos.vec;
                 if (moved < 0.01) {
-                    agent.stuck_timer -= dt;
+                    agent.stuck_timer -= dt; // 近乎未移动，累计卡住时间
                 } else {
                     agent.stuck_timer = STUCK_TIMEOUT;
                 }
 
+                // waypoint 不可达或卡住超时 → 放弃当前路径
                 if (blocked or agent.stuck_timer <= 0) {
                     path.deinit(self.allocator);
                     agent.path = null;
@@ -535,10 +552,21 @@ pub const BlockWorld = struct {
                     const wdist = @sqrt(wdx * wdx + wdz * wdz);
 
                     if (wdist < 0.5) {
-                        agent.path_index += 1;
+                        agent.path_index += 1; // 到达 waypoint，前进到下一个
                         agent.stuck_timer = STUCK_TIMEOUT;
                     } else {
-                        intent.direction = Vec3.new(wdx / wdist, 0, wdz / wdist);
+                        intent.direction = Vec3.new(wdx / wdist, 0, wdz / wdist); // 朝 waypoint 水平移动
+                    }
+
+                    // 路径即将走完且终点偏离目标超过 1 格 → 后台重算
+                    const remaining = path.items.len - agent.path_index;
+                    if (remaining < 7) {
+                        const final_wp = path.items[path.items.len - 1];
+                        const fdx = agent.target.x - final_wp.x;
+                        const fdz = agent.target.z - final_wp.z;
+                        if (@sqrt(fdx * fdx + fdz * fdz) > 1.0) {
+                            need_repath = true;
+                        }
                     }
                 } else {
                     path.deinit(self.allocator);
@@ -553,8 +581,8 @@ pub const BlockWorld = struct {
             //     }
             // }
 
-            // If no path, start pathfinding
-            if (agent.path == null and !self.astar_states.contains(entity)) {
+            // 发起新寻路：无路径（或路径过时）且无进行中的 A*
+            if ((agent.path == null or need_repath) and !self.astar_states.contains(entity)) {
                 const start_grid = Pathfind.GridPos{
                     .x = @intFromFloat(@floor(pos.vec.x)),
                     .y = @intFromFloat(@round(pos.vec.y)),
@@ -574,7 +602,7 @@ pub const BlockWorld = struct {
                 }
             }
 
-            // Jump logic
+            // 跳跃检测：前方 0.55 格有固体方块且可站上去 → 跳跃
             if (intent.direction.x != 0 or intent.direction.z != 0) {
                 const ahead = pos.vec.add(intent.direction.norm().scale(0.55));
                 const block_ahead = self.getBlockAt(ahead);
@@ -591,6 +619,7 @@ pub const BlockWorld = struct {
         }
     }
 
+    /// 清理实体的寻路状态和路径内存。在销毁实体前调用。
     pub fn cleanupEntity(self: *BlockWorld, registry: *ECS.Registry, entity: ECS.Entity) void {
         if (self.astar_states.getPtr(entity)) |astar| {
             Pathfind.deinitAStar(astar);
