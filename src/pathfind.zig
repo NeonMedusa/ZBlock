@@ -107,7 +107,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .open_set = .{},
         .nodes = .{},
         .steps_done = 0,
-        .max_steps = 3000,
+        .max_steps = 1000,
         .result = .pending,
     };
     errdefer {

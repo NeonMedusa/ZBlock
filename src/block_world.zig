@@ -544,12 +544,14 @@ pub const BlockWorld = struct {
                     path.deinit(self.allocator);
                     agent.path = null;
                 }
-                // } else if (dist_3d > 0.5) {
-                //     const d = @sqrt(dx * dx + dz * dz);
-                //     if (d > 0.01) {
-                //         intent.direction = Vec3.new(dx / d, 0, dz / d);
-                //     }
             }
+            // 贪心方向兜底
+            // else if (dist_3d > 0.5 and dist_3d < 5) {
+            //     const d = @sqrt(dx * dx + dz * dz);
+            //     if (d > 0.01) {
+            //         intent.direction = Vec3.new(dx / d, 0, dz / d);
+            //     }
+            // }
 
             // If no path, start pathfinding
             if (agent.path == null and !self.astar_states.contains(entity)) {
