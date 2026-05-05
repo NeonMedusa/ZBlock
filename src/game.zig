@@ -242,9 +242,11 @@ fn syncCameraFromPlayer(self: *Game) void {
 fn handleLeftClick(self: *Game) !void {
     const ray = self.camera.getCursorRay();
 
-    // 先检测实体
+    // 同时检测实体和方块，比较距离：谁近打谁（防止隔墙攻击实体）
     const entity_hit = Raycast.raycastEntities(&self.registry, ray, 8.0);
-    if (entity_hit.hit) {
+    const block_hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
+
+    if (entity_hit.hit and (!block_hit.hit or entity_hit.distance < block_hit.distance)) {
         const is_self = blk: {
             if (self.registry.tryGet(Comps.Player, entity_hit.entity)) |p| {
                 break :blk p.id == self.player_id;
@@ -259,13 +261,8 @@ fn handleLeftClick(self: *Game) !void {
                     self.registry.destroy(entity_hit.entity);
                 }
             }
-            return;
         }
-    }
-
-    // 未命中实体，尝试破坏方块
-    const block_hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
-    if (block_hit.hit) {
+    } else if (block_hit.hit) {
         try self.block_world.setBlock(block_hit.block_pos, .fromName("air"));
     }
 }
@@ -405,7 +402,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 0;
+        const MAX_ENEMIES: u32 = 10;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();
