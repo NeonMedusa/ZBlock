@@ -448,7 +448,7 @@ pub const BlockWorld = struct {
 
     pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
         const STUCK_TIMEOUT: f32 = 4.0;
-        const ASTAR_STEPS_PER_FRAME: u16 = 50;
+        const ASTAR_STEPS_PER_FRAME: u16 = 10;
 
         var view = registry.view(.{
             Comps.AIAgent,        Comps.Position, Comps.Velocity,     Comps.MoveSpeed,

@@ -65,7 +65,10 @@ fn heuristic(a: GridPos, b: GridPos) i32 {
     const dx: i32 = @intCast(@abs(a.x - b.x));
     const dz: i32 = @intCast(@abs(a.z - b.z));
     const dy: i32 = @intCast(@abs(a.y - b.y));
-    return (dx + dz) * H_MULT + dy * H_HEIGHT_MULT;
+    const d_min = @min(dx, dz);
+    const d_max = @max(dx, dz);
+    const h_horiz = d_min * G_DIAGONAL + (d_max - d_min) * G_CARDINAL;
+    return h_horiz + dy * H_HEIGHT_MULT;
 }
 
 pub const AStarResult = enum { pending, found, failed };
@@ -104,7 +107,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .open_set = .{},
         .nodes = .{},
         .steps_done = 0,
-        .max_steps = 300,
+        .max_steps = 3000,
         .result = .pending,
     };
     errdefer {
@@ -203,7 +206,23 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
     }
 
     if (state.open_set.items.len == 0 or state.steps_done >= state.max_steps) {
-        state.result = .failed;
+        // 取最接近目标的已探索节点作为折中终点
+        var best_key: ?GridPos = null;
+        var best_h: i32 = std.math.maxInt(i32);
+        var it = state.nodes.keyIterator();
+        while (it.next()) |key| {
+            const h = heuristic(key.*, state.end);
+            if (h < best_h) {
+                best_h = h;
+                best_key = key.*;
+            }
+        }
+        if (best_key) |k| {
+            state.end = k;
+            state.result = .found;
+        } else {
+            state.result = .failed;
+        }
     }
 }
 
