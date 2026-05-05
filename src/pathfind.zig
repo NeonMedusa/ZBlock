@@ -101,12 +101,14 @@ pub const AStarState = struct {
     max_steps: u32,    // 最大步数（超过后取最近可达点）
     result: AStarResult,
     entity_height_blocks: i32, // 实体占用的竖直方块数：ceil(collider_height)
+    max_step_up: i32,           // 最大向上跳跃高度（方块数）
 };
 
 /// 初始化 A* 寻路状态。
 /// end 的 y 通过 findGroundBelow 计算，确保目标站在实际地面上，而非空中或墙内。
 /// entity_height_blocks = ceil(collider_height)，决定需要的竖直空间格数。
-pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, to: Vec3, entity_height_blocks: i32) !AStarState {
+/// max_step_up = 最大向上跳跃高度（方块数），由 jump_vel²/(2*gravity) 计算。
+pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, to: Vec3, entity_height_blocks: i32, max_step_up: i32) !AStarState {
     const start = GridPos{
         .x = @intFromFloat(@floor(from.x)),
         .y = @intFromFloat(@round(from.y)),
@@ -133,6 +135,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .max_steps = 1000,
         .result = .pending,
         .entity_height_blocks = entity_height_blocks,
+        .max_step_up = max_step_up,
     };
     errdefer {
         state.open_set.deinit(allocator);
@@ -183,7 +186,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
             return;
         }
 
-        // 展开 8 方向邻居
+        // 展开 8 方向邻居（支持多级跳跃：每个邻居列可能产生多个不同高度的落点）
         for (DIRS) |dir| {
             const nx = current.x + dir.dx;
             const nz = current.z + dir.dz;
@@ -208,43 +211,54 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 if (!pass_fz) continue;
             }
 
-            // 先找落点（从当前脚底高度扫描，能发现上方 1 格的方块）
-            const landing = findGroundBelow(world, nx, nz, current.y, state.entity_height_blocks) orelse continue;
+            // 扫描该列所有固体方块，为每个有效落点生成一个邻居节点
+            var found_down: bool = false;
+            var solid_y: i32 = current.y + state.max_step_up;
+            while (solid_y >= 0) : (solid_y -= 1) {
+                if (!isSolidAt(world, nx, solid_y, nz)) continue;
 
-            // 高度差：向上最多 1 格（自动跳跃），向下不限（重力下落）
-            const height_diff = landing - current.y;
-            if (height_diff > 1) continue;
+                const foot = solid_y + 1;
+                const height_diff = foot - current.y;
 
-            // 落点空间验证：需要 entity_height_blocks 格空气
-            {
-                var fy: i32 = landing;
-                var pass: bool = true;
-                while (fy < landing + state.entity_height_blocks) : (fy += 1) {
-                    if (isSolidAt(world, nx, fy, nz)) { pass = false; break; }
+                // 向上超过跳跃能力 → 跳过（继续往下扫）
+                if (height_diff > state.max_step_up) continue;
+
+                // 向下：只取第一个（最高的落点，避免生成过多低处节点）
+                if (height_diff < 0 and found_down) continue;
+
+                if (foot + state.entity_height_blocks >= CHUNK_SIZE_Y) continue;
+
+                // 落脚空间验证：foot 开始的 entity_height_blocks 格全部是空气
+                var valid: bool = true;
+                var fy: i32 = foot;
+                while (fy < foot + state.entity_height_blocks) : (fy += 1) {
+                    if (isSolidAt(world, nx, fy, nz)) { valid = false; break; }
                 }
-                if (!pass) continue;
-            }
+                if (!valid) continue;
 
-            const neighbor = GridPos{ .x = nx, .y = landing, .z = nz };
-            const tent_g = cur_g + dir.cost;
-            const old_g = if (state.nodes.get(neighbor)) |n| n.g else std.math.maxInt(i32);
-            if (tent_g < old_g) {
-                state.nodes.put(state.allocator, neighbor, .{ .g = tent_g, .parent = current }) catch {
-                    state.result = .failed;
-                    return;
-                };
-                var found = false;
-                for (state.open_set.items) |item| {
-                    if (item.eql(neighbor)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    state.open_set.append(state.allocator, neighbor) catch {
+                if (height_diff < 0) found_down = true;
+
+                const neighbor = GridPos{ .x = nx, .y = foot, .z = nz };
+                const tent_g = cur_g + dir.cost;
+                const old_g = if (state.nodes.get(neighbor)) |n| n.g else std.math.maxInt(i32);
+                if (tent_g < old_g) {
+                    state.nodes.put(state.allocator, neighbor, .{ .g = tent_g, .parent = current }) catch {
                         state.result = .failed;
                         return;
                     };
+                    var found = false;
+                    for (state.open_set.items) |item| {
+                        if (item.eql(neighbor)) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        state.open_set.append(state.allocator, neighbor) catch {
+                            state.result = .failed;
+                            return;
+                        };
+                    }
                 }
             }
         }

@@ -320,7 +320,6 @@ pub const BlockWorld = struct {
             const vel = view.get(Comps.Velocity, entity);
             const aabb = view.get(Comps.Collider, entity);
             const move_speed = view.get(Comps.MoveSpeed, entity);
-            const jump_vel = view.get(Comps.JumpVelocity, entity);
             const on_ground = view.get(Comps.OnGround, entity);
             var intent = view.get(Comps.MoveIntent, entity);
 
@@ -350,7 +349,7 @@ pub const BlockWorld = struct {
             } else {
                 vel.vec.y -= effective_gravity * dt;
                 if (intent.jump and on_ground.value) {
-                    vel.vec.y = jump_vel.value;
+                    vel.vec.y = intent.jump_power;
                     on_ground.value = false;
                 }
             }
@@ -474,6 +473,7 @@ pub const BlockWorld = struct {
             const info = agent.type_id.info();
             const collider = view.get(Comps.Collider, entity);
             const entity_height_blocks: i32 = @intFromFloat(@ceil(collider.height));
+            const max_step_up: i32 = @intFromFloat(@floor((info.jump_vel * info.jump_vel) / (2.0 * GRAVITY)));
             var intent = view.get(Comps.MoveIntent, entity);
             const on_ground = view.get(Comps.OnGround, entity);
             var cooldown = view.get(Comps.AttackCooldown, entity);
@@ -550,13 +550,19 @@ pub const BlockWorld = struct {
                     const waypoint = path.items[agent.path_index];
                     const wdx = waypoint.x - pos.vec.x;
                     const wdz = waypoint.z - pos.vec.z;
-                    const wdist = @sqrt(wdx * wdx + wdz * wdz);
+                    const wdy = waypoint.y - pos.vec.y;
+                    // 水平和垂直方向都接近才算到达（防止脚底和悬空平台碰撞前误判到达）
+                    const wdist = @sqrt(wdx * wdx + wdz * wdz + wdy * wdy);
 
                     if (wdist < 0.5) {
-                        agent.path_index += 1; // 到达 waypoint，前进到下一个
+                        agent.path_index += 1;       // 到达 waypoint，前进到下一个
                         agent.stuck_timer = STUCK_TIMEOUT;
                     } else {
-                        intent.direction = Vec3.new(wdx / wdist, 0, wdz / wdist); // 朝 waypoint 水平移动
+                        // 朝 waypoint 移动（仅水平方向，垂直由重力/跳跃处理）
+                        const hdist = @sqrt(wdx * wdx + wdz * wdz);
+                        if (hdist > 0.01) {
+                            intent.direction = Vec3.new(wdx / hdist, 0, wdz / hdist);
+                        }
                     }
 
                     // 路径即将走完且终点偏离目标超过 1 格 → 后台重算
@@ -595,7 +601,7 @@ pub const BlockWorld = struct {
                     .z = @intFromFloat(@floor(agent.target.z)),
                 };
                 if (!start_grid.eql(end_grid)) {
-                    var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks) catch continue;
+                    var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks, max_step_up) catch continue;
                     self.astar_states.put(entity, astar) catch {
                         Pathfind.deinitAStar(&astar);
                         continue;
@@ -603,16 +609,48 @@ pub const BlockWorld = struct {
                 }
             }
 
-            // 跳跃检测：前方 0.55 格有固体方块且可站上去 → 跳跃
+            // 跳跃检测：前方跳跃范围内有固体方块 → 起跳
+            // 支持台阶（同高度）、墙（多格高）、悬空平台（上方有方块）
             if (intent.direction.x != 0 or intent.direction.z != 0) {
-                const ahead = pos.vec.add(intent.direction.norm().scale(0.55));
-                const block_ahead = self.getBlockAt(ahead);
-                if (block_ahead.prototype().is_solid and on_ground.value) {
-                    const above = ahead.add(Vec3.new(0, @max(collider.height + 0.1, 1.0), 0));
-                    if (!self.getBlockAt(above).prototype().is_solid) {
-                        const head_above = pos.vec.add(Vec3.new(0, @max(collider.height + 0.1, 1.0), 0));
-                        if (!self.getBlockAt(head_above).prototype().is_solid) {
-                            intent.jump = true;
+                if (on_ground.value) {
+                    const ahead = pos.vec.add(intent.direction.norm().scale(0.55));
+                    const ahead_y: i32 = @intFromFloat(@floor(ahead.y));
+
+                    // 在跳跃范围内扫描，找到第一个固体方块
+                    var solid_y: i32 = ahead_y;
+                    var has_solid: bool = false;
+                    while (solid_y <= ahead_y + max_step_up) : (solid_y += 1) {
+                        const sp = Vec3.new(ahead.x, @as(f32, @floatFromInt(solid_y)) + 0.5, ahead.z);
+                        if (self.getBlockAt(sp).prototype().is_solid) { has_solid = true; break; }
+                    }
+
+                    if (has_solid) {
+                        // 固体上方必须有空气空间，让实体能站上去
+                        var can_land: bool = false;
+                        var air_y: i32 = solid_y + 1;
+                        while (air_y <= solid_y + max_step_up) : (air_y += 1) {
+                            const ap = Vec3.new(ahead.x, @as(f32, @floatFromInt(air_y)) + 0.5, ahead.z);
+                            if (!self.getBlockAt(ap).prototype().is_solid) { can_land = true; break; }
+                        }
+                        if (can_land) {
+                            // 用 waypoint 高度计算精确跳跃力度，代替全速跳跃
+                            var jump_power: f32 = info.jump_vel;
+                            if (agent.path) |p| {
+                                if (agent.path_index < p.items.len) {
+                                    const wp = p.items[agent.path_index];
+                                    const needed = wp.y - pos.vec.y;
+                                    if (needed > 0.5 and needed <= @as(f32, @floatFromInt(max_step_up)) + 0.5) {
+                                        jump_power = @sqrt(2.0 * GRAVITY * (needed + 0.5));
+                                        jump_power = @min(jump_power, info.jump_vel);
+                                    }
+                                }
+                            }
+                            // 确保当前头顶有跳跃空间
+                            const head_above = pos.vec.add(Vec3.new(0, @max(collider.height + 0.1, 1.0), 0));
+                            if (!self.getBlockAt(head_above).prototype().is_solid) {
+                                intent.jump = true;
+                                intent.jump_power = jump_power;
+                            }
                         }
                     }
                 }

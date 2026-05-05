@@ -23,7 +23,7 @@ pub fn start(self: *Game) !void {
     self.registry.add(player_entity, Comps.Velocity{ .vec = Vec3.zero });
     self.registry.add(player_entity, Comps.Collider{ .width = 0.6, .height = 1.8 });
     self.registry.add(player_entity, Comps.MoveSpeed{ .value = 4.0 });
-    self.registry.add(player_entity, Comps.JumpVelocity{ .value = 8.0 });
+    self.registry.add(player_entity, Comps.JumpVelocity{ .value = 14.0 });
     self.registry.add(player_entity, Comps.OnGround{ .value = false });
     self.registry.add(player_entity, Comps.MoveIntent{});
     self.registry.add(player_entity, Comps.Health{ .current = 100, .max = 100 });
@@ -223,13 +223,14 @@ fn produceMoveIntent(self: *Game) void {
 }
 
 fn syncCameraFromPlayer(self: *Game) void {
-    var view = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+    var view = self.registry.view(.{ Comps.Player, Comps.Position, Comps.Collider }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
         const player = view.get(Comps.Player, entity);
         if (player.id == self.player_id) {
             const pos = view.get(Comps.Position, entity);
-            const eye_offset = Vec3.new(0, 1.6, 0);
+            const collider = view.get(Comps.Collider, entity);
+            const eye_offset = Vec3.new(0, collider.height - 0.2, 0);
             self.camera.position = pos.vec.add(eye_offset);
             self.camera.updateFromMouse(self);
             self.ubo.camera_pos = self.camera.position;
@@ -244,15 +245,22 @@ fn handleLeftClick(self: *Game) !void {
     // 先检测实体
     const entity_hit = Raycast.raycastEntities(&self.registry, ray, 8.0);
     if (entity_hit.hit) {
-        if (self.registry.tryGet(Comps.Health, entity_hit.entity)) |health| {
-            health.current -= 10;
-            if (health.current <= 0) {
-                // 销毁前清理 AI 数据（路径 + 寻路状态）
-                self.block_world.cleanupEntity(&self.registry, entity_hit.entity);
-                self.registry.destroy(entity_hit.entity);
+        const is_self = blk: {
+            if (self.registry.tryGet(Comps.Player, entity_hit.entity)) |p| {
+                break :blk p.id == self.player_id;
             }
+            break :blk false;
+        };
+        if (!is_self) {
+            if (self.registry.tryGet(Comps.Health, entity_hit.entity)) |health| {
+                health.current -= 10;
+                if (health.current <= 0) {
+                    self.block_world.cleanupEntity(&self.registry, entity_hit.entity);
+                    self.registry.destroy(entity_hit.entity);
+                }
+            }
+            return;
         }
-        return;
     }
 
     // 未命中实体，尝试破坏方块
@@ -397,7 +405,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 10;
+        const MAX_ENEMIES: u32 = 0;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

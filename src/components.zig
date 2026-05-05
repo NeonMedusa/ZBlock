@@ -35,7 +35,8 @@ pub const Components = struct {
     // ---- 输入意图（每帧由输入系统产生，物理系统消费后清除）----
     pub const MoveIntent = struct {
         direction: Vec3 = Vec3.zero, // 水平移动方向 + 游泳垂直方向
-        jump: bool = false, // 是否按下跳跃
+        jump: bool = false,         // 是否按下跳跃
+        jump_power: f32 = 8.0,     // 跳跃初速度（AI 可按需调整跳跃高度）
     };
 
     // ---- 战斗/生命 ----
