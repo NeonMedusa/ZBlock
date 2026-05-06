@@ -115,6 +115,8 @@ pub const BlockWorld = struct {
     worker: ?std.Thread = null,
     worker_gpa: std.heap.GeneralPurposeAllocator(.{}),
     astar_states: std.AutoHashMap(ECS.Entity, Pathfind.AStarState),
+    stale_targets: std.AutoHashMap(Pathfind.GridPos, u32),
+    last_exact_targets: std.AutoHashMap(ECS.Entity, Pathfind.GridPos),
 
     pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, max_chunks: usize) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
@@ -130,6 +132,12 @@ pub const BlockWorld = struct {
         var astar_states = std.AutoHashMap(ECS.Entity, Pathfind.AStarState).init(allocator);
         errdefer astar_states.deinit();
 
+        var stale_targets = std.AutoHashMap(Pathfind.GridPos, u32).init(allocator);
+        errdefer stale_targets.deinit();
+
+        var last_exact_targets = std.AutoHashMap(ECS.Entity, Pathfind.GridPos).init(allocator);
+        errdefer last_exact_targets.deinit();
+
         return BlockWorld{
             .allocator = allocator,
             .gctx = gctx,
@@ -140,6 +148,8 @@ pub const BlockWorld = struct {
             .completed = .{},
             .worker_gpa = .{},
             .astar_states = astar_states,
+            .stale_targets = stale_targets,
+            .last_exact_targets = last_exact_targets,
         };
     }
 
@@ -179,6 +189,9 @@ pub const BlockWorld = struct {
             }
             self.astar_states.deinit();
         }
+
+        self.stale_targets.deinit();
+        self.last_exact_targets.deinit();
 
         _ = self.worker_gpa.deinit();
     }
@@ -301,6 +314,8 @@ pub const BlockWorld = struct {
                 }
             }
         }
+        self.stale_targets.clearRetainingCapacity();
+        self.last_exact_targets.clearRetainingCapacity();
     }
 
     pub fn updatePhysics(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
@@ -511,9 +526,32 @@ pub const BlockWorld = struct {
                         agent.path_index = 0;
                         agent.stuck_timer = 0;
                     } else |_| {}
+
+                    // 不可达目标缓存 + 路径缓存
+                    {
+                        const target_grid = Pathfind.GridPos{
+                            .x = @intFromFloat(@floor(agent.target.x)),
+                            .y = @intFromFloat(@round(agent.target.y)),
+                            .z = @intFromFloat(@floor(agent.target.z)),
+                        };
+                        if (!astar.exact_match) {
+                            if (self.stale_targets.count() >= 64) {
+                                var it = self.stale_targets.keyIterator();
+                                if (it.next()) |old_key| _ = self.stale_targets.remove(old_key.*);
+                            }
+                            if (self.stale_targets.getOrPut(target_grid)) |entry| {
+                                if (entry.found_existing) entry.value_ptr.* += 1 else entry.value_ptr.* = 1;
+                            } else |_| {}
+                        } else {
+                            _ = self.stale_targets.remove(target_grid);
+                            self.last_exact_targets.put(entity, target_grid) catch {};
+                        }
+                    }
+                    agent.astar_cooldown = 1.0;
                     Pathfind.deinitAStar(astar);
                     _ = self.astar_states.remove(entity);
                 } else if (astar.result == .failed) {
+                    agent.astar_cooldown = 1.0;
                     Pathfind.deinitAStar(astar);
                     _ = self.astar_states.remove(entity);
                 }
@@ -577,32 +615,42 @@ pub const BlockWorld = struct {
                     agent.path = null;
                 }
             }
-            // 贪心方向兜底
-            // else if (dist_3d > 0.5 and dist_3d < 5) {
-            //     const d = @sqrt(dx * dx + dz * dz);
-            //     if (d > 0.01) {
-            //         intent.direction = Vec3.new(dx / d, 0, dz / d);
-            //     }
-            // }
 
-            // 发起新寻路：无路径（或路径过时）且无进行中的 A*
+            // 发起新寻路：无路径（或路径过时），无进行中 A*，冷却已过且目标未缓存
             if ((agent.path == null or need_repath) and !self.astar_states.contains(entity)) {
-                const start_grid = Pathfind.GridPos{
-                    .x = @intFromFloat(@floor(pos.vec.x)),
-                    .y = @intFromFloat(@round(pos.vec.y)),
-                    .z = @intFromFloat(@floor(pos.vec.z)),
-                };
-                const end_grid = Pathfind.GridPos{
-                    .x = @intFromFloat(@floor(agent.target.x)),
-                    .y = @intFromFloat(@round(agent.target.y)),
-                    .z = @intFromFloat(@floor(agent.target.z)),
-                };
-                if (!start_grid.eql(end_grid)) {
-                    var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks, max_step_up) catch continue;
-                    self.astar_states.put(entity, astar) catch {
-                        Pathfind.deinitAStar(&astar);
-                        continue;
+                agent.astar_cooldown -= dt;
+                if (agent.astar_cooldown <= 0) {
+                    const start_grid = Pathfind.GridPos{
+                        .x = @intFromFloat(@floor(pos.vec.x)),
+                        .y = @intFromFloat(@round(pos.vec.y)),
+                        .z = @intFromFloat(@floor(pos.vec.z)),
                     };
+                    const end_grid = Pathfind.GridPos{
+                        .x = @intFromFloat(@floor(agent.target.x)),
+                        .y = @intFromFloat(@round(agent.target.y)),
+                        .z = @intFromFloat(@floor(agent.target.z)),
+                    };
+                    if (!start_grid.eql(end_grid)) {
+                        const cached = self.last_exact_targets.get(entity);
+                        if (cached == null or !cached.?.eql(end_grid)) {
+                            const stale_hits = if (self.stale_targets.get(end_grid)) |c| c else @as(u32, 0);
+                            if (stale_hits < 3) {
+                                const cur_max_steps: u32 = if (stale_hits >= 2) @as(u32, 200) else @as(u32, 3000);
+                                var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks, max_step_up) catch continue;
+                                astar.max_steps = cur_max_steps;
+                                self.astar_states.put(entity, astar) catch {
+                                    Pathfind.deinitAStar(&astar);
+                                    continue;
+                                };
+                            }
+                        }
+                    }
+                } else if (agent.path == null and dist_3d < 10.0) {
+                    // 贪心桥接：A* 冷却中，直走方向临时填补
+                    const d = @sqrt(dx * dx + dz * dz);
+                    if (d > 0.01) {
+                        intent.direction = Vec3.new(dx / d, 0, dz / d);
+                    }
                 }
             }
 
@@ -657,6 +705,7 @@ pub const BlockWorld = struct {
             Pathfind.deinitAStar(astar);
             _ = self.astar_states.remove(entity);
         }
+        _ = self.last_exact_targets.remove(entity);
         if (registry.tryGet(Comps.AIAgent, entity)) |agent| {
             if (agent.path) |*p| {
                 p.deinit(self.allocator);
@@ -814,6 +863,16 @@ pub const BlockWorld = struct {
             @as(f32, @floatFromInt(y)) + 0.5,
             @as(f32, @floatFromInt(z)) + 0.5,
         )).prototype().is_swimmable;
+    }
+
+    /// 一次方块查询同时判断实心或可游泳，避免双次 getBlockAt（热点优化）
+    pub fn isSolidOrSwimmable(self: *BlockWorld, x: i32, y: i32, z: i32) bool {
+        const proto = self.getBlockAt(Vec3.new(
+            @as(f32, @floatFromInt(x)) + 0.5,
+            @as(f32, @floatFromInt(y)) + 0.5,
+            @as(f32, @floatFromInt(z)) + 0.5,
+        )).prototype();
+        return proto.is_solid or proto.is_swimmable;
     }
 };
 

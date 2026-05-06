@@ -12,6 +12,7 @@ camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
 block_world: BlockWorld.BlockWorld,
+load_range: i32,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
@@ -158,7 +159,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.ui_system = ui_system;
 
     // 测试方块世界
-    const load_range: i32 = 1;
+    self.load_range = 16;
+    const load_range: i32 = self.load_range;
     const max_chunks: usize = @intCast((2 * load_range + 1) * (2 * load_range + 1) * 4);
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
     try self.block_world.spawnWorker();
@@ -402,7 +404,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 100;
+        const MAX_ENEMIES: u32 = 1000;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();
@@ -455,7 +457,7 @@ fn updateChunks(self: *Game) !void {
         const pcx = @divFloor(player_origin.x, BlockWorld.CHUNK_SIZE_X_I32);
         const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_SIZE_Z_I32);
 
-        const load_range: i32 = 4;
+        const load_range: i32 = self.load_range;
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;

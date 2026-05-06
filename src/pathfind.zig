@@ -37,7 +37,7 @@ pub const GridPos = struct {
 pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32, entity_height_blocks: i32) ?i32 {
     var y: i32 = from_y;
     while (y >= 0) : (y -= 1) {
-        if (world.isSolidAt(x, y, z) or world.isSwimmableBlock(x, y, z)) {
+        if (world.isSolidOrSwimmable(x, y, z)) {
             const foot = y + 1;
             if (foot + entity_height_blocks >= CHUNK_SIZE_Y) return null;
             var fy: i32 = foot;
@@ -104,6 +104,7 @@ pub const AStarState = struct {
     steps_done: u32, // 已执行步数
     max_steps: u32, // 最大步数（超过后取最近可达点）
     result: AStarResult,
+    exact_match: bool = true, // 是否精确命中 end（折中则 false）
     entity_height_blocks: i32, // 实体占用的竖直方块数：ceil(collider_height)
     max_step_up: i32, // 最大向上跳跃高度（方块数）
 };
@@ -136,7 +137,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .open_pq = std.PriorityQueue(HeapEntry, void, heapLess).init(allocator, {}),
         .nodes = .{},
         .steps_done = 0,
-        .max_steps = 3000,
+        .max_steps = 0, // 由调用方覆盖
         .result = .pending,
         .entity_height_blocks = entity_height_blocks,
         .max_step_up = max_step_up,
@@ -227,7 +228,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
             var found_down: bool = false;
             var solid_y: i32 = current.y + eff_max_step_up;
             while (solid_y >= 0) : (solid_y -= 1) {
-                if (!world.isSolidAt(nx, solid_y, nz) and !world.isSwimmableBlock(nx, solid_y, nz)) continue;
+                if (!world.isSolidOrSwimmable(nx, solid_y, nz)) continue;
 
                 const foot = solid_y + 1;
                 const height_diff = foot - current.y;
@@ -286,6 +287,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
         if (best_key) |k| {
             state.end = k;
             state.result = .found;
+            state.exact_match = false;
         } else {
             state.result = .failed;
         }

@@ -16,6 +16,7 @@ pub const Components = struct {
         path: ?std.ArrayListUnmanaged(Vec3) = null,     // 当前路径 waypoint 列表（世界坐标）
         path_index: u32 = 0,                            // 当前正在走向的 waypoint 索引
         stuck_timer: f32 = 0,                           // waypoint 超时计时器，正计时，到达时归零
+        astar_cooldown: f32 = 0,                        // A* 完成后的冷却计时，限制重算频率（1 秒）
     };
 
     // ---- 物理状态 ----

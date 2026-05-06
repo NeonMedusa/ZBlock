@@ -75,12 +75,12 @@ pub const BlockId = enum(u32) {
 pub const BlockState = struct {
     block_id: BlockId = BlockId.fromName("air"),
     facing: Direction = .up,
-    durability: u32 = 10,
+    // durability: u32 = 10,
     pub fn init(block_id: BlockId) BlockState {
         return .{
             .block_id = block_id,
             .facing = .up,
-            .durability = block_id.prototype().durability,
+            // .durability = block_id.prototype().durability,
         };
     }
 };
