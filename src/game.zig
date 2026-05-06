@@ -159,11 +159,12 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.ui_system = ui_system;
 
     // 测试方块世界
-    self.load_range = 16;
+    self.load_range = 4;
     const load_range: i32 = self.load_range;
     const max_chunks: usize = @intCast((2 * load_range + 1) * (2 * load_range + 1) * 4);
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
     try self.block_world.spawnWorker();
+    try self.block_world.spawnAStarWorker();
 
     // 返回实例
     return self;

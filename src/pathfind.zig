@@ -80,6 +80,13 @@ fn heuristic(a: GridPos, b: GridPos) i32 {
     return h_horiz + dy * H_HEIGHT_MULT;
 }
 
+/// 不可达缓存 key：按目标坐标 + 实体移动能力区分
+pub const StaleKey = struct {
+    pos: GridPos,
+    height_blocks: i32,
+    step_up: i32,
+};
+
 pub const AStarResult = enum { pending, found, failed };
 
 /// 二叉堆条目：存节点位置、插入时的 g 和 f 值（f 用于排序，g 用于过期检测）

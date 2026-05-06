@@ -99,6 +99,11 @@ const NEIGHBOR_OFFSETS = [_]struct { x: i32, z: i32 }{
     .{ .x = 0, .z = 1 },
 };
 
+/// 异步 A* pending 队列条目
+const PendingAStar = struct { entity: ECS.Entity, state: Pathfind.AStarState };
+/// 异步 A* completed 队列条目
+const CompletedAStar = struct { entity: ECS.Entity, state: Pathfind.AStarState };
+
 pub const BlockWorld = struct {
     allocator: std.mem.Allocator,
     gctx: *Gctx,
@@ -108,15 +113,24 @@ pub const BlockWorld = struct {
     collision_list: std.ArrayListUnmanaged(AABB) = .{},
 
     pending: std.AutoHashMap(Vec3i, void),
-    pending_mutex: std.Thread.Mutex = .{},
+    chunk_mutex: std.Thread.Mutex = .{},  // 保护 chunks 读写的锁（mesh + A* worker + loadChunk）
     completed: std.ArrayListUnmanaged(MeshBuildResult),
     completed_mutex: std.Thread.Mutex = .{},
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     worker: ?std.Thread = null,
     worker_gpa: std.heap.GeneralPurposeAllocator(.{}),
-    astar_states: std.AutoHashMap(ECS.Entity, Pathfind.AStarState),
-    stale_targets: std.AutoHashMap(Pathfind.GridPos, u32),
+    stale_targets: std.AutoHashMap(Pathfind.StaleKey, u32),
     last_exact_targets: std.AutoHashMap(ECS.Entity, Pathfind.GridPos),
+
+    // 异步 A*：worker 持有 AStarState 所有权，通过队列与主线程交换
+    astar_pending: std.ArrayListUnmanaged(PendingAStar),
+    astar_pending_mutex: std.Thread.Mutex = .{},
+    astar_completed: std.ArrayListUnmanaged(CompletedAStar),
+    astar_completed_mutex: std.Thread.Mutex = .{},
+    astar_active: std.AutoHashMap(ECS.Entity, void),  // 标记有 A* 在运行的实体
+    astar_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    astar_worker: ?std.Thread = null,
+    astar_worker_gpa: std.heap.GeneralPurposeAllocator(.{}),
 
     pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, max_chunks: usize) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
@@ -129,10 +143,10 @@ pub const BlockWorld = struct {
         var pending = std.AutoHashMap(Vec3i, void).init(allocator);
         errdefer pending.deinit();
 
-        var astar_states = std.AutoHashMap(ECS.Entity, Pathfind.AStarState).init(allocator);
-        errdefer astar_states.deinit();
+        var astar_active = std.AutoHashMap(ECS.Entity, void).init(allocator);
+        errdefer astar_active.deinit();
 
-        var stale_targets = std.AutoHashMap(Pathfind.GridPos, u32).init(allocator);
+        var stale_targets = std.AutoHashMap(Pathfind.StaleKey, u32).init(allocator);
         errdefer stale_targets.deinit();
 
         var last_exact_targets = std.AutoHashMap(ECS.Entity, Pathfind.GridPos).init(allocator);
@@ -147,14 +161,21 @@ pub const BlockWorld = struct {
             .pending = pending,
             .completed = .{},
             .worker_gpa = .{},
-            .astar_states = astar_states,
+            .astar_active = astar_active,
             .stale_targets = stale_targets,
             .last_exact_targets = last_exact_targets,
+            .astar_pending = .{},
+            .astar_completed = .{},
+            .astar_worker_gpa = .{},
         };
     }
 
     pub fn spawnWorker(self: *BlockWorld) !void {
         self.worker = try std.Thread.spawn(.{}, workerFn, .{self});
+    }
+
+    pub fn spawnAStarWorker(self: *BlockWorld) !void {
+        self.astar_worker = try std.Thread.spawn(.{}, astarWorkerFn, .{self});
     }
 
     pub fn deinit(self: *BlockWorld) void {
@@ -164,6 +185,16 @@ pub const BlockWorld = struct {
             w.join();
         }
         self.worker = null;
+
+        // 清理 A* worker
+        self.astar_running.store(false, .release);
+        if (self.astar_worker) |w| {
+            w.join();
+        }
+        self.astar_worker = null;
+        self.astar_pending.deinit(self.allocator);
+        self.astar_completed.deinit(self.allocator);
+        _ = self.astar_worker_gpa.deinit();
 
         // 清理剩余completed结果（由worker_gpa分配）
         for (self.completed.items) |*r| r.deinit();
@@ -183,14 +214,12 @@ pub const BlockWorld = struct {
         self.collision_list.deinit(self.allocator);
 
         {
-            var it = self.astar_states.valueIterator();
-            while (it.next()) |state| {
-                Pathfind.deinitAStar(state);
-            }
-            self.astar_states.deinit();
+            self.astar_active.deinit();
         }
 
-        self.stale_targets.deinit();
+        {
+            self.stale_targets.deinit();
+        }
         self.last_exact_targets.deinit();
 
         _ = self.worker_gpa.deinit();
@@ -205,14 +234,14 @@ pub const BlockWorld = struct {
     }
 
     fn enqueueMeshBuild(self: *BlockWorld, origin: Vec3i) !void {
-        self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        self.chunk_mutex.lock();
+        defer self.chunk_mutex.unlock();
         try self.pending.put(origin, {});
     }
 
     pub fn pendingCount(self: *BlockWorld) usize {
-        self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        self.chunk_mutex.lock();
+        defer self.chunk_mutex.unlock();
         return self.pending.count();
     }
 
@@ -243,8 +272,8 @@ pub const BlockWorld = struct {
         }
         // 持锁写chunks和pending，防止与worker的HashMap读并发
         {
-            self.pending_mutex.lock();
-            defer self.pending_mutex.unlock();
+            self.chunk_mutex.lock();
+            defer self.chunk_mutex.unlock();
 
             try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache });
             std.debug.assert(self.chunks.count() <= self.chunks.capacity());
@@ -266,8 +295,8 @@ pub const BlockWorld = struct {
     }
 
     pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
-        self.pending_mutex.lock();
-        defer self.pending_mutex.unlock();
+        self.chunk_mutex.lock();
+        defer self.chunk_mutex.unlock();
 
         if (self.pending.contains(origin)) return;
 
@@ -466,7 +495,7 @@ pub const BlockWorld = struct {
     /// 每帧更新 AI 行为：管理 A* 寻路状态、跟随路径、触发跳跃。
     ///
     /// 流程：
-    ///   1. 推进进行中的 A*（每帧 ASTAR_STEPS_PER_FRAME 步）
+    ///   1. 轮询异步 A* worker 的完成结果
     ///   2. A* 完成后构建路径，替换到 agent.path
     ///   3. 有路径 → 沿 waypoint 移动；路径过时 → 标记重算
     ///   4. 无路径且无进行中 A* → 发起新寻路
@@ -474,7 +503,6 @@ pub const BlockWorld = struct {
     ///   6. 前方有方块 → 自动跳跃
     pub fn updateAI(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
         const STUCK_TIMEOUT: f32 = 4.0;
-        const ASTAR_STEPS_PER_FRAME: u16 = 10;
 
         var view = registry.view(.{
             Comps.AIAgent,        Comps.Position, Comps.Velocity,     Comps.MoveSpeed,
@@ -514,46 +542,62 @@ pub const BlockWorld = struct {
                 cooldown.timer = cooldown.interval;
             }
 
-            // 管理进行中的 A* 寻路：推进、检查结果、构建路径
-            if (self.astar_states.getPtr(entity)) |astar| {
-                if (astar.result == .pending) {
-                    Pathfind.stepAStar(astar, self, ASTAR_STEPS_PER_FRAME);
+            // 轮询异步 A* 完成结果（worker 返回完整的 AStarState）
+            {
+                var completed_buf: [16]CompletedAStar = undefined;
+                var completed_count: usize = 0;
+                {
+                    self.astar_completed_mutex.lock();
+                    defer self.astar_completed_mutex.unlock();
+                    var i: usize = self.astar_completed.items.len;
+                    while (i > 0 and completed_count < completed_buf.len) {
+                        i -= 1;
+                        completed_buf[completed_count] = self.astar_completed.swapRemove(i);
+                        completed_count += 1;
+                    }
                 }
-                if (astar.result == .found) {
-                    if (Pathfind.buildAStarPath(astar)) |new_path| {
-                        if (agent.path) |*p| p.deinit(self.allocator);
-                        agent.path = new_path;
-                        agent.path_index = 0;
-                        agent.stuck_timer = 0;
-                    } else |_| {}
-
-                    // 不可达目标缓存 + 路径缓存
-                    {
-                        const target_grid = Pathfind.GridPos{
-                            .x = @intFromFloat(@floor(agent.target.x)),
-                            .y = @intFromFloat(@round(agent.target.y)),
-                            .z = @intFromFloat(@floor(agent.target.z)),
+                for (completed_buf[0..completed_count]) |*entry| {
+                    const e = entry.entity;
+                    var astar = entry.state;
+                    _ = self.astar_active.remove(e);
+                    if (astar.result == .found) {
+                        if (Pathfind.buildAStarPath(&astar)) |new_path| {
+                            if (registry.tryGet(Comps.AIAgent, e)) |a| {
+                                if (a.path) |*p| p.deinit(self.allocator);
+                                a.path = new_path;
+                                a.path_index = 0;
+                                a.stuck_timer = 0;
+                            } else {
+                                var p = new_path;
+                                p.deinit(self.allocator);
+                            }
+                        } else |_| {}
+                        const stale_key = Pathfind.StaleKey{
+                            .pos = astar.end,
+                            .height_blocks = astar.entity_height_blocks,
+                            .step_up = astar.max_step_up,
                         };
                         if (!astar.exact_match) {
                             if (self.stale_targets.count() >= 64) {
-                                var it = self.stale_targets.keyIterator();
-                                if (it.next()) |old_key| _ = self.stale_targets.remove(old_key.*);
+                                var it2 = self.stale_targets.keyIterator();
+                                if (it2.next()) |old_key| _ = self.stale_targets.remove(old_key.*);
                             }
-                            if (self.stale_targets.getOrPut(target_grid)) |entry| {
-                                if (entry.found_existing) entry.value_ptr.* += 1 else entry.value_ptr.* = 1;
+                            if (self.stale_targets.getOrPut(stale_key)) |se| {
+                                if (se.found_existing) se.value_ptr.* += 1 else se.value_ptr.* = 1;
                             } else |_| {}
                         } else {
-                            _ = self.stale_targets.remove(target_grid);
-                            self.last_exact_targets.put(entity, target_grid) catch {};
+                            _ = self.stale_targets.remove(stale_key);
+                            self.last_exact_targets.put(e, astar.end) catch {};
+                        }
+                        if (registry.tryGet(Comps.AIAgent, e)) |a| {
+                            a.astar_cooldown = 1.0;
+                        }
+                    } else if (astar.result == .failed) {
+                        if (registry.tryGet(Comps.AIAgent, e)) |a| {
+                            a.astar_cooldown = 1.0;
                         }
                     }
-                    agent.astar_cooldown = 1.0;
-                    Pathfind.deinitAStar(astar);
-                    _ = self.astar_states.remove(entity);
-                } else if (astar.result == .failed) {
-                    agent.astar_cooldown = 1.0;
-                    Pathfind.deinitAStar(astar);
-                    _ = self.astar_states.remove(entity);
+                    Pathfind.deinitAStar(&astar);
                 }
             }
 
@@ -617,7 +661,7 @@ pub const BlockWorld = struct {
             }
 
             // 发起新寻路：无路径（或路径过时），无进行中 A*，冷却已过且目标未缓存
-            if ((agent.path == null or need_repath) and !self.astar_states.contains(entity)) {
+            if ((agent.path == null or need_repath) and !self.astar_active.contains(entity)) {
                 agent.astar_cooldown -= dt;
                 if (agent.astar_cooldown <= 0) {
                     const start_grid = Pathfind.GridPos{
@@ -633,15 +677,21 @@ pub const BlockWorld = struct {
                     if (!start_grid.eql(end_grid)) {
                         const cached = self.last_exact_targets.get(entity);
                         if (cached == null or !cached.?.eql(end_grid)) {
-                            const stale_hits = if (self.stale_targets.get(end_grid)) |c| c else @as(u32, 0);
+                            const stale_key = Pathfind.StaleKey{
+                                .pos = end_grid,
+                                .height_blocks = entity_height_blocks,
+                                .step_up = max_step_up,
+                            };
+                            const stale_hits = if (self.stale_targets.get(stale_key)) |c| c else @as(u32, 0);
                             if (stale_hits < 3) {
                                 const cur_max_steps: u32 = if (stale_hits >= 2) @as(u32, 200) else @as(u32, 3000);
                                 var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks, max_step_up) catch continue;
                                 astar.max_steps = cur_max_steps;
-                                self.astar_states.put(entity, astar) catch {
-                                    Pathfind.deinitAStar(&astar);
-                                    continue;
-                                };
+                                self.astar_active.put(entity, {}) catch continue;
+                                // 状态随 entity 一同提交给 worker（worker 持有完整所有权）
+                                self.astar_pending_mutex.lock();
+                                self.astar_pending.append(self.allocator, .{ .entity = entity, .state = astar }) catch {};
+                                self.astar_pending_mutex.unlock();
                             }
                         }
                     }
@@ -701,10 +751,7 @@ pub const BlockWorld = struct {
 
     /// 清理实体的寻路状态和路径内存。在销毁实体前调用。
     pub fn cleanupEntity(self: *BlockWorld, registry: *ECS.Registry, entity: ECS.Entity) void {
-        if (self.astar_states.getPtr(entity)) |astar| {
-            Pathfind.deinitAStar(astar);
-            _ = self.astar_states.remove(entity);
-        }
+        _ = self.astar_active.remove(entity);
         _ = self.last_exact_targets.remove(entity);
         if (registry.tryGet(Comps.AIAgent, entity)) |agent| {
             if (agent.path) |*p| {
@@ -880,7 +927,7 @@ fn workerFn(world: *BlockWorld) void {
     const alloc = world.worker_gpa.allocator();
     while (world.running.load(.acquire)) {
         // 取任务
-        world.pending_mutex.lock();
+        world.chunk_mutex.lock();
 
         var origin: ?Vec3i = null;
         var iter = world.pending.keyIterator();
@@ -903,7 +950,7 @@ fn workerFn(world: *BlockWorld) void {
                 _ = world.pending.remove(o);
             }
         }
-        world.pending_mutex.unlock();
+        world.chunk_mutex.unlock();
 
         if (origin) |o| {
             if (loaded_ptr_chunks[0]) |loaded| {
@@ -932,7 +979,41 @@ fn workerFn(world: *BlockWorld) void {
                 world.completed_mutex.unlock();
             }
         } else {
-            std.Thread.yield() catch {};
+        std.Thread.sleep(1 * std.time.ns_per_ms);
         }
+    }
+}
+
+fn astarWorkerFn(world: *BlockWorld) void {
+    var active: ?PendingAStar = null;
+    while (world.astar_running.load(.acquire)) {
+        if (active == null) {
+            world.astar_pending_mutex.lock();
+            defer world.astar_pending_mutex.unlock();
+            if (world.astar_pending.items.len > 0) {
+                active = world.astar_pending.swapRemove(0);
+            }
+        }
+        if (active) |*entry| {
+            var just_finished: bool = false;
+            {
+                // 仅持 chunk_mutex（保护 chunk 读取），state 由 worker 独占无需锁
+                world.chunk_mutex.lock();
+                defer world.chunk_mutex.unlock();
+                if (entry.state.result == .pending) {
+                    Pathfind.stepAStar(&entry.state, world, 200);
+                }
+                if (entry.state.result != .pending) {
+                    just_finished = true;
+                }
+            }
+            if (just_finished) {
+                world.astar_completed_mutex.lock();
+                defer world.astar_completed_mutex.unlock();
+                world.astar_completed.append(world.allocator, .{ .entity = entry.entity, .state = entry.state }) catch {};
+                active = null;
+            }
+        }
+        std.Thread.sleep(1 * std.time.ns_per_ms);
     }
 }
