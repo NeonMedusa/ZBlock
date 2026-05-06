@@ -558,13 +558,17 @@ pub const BlockWorld = struct {
                         }
                     }
 
-                    // 路径即将走完且终点偏离目标超过 1 格 → 后台重算
-                    const remaining = path.items.len - agent.path_index;
-                    if (remaining < 7) {
+                    // 距离自适应重算：近处微动就重算，远处不轻易浪费长搜索
+                    {
+                        const repath_dist: f32 = blk: {
+                            if (dist_3d < 10.0) break :blk 1.0;
+                            if (dist_3d < 20.0) break :blk 3.0;
+                            break :blk 8.0;
+                        };
                         const final_wp = path.items[path.items.len - 1];
                         const fdx = agent.target.x - final_wp.x;
                         const fdz = agent.target.z - final_wp.z;
-                        if (@sqrt(fdx * fdx + fdz * fdz) > 1.0) {
+                        if (@sqrt(fdx * fdx + fdz * fdz) > repath_dist) {
                             need_repath = true;
                         }
                     }
@@ -754,6 +758,7 @@ pub const BlockWorld = struct {
         }
     }
 
+    /// 检查实体身体任意部位是否在水中，用于游泳判定
     fn isInSwimmable(self: *BlockWorld, pos: *Comps.Position, collider: *Comps.Collider) bool {
         const points = [_]Vec3{
             pos.vec.add(Vec3.new(0, 0.3, 0)),
@@ -791,6 +796,24 @@ pub const BlockWorld = struct {
             return getBlockAtFromChunk(loaded.chunk, origin, x, y, z);
         }
         return .fromName("air");
+    }
+
+    /// 判断指定整数坐标是否为固体方块
+    pub fn isSolidAt(self: *BlockWorld, x: i32, y: i32, z: i32) bool {
+        return self.getBlockAt(Vec3.new(
+            @as(f32, @floatFromInt(x)) + 0.5,
+            @as(f32, @floatFromInt(y)) + 0.5,
+            @as(f32, @floatFromInt(z)) + 0.5,
+        )).prototype().is_solid;
+    }
+
+    /// 判断指定整数坐标是否为可游泳方块（水）
+    pub fn isSwimmableBlock(self: *BlockWorld, x: i32, y: i32, z: i32) bool {
+        return self.getBlockAt(Vec3.new(
+            @as(f32, @floatFromInt(x)) + 0.5,
+            @as(f32, @floatFromInt(y)) + 0.5,
+            @as(f32, @floatFromInt(z)) + 0.5,
+        )).prototype().is_swimmable;
     }
 };
 

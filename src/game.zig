@@ -402,7 +402,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 10;
+        const MAX_ENEMIES: u32 = 100;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

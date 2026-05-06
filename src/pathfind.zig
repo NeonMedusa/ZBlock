@@ -1,11 +1,12 @@
-// pathfind.zig — 三维 A* 寻路
+// pathfind.zig — 三维 A* 寻路（二叉堆优化 open_set）
 //
 // GridPos 为 3D (x,y,z)，不同高度视为不同节点，支持多层建筑内寻路。
-// 邻居展开通过 findGroundBelow 找落点，向上最多 1 格（跳跃），向下不限（重力下落）。
+// 邻居展开通过 findGroundBelow 找落点，向上最多 max_step_up 格，向下不限（重力下落）。
 // 分步执行（stepAStar），每帧推进有限步数，不阻塞主循环。
+// open_set 使用二叉堆（PriorityQueue），取最小 F 节点 O(log N)。
 //
 // 核心数据结构：
-//   AStarState  — 持久化寻路状态，跨帧保存 open_set / nodes / 搜索进度
+//   AStarState  — 持久化寻路状态，跨帧保存 open_pq（堆）/ nodes / 搜索进度
 //   GridPos      — 3D 网格坐标 {x, y, z}，y 是脚底高度
 //   Node         — A* 节点，存 g 值和父节点引用
 
@@ -18,7 +19,7 @@ const CHUNK_SIZE_Y = @import("block_world.zig").CHUNK_SIZE_Y;
 const G_CARDINAL = 10;
 const G_DIAGONAL = 14;
 const H_MULT = 10;
-const H_HEIGHT_MULT = 15;
+const H_HEIGHT_MULT = 15; // 垂直成本，改成10则三轴均衡
 
 pub const GridPos = struct {
     x: i32,
@@ -30,36 +31,18 @@ pub const GridPos = struct {
     }
 };
 
-/// 判断指定位置是否为固体方块
-fn isSolidAt(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
-    return world.getBlockAt(Vec3.new(
-        @as(f32, @floatFromInt(x)) + 0.5,
-        @as(f32, @floatFromInt(y)) + 0.5,
-        @as(f32, @floatFromInt(z)) + 0.5,
-    )).prototype().is_solid;
-}
-
-/// 判断指定位置是否为可游泳方块（水）
-fn isSwimmableBlock(world: *BlockWorld, x: i32, y: i32, z: i32) bool {
-    return world.getBlockAt(Vec3.new(
-        @as(f32, @floatFromInt(x)) + 0.5,
-        @as(f32, @floatFromInt(y)) + 0.5,
-        @as(f32, @floatFromInt(z)) + 0.5,
-    )).prototype().is_swimmable;
-}
-
 /// 从 from_y 向下扫描，找到第一个固体/水方块，返回其上方可站立的脚底 Y（方块 y+1）。
 /// 保证 foot 开始的 entity_height_blocks 格都不是固体（水可以），匹配实体身高。
 /// 向下不限落差（重力自然下落），用于邻居列的落点计算。
 pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32, entity_height_blocks: i32) ?i32 {
     var y: i32 = from_y;
     while (y >= 0) : (y -= 1) {
-        if (isSolidAt(world, x, y, z) or isSwimmableBlock(world, x, y, z)) {
+        if (world.isSolidAt(x, y, z) or world.isSwimmableBlock(x, y, z)) {
             const foot = y + 1;
             if (foot + entity_height_blocks >= CHUNK_SIZE_Y) return null;
             var fy: i32 = foot;
             while (fy < foot + entity_height_blocks) : (fy += 1) {
-                if (isSolidAt(world, x, fy, z)) return null;
+                if (world.isSolidAt(x, fy, z)) return null;
             }
             return foot;
         }
@@ -99,12 +82,24 @@ fn heuristic(a: GridPos, b: GridPos) i32 {
 
 pub const AStarResult = enum { pending, found, failed };
 
+/// 二叉堆条目：存节点位置、插入时的 g 和 f 值（f 用于排序，g 用于过期检测）
+const HeapEntry = struct {
+    pos: GridPos,
+    g: i32,
+    f: i32,
+};
+
+/// 堆排序：f 值小的优先
+fn heapLess(_: void, a: HeapEntry, b: HeapEntry) std.math.Order {
+    return std.math.order(a.f, b.f);
+}
+
 /// 持久化寻路状态，跨帧保存
 pub const AStarState = struct {
     allocator: std.mem.Allocator,
     start: GridPos, // 起点
     end: GridPos, // 目标（搜索中可能被折中终点覆盖）
-    open_set: std.ArrayListUnmanaged(GridPos),
+    open_pq: std.PriorityQueue(HeapEntry, void, heapLess), // 二叉堆，按 F 值排序
     nodes: std.AutoHashMapUnmanaged(GridPos, Node),
     steps_done: u32, // 已执行步数
     max_steps: u32, // 最大步数（超过后取最近可达点）
@@ -138,7 +133,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .allocator = allocator,
         .start = start,
         .end = end,
-        .open_set = .{},
+        .open_pq = std.PriorityQueue(HeapEntry, void, heapLess).init(allocator, {}),
         .nodes = .{},
         .steps_done = 0,
         .max_steps = 3000,
@@ -147,11 +142,12 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .max_step_up = max_step_up,
     };
     errdefer {
-        state.open_set.deinit(allocator);
+        state.open_pq.deinit();
         state.nodes.deinit(allocator);
     }
 
-    try state.open_set.append(allocator, start);
+    const start_h = heuristic(start, end);
+    try state.open_pq.add(.{ .pos = start, .g = 0, .f = start_h });
     try state.nodes.put(allocator, start, .{ .g = 0, .parent = null });
 
     return state;
@@ -159,7 +155,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
 
 /// 释放 A* 状态的内部内存
 pub fn deinitAStar(state: *AStarState) void {
-    state.open_set.deinit(state.allocator);
+    state.open_pq.deinit();
     state.nodes.deinit(state.allocator);
 }
 
@@ -170,23 +166,18 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
     if (state.result != .pending) return;
 
     var frame_steps: u16 = 0;
-    while (state.open_set.items.len > 0 and state.steps_done < state.max_steps and frame_steps < max_steps_this_frame) {
+    while (frame_steps < max_steps_this_frame and state.steps_done < state.max_steps) {
+        // 从堆中弹出最小 F 节点，跳过过期条目（g 值已被更优路径更新的老记录）
+        var current: GridPos = undefined;
+        var pop_ok: bool = false;
+        while (state.open_pq.removeOrNull()) |entry| {
+            const n = state.nodes.get(entry.pos).?;
+            if (n.g == entry.g) { current = entry.pos; pop_ok = true; break; }
+        }
+        if (!pop_ok) break; // 堆空，退出外层循环
+
         frame_steps += 1;
         state.steps_done += 1;
-
-        // 从 open_set 中选 F = g + h 最小的节点
-        var best_idx: usize = 0;
-        var best_f: i32 = std.math.maxInt(i32);
-        for (state.open_set.items, 0..) |npos, i| {
-            const n = state.nodes.get(npos).?;
-            const h = heuristic(npos, state.end);
-            const f = n.g + h;
-            if (f < best_f) {
-                best_f = f;
-                best_idx = i;
-            }
-        }
-        const current = state.open_set.swapRemove(best_idx);
         const cur_g = state.nodes.get(current).?.g;
 
         // 到达目标
@@ -207,7 +198,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 var pass_cx: bool = true;
                 var fy: i32 = current.y;
                 while (fy < current.y + state.entity_height_blocks) : (fy += 1) {
-                    if (isSolidAt(world, cx, fy, cz)) {
+                    if (world.isSolidAt(cx, fy, cz)) {
                         pass_cx = false;
                         break;
                     }
@@ -218,7 +209,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 var pass_fz: bool = true;
                 fy = current.y;
                 while (fy < current.y + state.entity_height_blocks) : (fy += 1) {
-                    if (isSolidAt(world, fx, fy, fz)) {
+                    if (world.isSolidAt(fx, fy, fz)) {
                         pass_fz = false;
                         break;
                     }
@@ -227,7 +218,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
             }
 
             // 水中限制跳跃高度为 0：脚底下方是水 → 只能平走上岸，不能跳高墙
-            const eff_max_step_up: i32 = if (isSwimmableBlock(world, current.x, current.y - 1, current.z))
+            const eff_max_step_up: i32 = if (world.isSwimmableBlock(current.x, current.y - 1, current.z))
                 0
             else
                 state.max_step_up;
@@ -236,7 +227,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
             var found_down: bool = false;
             var solid_y: i32 = current.y + eff_max_step_up;
             while (solid_y >= 0) : (solid_y -= 1) {
-                if (!isSolidAt(world, nx, solid_y, nz) and !isSwimmableBlock(world, nx, solid_y, nz)) continue;
+                if (!world.isSolidAt(nx, solid_y, nz) and !world.isSwimmableBlock(nx, solid_y, nz)) continue;
 
                 const foot = solid_y + 1;
                 const height_diff = foot - current.y;
@@ -253,7 +244,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 var valid: bool = true;
                 var fy: i32 = foot;
                 while (fy < foot + state.entity_height_blocks) : (fy += 1) {
-                    if (isSolidAt(world, nx, fy, nz)) {
+                    if (world.isSolidAt(nx, fy, nz)) {
                         valid = false;
                         break;
                     }
@@ -270,26 +261,18 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                         state.result = .failed;
                         return;
                     };
-                    var found = false;
-                    for (state.open_set.items) |item| {
-                        if (item.eql(neighbor)) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        state.open_set.append(state.allocator, neighbor) catch {
-                            state.result = .failed;
-                            return;
-                        };
-                    }
+                    const h = heuristic(neighbor, state.end);
+                    state.open_pq.add(.{ .pos = neighbor, .g = tent_g, .f = tent_g + h }) catch {
+                        state.result = .failed;
+                        return;
+                    };
                 }
             }
         }
     }
 
-    // 步数耗尽或无可达节点：选已探索中离目标最近的作为折中终点
-    if (state.open_set.items.len == 0 or state.steps_done >= state.max_steps) {
+    // 堆空或步数耗尽：选已探索中离目标最近的作为折中终点
+    if (state.open_pq.count() == 0 or state.steps_done >= state.max_steps) {
         var best_key: ?GridPos = null;
         var best_h: i32 = std.math.maxInt(i32);
         var it = state.nodes.keyIterator();
