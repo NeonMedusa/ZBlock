@@ -99,10 +99,8 @@ const NEIGHBOR_OFFSETS = [_]struct { x: i32, z: i32 }{
     .{ .x = 0, .z = 1 },
 };
 
-/// 异步 A* pending 队列条目
-const PendingAStar = struct { entity: ECS.Entity, state: Pathfind.AStarState };
-/// 异步 A* completed 队列条目
-const CompletedAStar = struct { entity: ECS.Entity, state: Pathfind.AStarState };
+/// 异步 A* 队列条目（pending 和 completed 共用）
+const AStarTask = struct { entity: ECS.Entity, state: Pathfind.AStarState };
 
 pub const BlockWorld = struct {
     allocator: std.mem.Allocator,
@@ -113,7 +111,7 @@ pub const BlockWorld = struct {
     collision_list: std.ArrayListUnmanaged(AABB) = .{},
 
     pending: std.AutoHashMap(Vec3i, void),
-    chunk_mutex: std.Thread.Mutex = .{},  // 保护 chunks 读写的锁（mesh + A* worker + loadChunk）
+    chunk_mutex: std.Thread.Mutex = .{}, // 保护 chunks 读写的锁（mesh + A* worker + loadChunk）
     completed: std.ArrayListUnmanaged(MeshBuildResult),
     completed_mutex: std.Thread.Mutex = .{},
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
@@ -123,14 +121,13 @@ pub const BlockWorld = struct {
     last_exact_targets: std.AutoHashMap(ECS.Entity, Pathfind.GridPos),
 
     // 异步 A*：worker 持有 AStarState 所有权，通过队列与主线程交换
-    astar_pending: std.ArrayListUnmanaged(PendingAStar),
+    astar_pending: std.ArrayListUnmanaged(AStarTask),
     astar_pending_mutex: std.Thread.Mutex = .{},
-    astar_completed: std.ArrayListUnmanaged(CompletedAStar),
+    astar_completed: std.ArrayListUnmanaged(AStarTask),
     astar_completed_mutex: std.Thread.Mutex = .{},
-    astar_active: std.AutoHashMap(ECS.Entity, void),  // 标记有 A* 在运行的实体
+    astar_active: std.AutoHashMap(ECS.Entity, void), // 标记有 A* 在运行的实体
     astar_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     astar_worker: ?std.Thread = null,
-    astar_worker_gpa: std.heap.GeneralPurposeAllocator(.{}),
 
     pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, max_chunks: usize) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
@@ -166,12 +163,11 @@ pub const BlockWorld = struct {
             .last_exact_targets = last_exact_targets,
             .astar_pending = .{},
             .astar_completed = .{},
-            .astar_worker_gpa = .{},
         };
     }
 
     pub fn spawnWorker(self: *BlockWorld) !void {
-        self.worker = try std.Thread.spawn(.{}, workerFn, .{self});
+        self.worker = try std.Thread.spawn(.{}, meshWorkerFn, .{self});
     }
 
     pub fn spawnAStarWorker(self: *BlockWorld) !void {
@@ -194,7 +190,6 @@ pub const BlockWorld = struct {
         self.astar_worker = null;
         self.astar_pending.deinit(self.allocator);
         self.astar_completed.deinit(self.allocator);
-        _ = self.astar_worker_gpa.deinit();
 
         // 清理剩余completed结果（由worker_gpa分配）
         for (self.completed.items) |*r| r.deinit();
@@ -225,6 +220,7 @@ pub const BlockWorld = struct {
         _ = self.worker_gpa.deinit();
     }
 
+    /// 世界坐标 → chunk origin
     pub fn chunkOrigin(world_x: i32, world_z: i32) Vec3i {
         return Vec3i.new(
             @divFloor(world_x, CHUNK_SIZE_X_I32) * CHUNK_SIZE_X_I32,
@@ -239,6 +235,7 @@ pub const BlockWorld = struct {
         try self.pending.put(origin, {});
     }
 
+    /// 待构建 mesh 的 chunk 数量
     pub fn pendingCount(self: *BlockWorld) usize {
         self.chunk_mutex.lock();
         defer self.chunk_mutex.unlock();
@@ -544,7 +541,7 @@ pub const BlockWorld = struct {
 
             // 轮询异步 A* 完成结果（worker 返回完整的 AStarState）
             {
-                var completed_buf: [16]CompletedAStar = undefined;
+                var completed_buf: [16]AStarTask = undefined;
                 var completed_count: usize = 0;
                 {
                     self.astar_completed_mutex.lock();
@@ -687,11 +684,19 @@ pub const BlockWorld = struct {
                                 const cur_max_steps: u32 = if (stale_hits >= 2) @as(u32, 200) else @as(u32, 3000);
                                 var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks, max_step_up) catch continue;
                                 astar.max_steps = cur_max_steps;
+                                // 防泄漏 defer：任何失败路径释放 astar
+                                var owned: bool = false;
+                                defer if (!owned) Pathfind.deinitAStar(&astar);
                                 self.astar_active.put(entity, {}) catch continue;
-                                // 状态随 entity 一同提交给 worker（worker 持有完整所有权）
-                                self.astar_pending_mutex.lock();
-                                self.astar_pending.append(self.allocator, .{ .entity = entity, .state = astar }) catch {};
-                                self.astar_pending_mutex.unlock();
+                                {
+                                    self.astar_pending_mutex.lock();
+                                    defer self.astar_pending_mutex.unlock();
+                                    self.astar_pending.append(self.allocator, .{ .entity = entity, .state = astar }) catch {
+                                        _ = self.astar_active.remove(entity);
+                                        continue;
+                                    };
+                                }
+                                owned = true; // 所有权转移给 worker
                             }
                         }
                     }
@@ -743,7 +748,7 @@ pub const BlockWorld = struct {
             }
 
             // 水中自动上浮：游泳时保持在水面（放末尾，不被路径跟随覆盖 y 分量）
-            if (in_water and !on_ground.value) {
+            if (in_water) {
                 intent.direction.y = 1.0;
             }
         }
@@ -923,7 +928,8 @@ pub const BlockWorld = struct {
     }
 };
 
-fn workerFn(world: *BlockWorld) void {
+/// 异步 mesh 生成 worker：从 pending 取 chunk，构建 mesh，推入 completed
+fn meshWorkerFn(world: *BlockWorld) void {
     const alloc = world.worker_gpa.allocator();
     while (world.running.load(.acquire)) {
         // 取任务
@@ -979,13 +985,15 @@ fn workerFn(world: *BlockWorld) void {
                 world.completed_mutex.unlock();
             }
         } else {
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+            std.Thread.sleep(1 * std.time.ns_per_ms);
         }
     }
 }
 
+/// 异步 A* worker：持 active 状态持续步进，完成推送 completed。
+/// 不反复推回 pending——同一实体直到 A* 完成才释放 CPU。
 fn astarWorkerFn(world: *BlockWorld) void {
-    var active: ?PendingAStar = null;
+    var active: ?AStarTask = null;
     while (world.astar_running.load(.acquire)) {
         if (active == null) {
             world.astar_pending_mutex.lock();
@@ -1001,7 +1009,7 @@ fn astarWorkerFn(world: *BlockWorld) void {
                 world.chunk_mutex.lock();
                 defer world.chunk_mutex.unlock();
                 if (entry.state.result == .pending) {
-                    Pathfind.stepAStar(&entry.state, world, 200);
+                    Pathfind.stepAStar(&entry.state, world, 500);
                 }
                 if (entry.state.result != .pending) {
                     just_finished = true;
@@ -1014,6 +1022,6 @@ fn astarWorkerFn(world: *BlockWorld) void {
                 active = null;
             }
         }
-        std.Thread.sleep(1 * std.time.ns_per_ms);
+        std.Thread.yield() catch {};
     }
 }
