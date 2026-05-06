@@ -111,7 +111,12 @@ pub const BlockWorld = struct {
     collision_list: std.ArrayListUnmanaged(AABB) = .{},
 
     pending: std.AutoHashMap(Vec3i, void),
-    chunk_mutex: std.Thread.Mutex = .{}, // 保护 chunks 读写的锁（mesh + A* worker + loadChunk）
+    mesh_mutex: std.Thread.Mutex = .{},  // 保护 mesh pending 队列
+    /// 读写锁保护 chunks HashMap。
+    /// A* worker 和 mesh worker 均只读（getPtr）→ lockShared 并发无竞争。
+    /// 只有 loadChunk（put）和 unloadChunk（remove）持写锁，此时所有读者排队等待。
+    /// 前提：init 中 chunks.ensureTotalCapacity 预设容量，运行期不扩容——否则扩容会改 metadata 导致其他线程 getPtr 崩溃。
+    chunk_mutex: std.Thread.RwLock = .{},
     completed: std.ArrayListUnmanaged(MeshBuildResult),
     completed_mutex: std.Thread.Mutex = .{},
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
@@ -188,7 +193,9 @@ pub const BlockWorld = struct {
             w.join();
         }
         self.astar_worker = null;
+        for (self.astar_pending.items) |*t| Pathfind.deinitAStar(&t.state);
         self.astar_pending.deinit(self.allocator);
+        for (self.astar_completed.items) |*t| Pathfind.deinitAStar(&t.state);
         self.astar_completed.deinit(self.allocator);
 
         // 清理剩余completed结果（由worker_gpa分配）
@@ -230,15 +237,15 @@ pub const BlockWorld = struct {
     }
 
     fn enqueueMeshBuild(self: *BlockWorld, origin: Vec3i) !void {
-        self.chunk_mutex.lock();
-        defer self.chunk_mutex.unlock();
+        self.mesh_mutex.lock();
+        defer self.mesh_mutex.unlock();
         try self.pending.put(origin, {});
     }
 
     /// 待构建 mesh 的 chunk 数量
     pub fn pendingCount(self: *BlockWorld) usize {
-        self.chunk_mutex.lock();
-        defer self.chunk_mutex.unlock();
+        self.mesh_mutex.lock();
+        defer self.mesh_mutex.unlock();
         return self.pending.count();
     }
 
@@ -267,13 +274,16 @@ pub const BlockWorld = struct {
             mesh_cache.deinit();
             self.allocator.destroy(chunk);
         }
-        // 持锁写chunks和pending，防止与worker的HashMap读并发
+        // chunks 写独占锁；然后 pending 写入 mesh_mutex
         {
             self.chunk_mutex.lock();
             defer self.chunk_mutex.unlock();
-
             try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache });
             std.debug.assert(self.chunks.count() <= self.chunks.capacity());
+        }
+        {
+            self.mesh_mutex.lock();
+            defer self.mesh_mutex.unlock();
             try self.pending.put(origin, {});
 
             for (NEIGHBOR_OFFSETS[1..]) |noff| {
@@ -292,10 +302,15 @@ pub const BlockWorld = struct {
     }
 
     pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
+        // 先检查 pending 队列（用 mesh_mutex）
+        {
+            self.mesh_mutex.lock();
+            defer self.mesh_mutex.unlock();
+            if (self.pending.contains(origin)) return;
+        }
+
         self.chunk_mutex.lock();
         defer self.chunk_mutex.unlock();
-
-        if (self.pending.contains(origin)) return;
 
         if (self.chunks.getPtr(origin)) |loaded| {
             if (loaded.build_lock.load(.acquire)) return;
@@ -932,31 +947,50 @@ pub const BlockWorld = struct {
 fn meshWorkerFn(world: *BlockWorld) void {
     const alloc = world.worker_gpa.allocator();
     while (world.running.load(.acquire)) {
-        // 取任务
-        world.chunk_mutex.lock();
-
+        // 取任务：持 mesh_mutex 操作 pending 队列
         var origin: ?Vec3i = null;
-        var iter = world.pending.keyIterator();
-        if (iter.next()) |key_ptr| {
-            origin = key_ptr.*;
+        {
+            world.mesh_mutex.lock();
+            defer world.mesh_mutex.unlock();
+            var iter = world.pending.keyIterator();
+            if (iter.next()) |key_ptr| {
+                origin = key_ptr.*;
+            }
         }
 
         var loaded_ptr_chunks: [NEIGHBOR_OFFSETS.len]?*LoadedChunk = [_]?*LoadedChunk{null} ** NEIGHBOR_OFFSETS.len;
         if (origin) |o| {
-            loaded_ptr_chunks[0] = world.chunks.getPtr(o);
-            if (loaded_ptr_chunks[0] != null) {
-                loaded_ptr_chunks[0].?.build_lock.store(true, .release);
-                for (NEIGHBOR_OFFSETS[1..], 1..) |noff, i| {
-                    const nb = Vec3i.new(o.x + noff.x * CHUNK_SIZE_X_I32, 0, o.z + noff.z * CHUNK_SIZE_Z_I32);
-                    loaded_ptr_chunks[i] = world.chunks.getPtr(nb);
-                    if (loaded_ptr_chunks[i]) |l| {
-                        l.build_lock.store(true, .release);
+            // 持 chunk_mutex（读共享）访问 chunks
+            {
+                world.chunk_mutex.lockShared();
+                defer world.chunk_mutex.unlockShared();
+                loaded_ptr_chunks[0] = world.chunks.getPtr(o);
+                if (loaded_ptr_chunks[0] != null) {
+                    loaded_ptr_chunks[0].?.build_lock.store(true, .release);
+                    for (NEIGHBOR_OFFSETS[1..], 1..) |noff, i| {
+                        const nb = Vec3i.new(o.x + noff.x * CHUNK_SIZE_X_I32, 0, o.z + noff.z * CHUNK_SIZE_Z_I32);
+                        loaded_ptr_chunks[i] = world.chunks.getPtr(nb);
+                        if (loaded_ptr_chunks[i]) |l| {
+                            l.build_lock.store(true, .release);
+                        }
                     }
                 }
+            }
+            if (loaded_ptr_chunks[0] == null) {
+                // chunk 未加载 → 移除 pending，loadChunk 完成后 enqueueMeshBuild 会重新提交
+                world.mesh_mutex.lock();
+                defer world.mesh_mutex.unlock();
+                _ = world.pending.remove(o);
+                std.Thread.yield() catch {};
+                continue;
+            }
+            // chunk 可用 → 移除 pending 条目（防重复构建）
+            {
+                world.mesh_mutex.lock();
+                defer world.mesh_mutex.unlock();
                 _ = world.pending.remove(o);
             }
         }
-        world.chunk_mutex.unlock();
 
         if (origin) |o| {
             if (loaded_ptr_chunks[0]) |loaded| {
@@ -985,8 +1019,9 @@ fn meshWorkerFn(world: *BlockWorld) void {
                 world.completed_mutex.unlock();
             }
         } else {
-            std.Thread.sleep(1 * std.time.ns_per_ms);
+            std.Thread.yield() catch {};
         }
+        std.Thread.yield() catch {}; // 每轮让步主线程上传 mesh 数据到 GPU
     }
 }
 
@@ -1005,9 +1040,9 @@ fn astarWorkerFn(world: *BlockWorld) void {
         if (active) |*entry| {
             var just_finished: bool = false;
             {
-                // 仅持 chunk_mutex（保护 chunk 读取），state 由 worker 独占无需锁
-                world.chunk_mutex.lock();
-                defer world.chunk_mutex.unlock();
+                // 读共享 chunk 锁（多 reader 并发），state 由 worker 独占无需锁
+                world.chunk_mutex.lockShared();
+                defer world.chunk_mutex.unlockShared();
                 if (entry.state.result == .pending) {
                     Pathfind.stepAStar(&entry.state, world, 500);
                 }
@@ -1024,4 +1059,5 @@ fn astarWorkerFn(world: *BlockWorld) void {
         }
         std.Thread.yield() catch {};
     }
+    if (active) |*t| Pathfind.deinitAStar(&t.state);
 }
