@@ -163,8 +163,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const load_range: i32 = self.load_range;
     const max_chunks: usize = @intCast((2 * load_range + 1) * (2 * load_range + 1) * 4);
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
-    try self.block_world.spawnWorker();       // mesh 生成线程
-    try self.block_world.spawnAStarWorker();   // 寻路线程
+    try self.block_world.spawnWorker(); // mesh 生成线程
+    try self.block_world.spawnAStarWorker(); // 寻路线程
 
     // 返回实例
     return self;
@@ -220,10 +220,15 @@ fn produceMoveIntent(self: *Game) void {
             move_dir.y = -1.0; // 水中下潜指示符
         }
 
+        // 确保我的isKeyPressed实现正确，经验证应该是正确的
+        // if (self.input.isKeyUp(.left_control) or self.input.isKeyPressed(.right_control)) {
+        //     std.debug.print("key up!\n", .{});
+        // }
+
         const has_movement = self.input.isKeyPressed(.w) or
-                     self.input.isKeyPressed(.s) or
-                     self.input.isKeyPressed(.a) or
-                     self.input.isKeyPressed(.d);
+            self.input.isKeyPressed(.s) or
+            self.input.isKeyPressed(.a) or
+            self.input.isKeyPressed(.d);
         if (!has_movement) {
             intent.sprint = false;
         }

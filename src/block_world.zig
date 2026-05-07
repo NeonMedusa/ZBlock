@@ -417,43 +417,35 @@ pub const BlockWorld = struct {
             var move_dir = Vec3.new(intent.direction.x, 0, intent.direction.z);
             var sneak_blocked = false;
             if (intent.sneak and move_dir.len2() > 0.001 and on_ground.value) {
-                const half_w = aabb.width * 0.5;
-                const forward_center = pos.vec.add(move_dir.scale(half_w + 0.001));
+                // 边缘保留宽度：AABB 底面积仅剩此比例接触方块时阻止移动
+                const edge_margin = aabb.width * 0.1;
+                const intent_len = move_dir.len();
+                var edge_blocked = false;
 
-                if (self.sneakHasGroundAt(forward_center, aabb)) {
-                    // 对角投影有地面 → 允许完整移动（可走到极限边缘）
-                } else {
+                // 逐轴独立检测：沿移动方向探测 edge_margin 距离，检查该处 AABB 底部是否仍有方块支撑
+                if (move_dir.x != 0) {
+                    const s: f32 = if (move_dir.x > 0) 1.0 else -1.0;
+                    if (!self.hasGroundUnder(pos.vec.add(Vec3.new(edge_margin * s, 0, 0)), aabb)) {
+                        h_vel.x = 0;
+                        move_dir.x = 0;
+                        edge_blocked = true;
+                    }
+                }
+                if (move_dir.z != 0) {
+                    const s: f32 = if (move_dir.z > 0) 1.0 else -1.0;
+                    if (!self.hasGroundUnder(pos.vec.add(Vec3.new(0, 0, edge_margin * s)), aabb)) {
+                        h_vel.z = 0;
+                        move_dir.z = 0;
+                        edge_blocked = true;
+                    }
+                }
+
+                // 有轴向被边缘阻挡时，按剩余意图比例缩放速度，实现贴墙滑动
+                if (edge_blocked) {
                     sneak_blocked = true;
-                    const original_len = move_dir.len();
-                    const offset = half_w + 0.001;
-
-                    if (move_dir.x > 0) {
-                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(offset, 0, 0)), aabb)) {
-                            h_vel.x = 0;
-                            move_dir.x = 0;
-                        }
-                    } else if (move_dir.x < 0) {
-                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(-offset, 0, 0)), aabb)) {
-                            h_vel.x = 0;
-                            move_dir.x = 0;
-                        }
-                    }
-
-                    if (move_dir.z > 0) {
-                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(0, 0, offset)), aabb)) {
-                            h_vel.z = 0;
-                            move_dir.z = 0;
-                        }
-                    } else if (move_dir.z < 0) {
-                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(0, 0, -offset)), aabb)) {
-                            h_vel.z = 0;
-                            move_dir.z = 0;
-                        }
-                    }
-
-                    const new_len = move_dir.len();
-                    if (new_len > 0.001) {
-                        h_vel = h_vel.scale(new_len / original_len);
+                    const remaining_len = move_dir.len();
+                    if (remaining_len > 0.001) {
+                        h_vel = h_vel.scale(remaining_len / intent_len);
                     }
                 }
             }
@@ -968,7 +960,7 @@ pub const BlockWorld = struct {
         )).prototype().is_solid;
     }
 
-    fn sneakHasGroundAt(self: *BlockWorld, pos: Vec3, collider: *Comps.Collider) bool {
+    fn hasGroundUnder(self: *BlockWorld, pos: Vec3, collider: *Comps.Collider) bool {
         const box = getEntityAABB(pos, collider);
         const by = @as(i32, @intFromFloat(@floor(pos.y))) - 1;
         const min_bx = @as(i32, @intFromFloat(@floor(box.min_x)));
