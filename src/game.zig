@@ -220,6 +220,25 @@ fn produceMoveIntent(self: *Game) void {
             move_dir.y = -1.0; // 水中下潜指示符
         }
 
+        const has_movement = self.input.isKeyPressed(.w) or
+                     self.input.isKeyPressed(.s) or
+                     self.input.isKeyPressed(.a) or
+                     self.input.isKeyPressed(.d);
+        if (!has_movement) {
+            intent.sprint = false;
+        }
+
+        if (self.input.isKeyDown(.left_shift) or self.input.isKeyDown(.right_shift)) {
+            intent.sprint = !intent.sprint;
+        }
+
+        if (self.input.isKeyPressed(.left_control)) {
+            intent.sneak = true;
+            intent.sprint = false;
+        } else {
+            intent.sneak = false;
+        }
+
         if (move_dir.len2() > 0.001) move_dir = move_dir.norm();
         intent.direction = move_dir;
     }

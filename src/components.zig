@@ -37,6 +37,8 @@ pub const Components = struct {
         direction: Vec3 = Vec3.zero, // 水平移动方向 + 游泳垂直方向
         jump: bool = false,         // 是否按下跳跃
         jump_power: f32 = 8.0,     // 跳跃初速度（AI 可按需调整跳跃高度）
+        sprint: bool = false,       // 是否按住 shift 冲刺
+        sneak: bool = false,        // 是否按住 ctrl 静步
     };
 
     // ---- 战斗/生命 ----

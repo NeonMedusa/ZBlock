@@ -84,6 +84,8 @@ const SINK_TERMINAL: f32 = -2.0;
 const GROUND_FRICTION: f32 = 0.6;
 const AIR_FRICTION: f32 = 4.0;
 const ACCELERATION: f32 = 30.0;
+const SPRINT_MULTIPLIER: f32 = 1.5;
+const SNEAK_MULTIPLIER: f32 = 0.5;
 
 const LoadedChunk = struct {
     chunk: *Chunk,
@@ -111,7 +113,7 @@ pub const BlockWorld = struct {
     collision_list: std.ArrayListUnmanaged(AABB) = .{},
 
     pending: std.AutoHashMap(Vec3i, void),
-    mesh_mutex: std.Thread.Mutex = .{},  // 保护 mesh pending 队列
+    mesh_mutex: std.Thread.Mutex = .{}, // 保护 mesh pending 队列
     /// 读写锁保护 chunks HashMap。
     /// A* worker 和 mesh worker 均只读（getPtr）→ lockShared 并发无竞争。
     /// 只有 loadChunk（put）和 unloadChunk（remove）持写锁，此时所有读者排队等待。
@@ -388,7 +390,8 @@ pub const BlockWorld = struct {
             } else 0.0;
 
             const effective_gravity: f32 = if (in_swimmable) FLUID_GRAVITY else GRAVITY;
-            const max_speed = move_speed.value * (1.0 - resistance);
+            const speed_multiplier: f32 = if (intent.sprint) SPRINT_MULTIPLIER else if (intent.sneak) SNEAK_MULTIPLIER else 1.0;
+            const max_speed = move_speed.value * (1.0 - resistance) * speed_multiplier;
             const acceleration = ACCELERATION * (1.0 - resistance);
 
             if (in_swimmable) {
@@ -411,9 +414,51 @@ pub const BlockWorld = struct {
             }
 
             var h_vel = Vec3.new(vel.vec.x, 0, vel.vec.z);
-            const move_dir = Vec3.new(intent.direction.x, 0, intent.direction.z);
+            var move_dir = Vec3.new(intent.direction.x, 0, intent.direction.z);
+            var sneak_blocked = false;
+            if (intent.sneak and move_dir.len2() > 0.001 and on_ground.value) {
+                const half_w = aabb.width * 0.5;
+                const forward_center = pos.vec.add(move_dir.scale(half_w + 0.001));
+
+                if (self.sneakHasGroundAt(forward_center, aabb)) {
+                    // 对角投影有地面 → 允许完整移动（可走到极限边缘）
+                } else {
+                    sneak_blocked = true;
+                    const original_len = move_dir.len();
+                    const offset = half_w + 0.001;
+
+                    if (move_dir.x > 0) {
+                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(offset, 0, 0)), aabb)) {
+                            h_vel.x = 0;
+                            move_dir.x = 0;
+                        }
+                    } else if (move_dir.x < 0) {
+                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(-offset, 0, 0)), aabb)) {
+                            h_vel.x = 0;
+                            move_dir.x = 0;
+                        }
+                    }
+
+                    if (move_dir.z > 0) {
+                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(0, 0, offset)), aabb)) {
+                            h_vel.z = 0;
+                            move_dir.z = 0;
+                        }
+                    } else if (move_dir.z < 0) {
+                        if (!self.sneakHasGroundAt(pos.vec.add(Vec3.new(0, 0, -offset)), aabb)) {
+                            h_vel.z = 0;
+                            move_dir.z = 0;
+                        }
+                    }
+
+                    const new_len = move_dir.len();
+                    if (new_len > 0.001) {
+                        h_vel = h_vel.scale(new_len / original_len);
+                    }
+                }
+            }
             if (move_dir.len2() > 0.001) {
-                const wish_dir = move_dir.norm();
+                const wish_dir = if (sneak_blocked) move_dir else move_dir.norm();
                 h_vel = h_vel.add(wish_dir.scale(acceleration * dt));
                 const h_speed = h_vel.len();
                 if (h_speed > max_speed) h_vel = h_vel.scale(max_speed / h_speed);
@@ -921,6 +966,23 @@ pub const BlockWorld = struct {
             @as(f32, @floatFromInt(y)) + 0.5,
             @as(f32, @floatFromInt(z)) + 0.5,
         )).prototype().is_solid;
+    }
+
+    fn sneakHasGroundAt(self: *BlockWorld, pos: Vec3, collider: *Comps.Collider) bool {
+        const box = getEntityAABB(pos, collider);
+        const by = @as(i32, @intFromFloat(@floor(pos.y))) - 1;
+        const min_bx = @as(i32, @intFromFloat(@floor(box.min_x)));
+        const max_bx = @as(i32, @intFromFloat(@floor(box.max_x)));
+        const min_bz = @as(i32, @intFromFloat(@floor(box.min_z)));
+        const max_bz = @as(i32, @intFromFloat(@floor(box.max_z)));
+        var bx: i32 = min_bx;
+        while (bx <= max_bx) : (bx += 1) {
+            var bz: i32 = min_bz;
+            while (bz <= max_bz) : (bz += 1) {
+                if (self.isSolidAt(bx, by, bz)) return true;
+            }
+        }
+        return false;
     }
 
     /// 判断指定整数坐标是否为可游泳方块（水）
