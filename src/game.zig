@@ -199,32 +199,29 @@ fn produceMoveIntent(self: *Game) void {
         if (player.id != self.player_id) continue;
         var intent = view.get(Comps.MoveIntent, entity);
 
-        var move_dir = Vec3.zero;
+        // 根据相机朝向计算水平基础方向向量
         const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
-        const right_h = Vec3.new(
-            self.camera.front.cross(self.camera.up).x,
-            0,
-            self.camera.front.cross(self.camera.up).z,
-        ).norm();
+        const camera_right = self.camera.front.cross(self.camera.up);
+        const right_h = Vec3.new(camera_right.x, 0, camera_right.z).norm();
 
+        // WASD 水平输入
+        var move_dir = Vec3.zero;
         if (self.input.isKeyPressed(.w)) move_dir = move_dir.add(front_h);
         if (self.input.isKeyPressed(.s)) move_dir = move_dir.sub(front_h);
         if (self.input.isKeyPressed(.a)) move_dir = move_dir.sub(right_h);
         if (self.input.isKeyPressed(.d)) move_dir = move_dir.add(right_h);
 
+        // 空格：跳跃 + 水中上浮指示
         if (self.input.isKeyPressed(.space)) {
-            intent.jump = true; // 物理系统会根据地面/水中决定行为
-            move_dir.y = 1.0; // 水中上浮指示符
+            intent.jump = true;
+            move_dir.y = 1.0;
         }
+        // Ctrl：水中下潜指示
         if (self.input.isKeyPressed(.left_control) or self.input.isKeyPressed(.right_control)) {
-            move_dir.y = -1.0; // 水中下潜指示符
+            move_dir.y = -1.0;
         }
 
-        // 确保我的isKeyPressed实现正确，经验证应该是正确的
-        // if (self.input.isKeyUp(.left_control) or self.input.isKeyPressed(.right_control)) {
-        //     std.debug.print("key up!\n", .{});
-        // }
-
+        // 无水平输入时，强制关闭冲刺（防止松开按键后仍保持冲刺状态）
         const has_movement = self.input.isKeyPressed(.w) or
             self.input.isKeyPressed(.s) or
             self.input.isKeyPressed(.a) or
@@ -233,10 +230,12 @@ fn produceMoveIntent(self: *Game) void {
             intent.sprint = false;
         }
 
+        // Shift 按下时切换冲刺开关状态
         if (self.input.isKeyDown(.left_shift) or self.input.isKeyDown(.right_shift)) {
             intent.sprint = !intent.sprint;
         }
 
+        // 按住左 Ctrl 进入潜行，同时关闭冲刺；松开则退出潜行
         if (self.input.isKeyPressed(.left_control)) {
             intent.sneak = true;
             intent.sprint = false;
@@ -244,6 +243,7 @@ fn produceMoveIntent(self: *Game) void {
             intent.sneak = false;
         }
 
+        // 归一化后写入移动意图，供物理系统消费
         if (move_dir.len2() > 0.001) move_dir = move_dir.norm();
         intent.direction = move_dir;
     }

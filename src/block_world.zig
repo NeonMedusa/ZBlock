@@ -361,15 +361,14 @@ pub const BlockWorld = struct {
         self.last_exact_targets.clearRetainingCapacity();
     }
 
+    /// 物理更新：每帧处理实体的垂直移动、水平移动、潜行边缘保护、碰撞解算以及实体间排斥。
     pub fn updatePhysics(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
+        // ============================================================
+        // 第一阶段：遍历所有物理实体，更新速度与位置
+        // ============================================================
         var view = registry.view(.{
-            Comps.Position,
-            Comps.Velocity,
-            Comps.Collider,
-            Comps.MoveSpeed,
-            Comps.JumpVelocity,
-            Comps.OnGround,
-            Comps.MoveIntent,
+            Comps.Position, Comps.Velocity, Comps.Collider,
+            Comps.MoveSpeed, Comps.JumpVelocity, Comps.OnGround, Comps.MoveIntent,
         }, .{});
         var iter = view.entityIterator();
 
@@ -381,19 +380,24 @@ pub const BlockWorld = struct {
             const on_ground = view.get(Comps.OnGround, entity);
             var intent = view.get(Comps.MoveIntent, entity);
 
+            // 水中检测与流体阻力
             const in_swimmable = self.isInSwimmable(pos, aabb);
-            const resistance: f32 = if (in_swimmable) blk: {
+            const resistance: f32 = blk: {
+                if (!in_swimmable) break :blk 0.0;
                 const mid = pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0));
-                const block_id = self.getBlockAt(mid);
-                const fluid_proto = block_id.prototype();
-                break :blk if (fluid_proto.is_swimmable) fluid_proto.fluid_resistance else 0.0;
-            } else 0.0;
+                const proto = self.getBlockAt(mid).prototype();
+                break :blk @as(f32, if (proto.is_swimmable) proto.fluid_resistance else 0.0);
+            };
 
+            // 重力、移速倍率、最终最大速度与加速度
             const effective_gravity: f32 = if (in_swimmable) FLUID_GRAVITY else GRAVITY;
-            const speed_multiplier: f32 = if (intent.sprint) SPRINT_MULTIPLIER else if (intent.sneak) SNEAK_MULTIPLIER else 1.0;
+            const speed_multiplier: f32 = if (intent.sprint) SPRINT_MULTIPLIER
+                                       else if (intent.sneak) SNEAK_MULTIPLIER
+                                       else 1.0;
             const max_speed = move_speed.value * (1.0 - resistance) * speed_multiplier;
             const acceleration = ACCELERATION * (1.0 - resistance);
 
+            // ---- 垂直移动：水中上浮/下潜，或陆地重力+跳跃 ----
             if (in_swimmable) {
                 if (intent.direction.y > 0.0) {
                     vel.vec.y = SWIM_UP_SPEED;
@@ -413,16 +417,19 @@ pub const BlockWorld = struct {
                 }
             }
 
+            // ---- 水平移动：提取当前速度与输入方向的 XZ 分量 ----
             var h_vel = Vec3.new(vel.vec.x, 0, vel.vec.z);
             var move_dir = Vec3.new(intent.direction.x, 0, intent.direction.z);
             var sneak_blocked = false;
+
+            // ---- 潜行边缘保护：阻止从方块边缘坠落 ----
             if (intent.sneak and move_dir.len2() > 0.001 and on_ground.value) {
                 // 边缘保留宽度：AABB 底面积仅剩此比例接触方块时阻止移动
                 const edge_margin = aabb.width * 0.1;
                 const intent_len = move_dir.len();
                 var edge_blocked = false;
 
-                // 逐轴独立检测：沿移动方向探测 edge_margin 距离，检查该处 AABB 底部是否仍有方块支撑
+                // 逐轴独立检测：沿移动方向探测 edge_margin，检查该处 AABB 底部是否仍有方块
                 if (move_dir.x != 0) {
                     const s: f32 = if (move_dir.x > 0) 1.0 else -1.0;
                     if (!self.hasGroundUnder(pos.vec.add(Vec3.new(edge_margin * s, 0, 0)), aabb)) {
@@ -449,15 +456,20 @@ pub const BlockWorld = struct {
                     }
                 }
             }
+
+            // ---- 水平加速/摩擦 ----
             if (move_dir.len2() > 0.001) {
+                // 潜行阻挡时不归一化 wish_dir，保留分量比例以实现贴墙滑动
                 const wish_dir = if (sneak_blocked) move_dir else move_dir.norm();
                 h_vel = h_vel.add(wish_dir.scale(acceleration * dt));
                 const h_speed = h_vel.len();
                 if (h_speed > max_speed) h_vel = h_vel.scale(max_speed / h_speed);
             } else {
                 if (on_ground.value) {
+                    // 地面摩擦力：每帧乘系数减速
                     h_vel = h_vel.scale(GROUND_FRICTION);
                 } else {
+                    // 空气阻力：每秒扣除固定量
                     const h_speed = h_vel.len();
                     if (h_speed > 0.001) {
                         const reduction = AIR_FRICTION * dt;
@@ -469,6 +481,7 @@ pub const BlockWorld = struct {
             vel.vec.x = h_vel.x;
             vel.vec.z = h_vel.z;
 
+            // ---- 碰撞解算：将速度转为位移，交 moveEntity 处理方块碰撞与 on_ground 更新 ----
             const dx = vel.vec.x * dt;
             const dy = vel.vec.y * dt;
             const dz = vel.vec.z * dt;
@@ -477,7 +490,10 @@ pub const BlockWorld = struct {
             intent.jump = false;
         }
 
-        // 实体间碰撞：基于重叠深度的排斥力，不改变位置
+        // ============================================================
+        // 第二阶段：实体间碰撞排斥
+        // 对发生 AABB 重叠的实体对施加水平排斥力（不修改位置，仅调整速度）
+        // ============================================================
         {
             const REPEL_FORCE: f32 = 3.0;
             var push_view = registry.view(.{ Comps.Position, Comps.Collider, Comps.Velocity }, .{});
@@ -490,22 +506,26 @@ pub const BlockWorld = struct {
 
                 var push_iter_b = push_view.entityIterator();
                 while (push_iter_b.next()) |entity_b| {
+                    // 跳过自身以及已处理过的实体对
                     if (@as(u32, @bitCast(entity_b)) <= @as(u32, @bitCast(entity_a))) continue;
                     const pos_b = push_view.get(Comps.Position, entity_b);
                     const col_b = push_view.get(Comps.Collider, entity_b);
                     const vel_b = push_view.get(Comps.Velocity, entity_b);
                     const box_b = getEntityAABB(pos_b.vec, col_b);
 
+                    // AABB 相交检测
                     if (box_a.min_x < box_b.max_x and box_a.max_x > box_b.min_x and
                         box_a.min_y < box_b.max_y and box_a.max_y > box_b.min_y and
                         box_a.min_z < box_b.max_z and box_a.max_z > box_b.min_z)
                     {
+                        // 水平排斥方向（A → B）
                         const dx = pos_b.vec.x - pos_a.vec.x;
                         const dz = pos_b.vec.z - pos_a.vec.z;
                         const dist = @max(@sqrt(dx * dx + dz * dz), 0.001);
                         const nx = dx / dist;
                         const nz = dz / dist;
 
+                        // 排斥力大小与重叠深度成正比
                         const overlap_x = @min(box_a.max_x - box_b.min_x, box_b.max_x - box_a.min_x);
                         const overlap_z = @min(box_a.max_z - box_b.min_z, box_b.max_z - box_a.min_z);
                         const push = @max(overlap_x, overlap_z) * REPEL_FORCE;
