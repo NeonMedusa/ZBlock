@@ -367,8 +367,9 @@ pub const BlockWorld = struct {
         // 第一阶段：遍历所有物理实体，更新速度与位置
         // ============================================================
         var view = registry.view(.{
-            Comps.Position, Comps.Velocity, Comps.Collider,
-            Comps.MoveSpeed, Comps.JumpVelocity, Comps.OnGround, Comps.MoveIntent,
+            Comps.Position,   Comps.Velocity,     Comps.Collider,
+            Comps.MoveSpeed,  Comps.JumpVelocity, Comps.OnGround,
+            Comps.MoveIntent,
         }, .{});
         var iter = view.entityIterator();
 
@@ -391,9 +392,7 @@ pub const BlockWorld = struct {
 
             // 重力、移速倍率、最终最大速度与加速度
             const effective_gravity: f32 = if (in_swimmable) FLUID_GRAVITY else GRAVITY;
-            const speed_multiplier: f32 = if (intent.sprint) SPRINT_MULTIPLIER
-                                       else if (intent.sneak) SNEAK_MULTIPLIER
-                                       else 1.0;
+            const speed_multiplier: f32 = if (intent.sprint) SPRINT_MULTIPLIER else if (intent.sneak) SNEAK_MULTIPLIER else 1.0;
             const max_speed = move_speed.value * (1.0 - resistance) * speed_multiplier;
             const acceleration = ACCELERATION * (1.0 - resistance);
 
@@ -459,7 +458,7 @@ pub const BlockWorld = struct {
 
             // ---- 水平加速/摩擦 ----
             if (move_dir.len2() > 0.001) {
-                // 潜行阻挡时不归一化 wish_dir，保留分量比例以实现贴墙滑动
+                // 潜行阻挡时不归一化 wish_dir，保留分量比例以模拟贴（空气）墙滑动
                 const wish_dir = if (sneak_blocked) move_dir else move_dir.norm();
                 h_vel = h_vel.add(wish_dir.scale(acceleration * dt));
                 const h_speed = h_vel.len();
