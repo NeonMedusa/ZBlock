@@ -73,6 +73,14 @@ pub fn build(b: *std.Build) void {
     const ecs_module = ecs_dep.module("zig-ecs");
     exe.root_module.addImport("zigecs", ecs_module);
 
+    // fridge (SQLite ORM)
+    const fridge_dep = b.dependency("fridge", .{
+        .target = target,
+        .optimize = optimize,
+        .bundle = true,
+    });
+    exe.root_module.addImport("fridge", fridge_dep.module("fridge"));
+
     // 复制资源文件
     b.installDirectory(.{
         .source_dir = b.path("resources"),

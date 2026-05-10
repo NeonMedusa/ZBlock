@@ -10,6 +10,7 @@
         .zigimg = .{ .path = "libs/zigimg-master" },
         .zigecs = .{ .path = "libs/zig-ecs-master" },
         .stb = .{ .path = "libs/stb-master" },
+        .fridge = .{ .path = "libs/fridge-main" },
     },
     .paths = .{
         "build.zig",

@@ -129,6 +129,7 @@ const LoadedChunk = struct {
     chunk: *Chunk,
     mesh_cache: ChunkMeshCache,
     build_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    dirty: bool = false, // 被修改过，需要写入存档
 };
 
 const NEIGHBOR_OFFSETS = [_]struct { x: i32, z: i32 }{
@@ -141,6 +142,12 @@ const NEIGHBOR_OFFSETS = [_]struct { x: i32, z: i32 }{
 
 /// 异步 A* 队列条目（pending 和 completed 共用）
 const AStarTask = struct { entity: ECS.Entity, state: Pathfind.AStarState };
+
+pub const ChunkIO = struct {
+    ctx: *anyopaque,
+    loadFn: *const fn (ctx: *anyopaque, origin: Vec3i, chunk: *Chunk) bool,
+    saveFn: *const fn (ctx: *anyopaque, origin: Vec3i, chunk: *const Chunk) void,
+};
 
 pub const BlockWorld = struct {
     allocator: std.mem.Allocator,
@@ -304,11 +311,19 @@ pub const BlockWorld = struct {
         self.completed.clearRetainingCapacity();
     }
 
-    pub fn loadChunk(self: *BlockWorld, origin: Vec3i) !void {
+    pub fn loadChunk(self: *BlockWorld, origin: Vec3i, chunk_io: ?*const ChunkIO) !void {
         if (self.chunks.contains(origin)) return;
         const chunk = try self.allocator.create(Chunk);
         errdefer self.allocator.destroy(chunk);
-        Chunk.generate(origin, chunk);
+
+        if (chunk_io) |io| {
+            if (!io.loadFn(io.ctx, origin, chunk)) {
+                Chunk.generate(origin, chunk);
+            }
+        } else {
+            Chunk.generate(origin, chunk);
+        }
+
         var mesh_cache = try ChunkMeshCache.init(self.allocator, self.gctx, &self.material_registry);
         errdefer {
             mesh_cache.deinit();
@@ -318,7 +333,7 @@ pub const BlockWorld = struct {
         {
             self.chunk_mutex.lock();
             defer self.chunk_mutex.unlock();
-            try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache });
+            try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache, .dirty = false });
             std.debug.assert(self.chunks.count() <= self.chunks.capacity());
         }
         {
@@ -341,7 +356,7 @@ pub const BlockWorld = struct {
         }
     }
 
-    pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
+    pub fn unloadChunk(self: *BlockWorld, origin: Vec3i, chunk_io: ?*const ChunkIO) void {
         // 先检查 pending 队列（用 mesh_mutex）
         {
             self.mesh_mutex.lock();
@@ -366,6 +381,11 @@ pub const BlockWorld = struct {
                 }
             }
 
+            // 存档脏数据
+            if (loaded.dirty and chunk_io != null) {
+                chunk_io.?.saveFn(chunk_io.?.ctx, origin, loaded.chunk);
+            }
+
             loaded.mesh_cache.deinit();
             self.allocator.destroy(loaded.chunk);
             _ = self.chunks.remove(origin);
@@ -380,6 +400,7 @@ pub const BlockWorld = struct {
             const ly: u32 = @intCast(world_pos.y - origin.y);
             const lz: u32 = @intCast(world_pos.z - origin.z);
             loaded.chunk.blocks[lx][ly][lz] = BlockState.init(block_id);
+            loaded.dirty = true;
             try self.enqueueMeshBuild(origin);
 
             const dirs = std.enums.values(Direction);

@@ -1,4 +1,3 @@
 zig-out/
 .zig-cache/
-.zed/
-saves/
+.DS_Store

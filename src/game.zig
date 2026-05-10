@@ -12,6 +12,7 @@ camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
 hotbar: Hotbar,
+save_manager: SaveManager,
 icon_atlas: IconAtlas,
 block_world: BlockWorld.BlockWorld,
 load_range: i32,
@@ -34,8 +35,9 @@ pub fn start(self: *Game) !void {
     self.registry.add(player_entity, Comps.Health{ .current = 100, .max = 100 });
     self.registry.add(player_entity, Comps.SpawnPos{ .pos = Vec3.new(8, 130, 8) });
 
-    // 加载初始区块
+    // 加载初始区块（尝试从存档恢复，无存档则生成）
     {
+        var chunk_io = chunkIO(&self.save_manager);
         const player_origin = BlockWorld.BlockWorld.chunkOrigin(
             @intFromFloat(@floor(8.0)),
             @intFromFloat(@floor(8.0)),
@@ -49,10 +51,12 @@ pub fn start(self: *Game) !void {
                     player_origin.x + dx * BlockWorld.CHUNK_SIZE_X_I32,
                     0,
                     player_origin.z + dz * BlockWorld.CHUNK_SIZE_Z_I32,
-                ));
+                ), &chunk_io);
             }
         }
     }
+    // 加载玩家数据（位置、血量、物品栏）
+    self.save_manager.loadPlayer(&self.hotbar, &self.registry) catch {};
     // 等待worker完成初始区块的mesh构建
     while (self.block_world.pendingCount() > 0) {
         try self.block_world.processCompletedBuilds();
@@ -171,6 +175,9 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 物品栏
     self.hotbar = .{};
 
+    // 存档系统
+    self.save_manager = try SaveManager.init(allocator, "world_1");
+
     // 图标缓存 + 图标管线（传入 uniform 缓冲）
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
@@ -192,6 +199,12 @@ pub fn deinit(self: *@This()) void {
 
     self.window.deinit();
     self.gctx.deinit();
+
+    // 退出前保存
+    self.save_manager.savePlayer(&self.hotbar, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+    self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
+    self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
+
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
     // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
@@ -206,6 +219,7 @@ pub fn deinit(self: *@This()) void {
     self.ui_system.deinit();
     self.icon_atlas.deinit();
     self.block_world.deinit();
+    self.save_manager.deinit();
 }
 
 fn produceMoveIntent(self: *Game) void {
@@ -457,8 +471,6 @@ fn updateEntities(self: *Game) !void {
                 }
             }
             if (despawn) {
-                // TODO: 存档前记录 despawn 信息（type_id, pos, chunk_origin, health 等）
-                // 销毁前清理 AI 数据
                 self.block_world.cleanupEntity(&self.registry, entity);
                 self.registry.destroy(entity);
             }
@@ -574,6 +586,7 @@ fn updateChunks(self: *Game) !void {
         const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_SIZE_Z_I32);
 
         const load_range: i32 = self.load_range;
+        var io = chunkIO(&self.save_manager);
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;
@@ -582,7 +595,7 @@ fn updateChunks(self: *Game) !void {
                     player_origin.x + dx * BlockWorld.CHUNK_SIZE_X_I32,
                     0,
                     player_origin.z + dz * BlockWorld.CHUNK_SIZE_Z_I32,
-                ));
+                ), &io);
             }
         }
 
@@ -599,7 +612,7 @@ fn updateChunks(self: *Game) !void {
             }
         }
         for (to_unload.items) |key| {
-            self.block_world.unloadChunk(key);
+            self.block_world.unloadChunk(key, &io);
         }
         break;
     }
@@ -649,6 +662,30 @@ const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
 const IconAtlas = @import("icon_atlas.zig").IconAtlas;
+const SaveManager = @import("save_manager.zig").SaveManager;
+
+/// 构建 ChunkIO 回调，使区块加载/卸载时自动读写存档
+fn chunkIO(mgr: *SaveManager) BlockWorld.ChunkIO {
+    const S = struct {
+        fn load(ctx: *anyopaque, origin: Vec3i, chunk: *BlockWorld.Chunk) bool {
+            const self = @as(*SaveManager, @ptrCast(@alignCast(ctx)));
+            const cx = @divExact(origin.x, 16);
+            const cz = @divExact(origin.z, 16);
+            return self.loadChunk(cx, cz, chunk) catch false;
+        }
+        fn save(ctx: *anyopaque, origin: Vec3i, chunk: *const BlockWorld.Chunk) void {
+            const self = @as(*SaveManager, @ptrCast(@alignCast(ctx)));
+            const cx = @divExact(origin.x, 16);
+            const cz = @divExact(origin.z, 16);
+            self.saveChunk(cx, cz, chunk) catch {};
+        }
+    };
+    return .{
+        .ctx = @ptrCast(mgr),
+        .loadFn = S.load,
+        .saveFn = S.save,
+    };
+}
 
 fn getSurfaceY(world: *BlockWorld.BlockWorld, x: i32, z: i32) ?i32 {
     var y: i32 = @intCast(BlockWorld.CHUNK_SIZE_Y - 1);

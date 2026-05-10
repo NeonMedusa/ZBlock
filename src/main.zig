@@ -14,9 +14,3 @@ pub fn main() !void {
 const std = @import("std");
 const Imports = @import("imports.zig");
 const Game = Imports.Game;
-const zigimg = @import("zigimg");
-const Stb = @import("stb").c;
-
-const Algebra = @import("algebra.zig");
-const Vec3 = Algebra.Vec3;
-const Mat4 = Algebra.Mat4;
