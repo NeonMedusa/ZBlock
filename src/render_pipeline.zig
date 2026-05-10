@@ -152,7 +152,8 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
         .depthStencil = &Wgpu.WGPUDepthStencilState{
             .format = Wgpu.WGPUTextureFormat_Depth24Plus,
             .depthWriteEnabled = 1,
-            .depthCompare = Wgpu.WGPUCompareFunction_Less,
+            // .depthCompare = Wgpu.WGPUCompareFunction_Less,
+            .depthCompare = Wgpu.WGPUCompareFunction_Greater,
             .stencilFront = .{},
             .stencilBack = .{},
             .stencilReadMask = 0,

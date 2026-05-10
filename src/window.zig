@@ -113,11 +113,12 @@ fn windowSizeCallback(glfw_window: ?*Glfw.GLFWwindow, width: i32, height: i32) c
             game.gctx.resizeSwapChain(game.window.width_u, game.window.height_u);
             // 更新SceneUniform
             const aspect_ratio: f32 = game.window.width / game.window.height;
-            game.ubo.proj_matrix = Mat4.perspective(
+            // game.ubo.proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 500);
+            game.ubo.proj_matrix = Mat4.perspectiveReversedZ(
                 70,
                 aspect_ratio,
                 0.001,
-                400,
+                500,
             );
             // 更新UiUniform
             game.ui_system.ubo.ortho_matrix = Mat4.orthographic(
