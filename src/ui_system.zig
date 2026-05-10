@@ -9,7 +9,7 @@ const UiSystem = @This();
 /// - 64: 默认，适配 ASCII 及中等复杂字体。CJK需配合合适的 SDF_SCALE_HEIGHT
 /// - 96: CJK 笔画更清晰，总槽数降为 (2048/96)² ≈ 441
 /// - 128: CJK 笔画完整保留，总槽数降为 (2048/128)² = 256
-const GLYPH_SIZE: u32 = 96;
+const GLYPH_SIZE: u32 = 64;
 
 /// 图集纹理的单边像素尺寸（总大小 = ATLAS_SIZE² 字节，R8 单通道）。
 /// 必须为 GLYPH_SIZE 的整数倍。

@@ -11,15 +11,15 @@ pub const ItemStack = struct {
 /// 9 格物品栏
 pub const Hotbar = struct {
     slots: [9]ItemStack = .{
+        ItemStack{ .block_id = .fromName("grass"), .count = 1 },
         ItemStack{ .block_id = .fromName("stone"), .count = 1 },
         ItemStack{ .block_id = .fromName("dirt"), .count = 1 },
-        ItemStack{ .block_id = .fromName("grass"), .count = 1 },
         ItemStack{ .block_id = .fromName("sand"), .count = 1 },
         ItemStack{ .block_id = .fromName("water"), .count = 1 },
         ItemStack{ .block_id = .fromName("snow"), .count = 1 },
         ItemStack{ .block_id = .fromName("foo"), .count = 1 },
-        ItemStack{ .block_id = .fromName("stone"), .count = 1 },
-        ItemStack{ .block_id = .fromName("dirt"), .count = 1 },
+        ItemStack{ .block_id = .fromName("air"), .count = 0 },
+        ItemStack{ .block_id = .fromName("air"), .count = 0 },
     },
     selected: u32 = 0, // 0-8
 
