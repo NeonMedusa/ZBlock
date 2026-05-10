@@ -46,6 +46,11 @@ pub const Chunk = struct {
         const snow_line: i32 = 120; // 雪线：高于此高度地表为 snow（而非 stone）
         const dirt_depth: i32 = 4; // 表土厚度：地表以下多少层为 dirt（之下为 stone）
 
+        // === 垂直群落边界凹凸（使雪线/裸岩线自然弯曲） ===
+        const biome_noise_scale: f32 = 0.8; // 弯曲频率：越大→细碎，越小→宽缓
+        const biome_snow_range: f32 = 9.0; // 雪线偏移半振幅 ±9 格
+        const biome_stone_range: f32 = 7.0; // 裸岩线偏移半振幅 ±7 格
+
         for (0..CHUNK_SIZE_X) |x| {
             for (0..CHUNK_SIZE_Z) |z| {
                 const world_x = world_origin.x + @as(i32, @intCast(x));
@@ -64,13 +69,13 @@ pub const Chunk = struct {
                     break :blk base_height_f + threshold * plain_scale + (@exp2(slope * mountain_factor) - 1.0) * mountain_scale;
                 }));
 
-                // 小尺度噪声偏移垂直生物群落分界线，使雪线/裸岩线自然弯曲
+                // 垂直群落边界弯曲，使雪线/裸岩线自然凹凸
                 const biome_noise = Perlin.perlin2d(
-                    @as(f32, @floatFromInt(world_x)) * 0.8,
-                    @as(f32, @floatFromInt(world_z)) * 0.8,
+                    @as(f32, @floatFromInt(world_x)) * biome_noise_scale,
+                    @as(f32, @floatFromInt(world_z)) * biome_noise_scale,
                 );
-                const local_snow_line = snow_line + @as(i32, @intFromFloat(biome_noise * 18.0 - 9.0));
-                const local_stone_line = stone_line + @as(i32, @intFromFloat(biome_noise * 14.0 - 7.0));
+                const local_snow_line = snow_line + @as(i32, @intFromFloat(biome_noise * biome_snow_range * 2.0 - biome_snow_range));
+                const local_stone_line = stone_line + @as(i32, @intFromFloat(biome_noise * biome_stone_range * 2.0 - biome_stone_range));
 
                 for (0..CHUNK_SIZE_Y) |y| {
                     const y_i32: i32 = @intCast(y);
