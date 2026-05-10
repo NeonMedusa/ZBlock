@@ -38,6 +38,9 @@ pub const block_infos = [_]BlockProtoType{
         .is_swimmable = true,
         .fluid_resistance = 0.3,
     },
+    .{
+        .name = "snow",
+    },
     .{ .name = "foo" },
 };
 

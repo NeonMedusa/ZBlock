@@ -8,7 +8,11 @@ const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 // 在这里定义所有组件类型
 pub const Components = struct {
     // ---- 身份 ----
-    pub const Player = struct { id: u32 = 0 }; // 标记哪个实体是玩家
+    pub const Player = struct {
+        id: u32 = 0,
+        mode: enum(u2) { survival, creative, spectator } = .survival,
+    };
+    pub const Flying = struct {}; // 标签组件：存在表示实体处于飞行状态
     pub const ModelName = struct { id: ModelId }; // 渲染用模型
     pub const AIAgent = struct {
         type_id: EntityTypeId,                          // 实体类型（僵尸/狼等）

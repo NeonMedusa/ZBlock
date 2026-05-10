@@ -27,32 +27,65 @@ pub const Chunk = struct {
     blocks: [CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockState,
 
     pub fn generate(world_origin: Vec3i, out_chunk: *Chunk) void {
-        const noise_scale: f32 = 0.02;
-        const world_height: i32 = 128;
-        const water_height: i32 = 64;
+        // === 噪声生成 ===
+        const base_noise_scale: f32 = 0.005; // 地形特征尺度：越小→大陆越大/越平缓，越大→丘陵越碎
+        const octaves: u32 = 6; // 噪声层数：越多→细节越丰富（性能↓），越少→越光滑
+        const persistence: f32 = 0.5; // 每层振幅衰减：0.3→平坦，0.5→适中，0.7→崎岖
+
+        // === 高度映射 ===
+        // 公式: if noise < threshold → 平原 (线性); else → 山脉 (2^(slope×factor) 指数)
+        const base_height: i32 = 32; // 最低海拔（海床/盆地底部），抬高→整体陆地上移
+        const threshold: f32 = 0.55; // 平原→山脉分界点（noise 值）：越大→平原越多、山越少
+        const plain_scale: f32 = 40.0; // 平原高度振幅：越大→平原起伏越剧烈
+        const mountain_factor: f32 = 4.0; // 山脉陡峭指数：越大→山越高越尖，越小→山越矮越圆
+        const mountain_scale: f32 = 40.0; // 山脉高度振幅：越大→山越高，越小→山越矮
+
+        // === 生物群落分界 ===
+        const sea_level: i32 = 48; // 海平面：低于此高度填充水
+        const stone_line: i32 = 80; // 裸岩线：高于此高度地表为 stone（而非 grass）
+        const snow_line: i32 = 120; // 雪线：高于此高度地表为 snow（而非 stone）
+        const dirt_depth: i32 = 4; // 表土厚度：地表以下多少层为 dirt（之下为 stone）
 
         for (0..CHUNK_SIZE_X) |x| {
             for (0..CHUNK_SIZE_Z) |z| {
                 const world_x = world_origin.x + @as(i32, @intCast(x));
                 const world_z = world_origin.z + @as(i32, @intCast(z));
-                const noise_val = Perlin.perlin2d(
-                    @as(f32, @floatFromInt(world_x)) * noise_scale,
-                    @as(f32, @floatFromInt(world_z)) * noise_scale,
+                const noise_val = Perlin.octavePerlin2d(
+                    @as(f32, @floatFromInt(world_x)) * base_noise_scale,
+                    @as(f32, @floatFromInt(world_z)) * base_noise_scale,
+                    octaves,
+                    persistence,
                 );
-                const ground_position: i32 = @intFromFloat(noise_val * @as(f32, @floatFromInt(world_height)));
+                const base_height_f: f32 = @floatFromInt(base_height);
+                const ground_position = @as(i32, @intFromFloat(if (noise_val < threshold)
+                    base_height_f + noise_val * plain_scale
+                else blk: {
+                    const slope = (noise_val - threshold) / (1.0 - threshold);
+                    break :blk base_height_f + threshold * plain_scale + (@exp2(slope * mountain_factor) - 1.0) * mountain_scale;
+                }));
+
+                // 小尺度噪声偏移垂直生物群落分界线，使雪线/裸岩线自然弯曲
+                const biome_noise = Perlin.perlin2d(
+                    @as(f32, @floatFromInt(world_x)) * 0.8,
+                    @as(f32, @floatFromInt(world_z)) * 0.8,
+                );
+                const local_snow_line = snow_line + @as(i32, @intFromFloat(biome_noise * 18.0 - 9.0));
+                const local_stone_line = stone_line + @as(i32, @intFromFloat(biome_noise * 14.0 - 7.0));
 
                 for (0..CHUNK_SIZE_Y) |y| {
                     const y_i32: i32 = @intCast(y);
                     const block_id: BlockId = blk: {
                         if (y_i32 > ground_position) {
-                            if (y_i32 < water_height) break :blk .fromName("water");
+                            if (y_i32 < sea_level) break :blk .fromName("water");
                             break :blk .fromName("air");
                         } else if (y_i32 == ground_position) {
-                            if (y_i32 < water_height) break :blk .fromName("sand");
+                            if (y_i32 < sea_level) break :blk .fromName("sand");
+                            if (y_i32 >= local_snow_line) break :blk .fromName("snow");
+                            if (y_i32 >= local_stone_line) break :blk .fromName("stone");
                             break :blk .fromName("grass");
                         } else {
                             const depth = ground_position - y_i32;
-                            if (depth >= 5) break :blk .fromName("stone");
+                            if (depth > dirt_depth) break :blk .fromName("stone");
                             break :blk .fromName("dirt");
                         }
                     };
@@ -381,104 +414,127 @@ pub const BlockWorld = struct {
             const on_ground = view.get(Comps.OnGround, entity);
             var intent = view.get(Comps.MoveIntent, entity);
 
-            // 水中检测与流体阻力
-            const in_swimmable = self.isInSwimmable(pos, aabb);
-            const resistance: f32 = blk: {
-                if (!in_swimmable) break :blk 0.0;
-                const mid = pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0));
-                const proto = self.getBlockAt(mid).prototype();
-                break :blk @as(f32, if (proto.is_swimmable) proto.fluid_resistance else 0.0);
-            };
-
-            // 重力、移速倍率、最终最大速度与加速度
-            const effective_gravity: f32 = if (in_swimmable) FLUID_GRAVITY else GRAVITY;
-            const speed_multiplier: f32 = if (intent.sprint) SPRINT_MULTIPLIER else if (intent.sneak) SNEAK_MULTIPLIER else 1.0;
-            const max_speed = move_speed.value * (1.0 - resistance) * speed_multiplier;
-            const acceleration = ACCELERATION * (1.0 - resistance);
-
-            // ---- 垂直移动：水中上浮/下潜，或陆地重力+跳跃 ----
-            if (in_swimmable) {
-                if (intent.direction.y > 0.0) {
-                    vel.vec.y = SWIM_UP_SPEED;
-                    on_ground.value = false;
-                } else if (intent.direction.y < 0.0) {
-                    vel.vec.y = -SWIM_DOWN_SPEED;
-                    on_ground.value = false;
-                } else {
-                    vel.vec.y -= effective_gravity * dt;
-                    if (vel.vec.y < SINK_TERMINAL) vel.vec.y = SINK_TERMINAL;
-                }
-            } else {
-                vel.vec.y -= effective_gravity * dt;
-                if (intent.jump and on_ground.value) {
-                    vel.vec.y = intent.jump_power;
-                    on_ground.value = false;
-                }
-            }
+            // 飞行实体：跳过重力/加速/潜行，仅保留碰撞解算
+            const flying = registry.has(Comps.Flying, entity);
 
             // ---- 水平移动：提取当前速度与输入方向的 XZ 分量 ----
             var h_vel = Vec3.new(vel.vec.x, 0, vel.vec.z);
             var move_dir = Vec3.new(intent.direction.x, 0, intent.direction.z);
-            var sneak_blocked = false;
 
-            // ---- 潜行边缘保护：阻止从方块边缘坠落 ----
-            if (intent.sneak and move_dir.len2() > 0.001 and on_ground.value) {
-                // 边缘保留宽度：AABB 底面积仅剩此比例接触方块时阻止移动
-                const edge_margin = aabb.width * 0.1;
-                const intent_len = move_dir.len();
-                var edge_blocked = false;
+            if (!flying) {
+                // 水中检测与流体阻力
+                const in_swimmable = self.isInSwimmable(pos, aabb);
+                const resistance: f32 = blk: {
+                    if (!in_swimmable) break :blk 0.0;
+                    const mid = pos.vec.add(Vec3.new(0, aabb.height * 0.5, 0));
+                    const proto = self.getBlockAt(mid).prototype();
+                    break :blk @as(f32, if (proto.is_swimmable) proto.fluid_resistance else 0.0);
+                };
 
-                // 逐轴独立检测：沿移动方向探测 edge_margin，检查该处 AABB 底部是否仍有方块
-                if (move_dir.x != 0) {
-                    const s: f32 = if (move_dir.x > 0) 1.0 else -1.0;
-                    if (!self.hasGroundUnder(pos.vec.add(Vec3.new(edge_margin * s, 0, 0)), aabb)) {
-                        h_vel.x = 0;
-                        move_dir.x = 0;
-                        edge_blocked = true;
+                // 重力、移速倍率、最终最大速度与加速度
+                const effective_gravity: f32 = if (in_swimmable) FLUID_GRAVITY else GRAVITY;
+                const speed_multiplier: f32 = if (intent.sprint) SPRINT_MULTIPLIER else if (intent.sneak) SNEAK_MULTIPLIER else 1.0;
+                const max_speed = move_speed.value * (1.0 - resistance) * speed_multiplier;
+                const acceleration = ACCELERATION * (1.0 - resistance);
+
+                // ---- 垂直移动：水中上浮/下潜，或陆地重力+跳跃 ----
+                if (in_swimmable) {
+                    if (intent.direction.y > 0.0) {
+                        vel.vec.y = SWIM_UP_SPEED;
+                        on_ground.value = false;
+                    } else if (intent.direction.y < 0.0) {
+                        vel.vec.y = -SWIM_DOWN_SPEED;
+                        on_ground.value = false;
+                    } else {
+                        vel.vec.y -= effective_gravity * dt;
+                        if (vel.vec.y < SINK_TERMINAL) vel.vec.y = SINK_TERMINAL;
                     }
-                }
-                if (move_dir.z != 0) {
-                    const s: f32 = if (move_dir.z > 0) 1.0 else -1.0;
-                    if (!self.hasGroundUnder(pos.vec.add(Vec3.new(0, 0, edge_margin * s)), aabb)) {
-                        h_vel.z = 0;
-                        move_dir.z = 0;
-                        edge_blocked = true;
-                    }
-                }
-
-                // 有轴向被边缘阻挡时，按剩余意图比例缩放速度，实现贴墙滑动
-                if (edge_blocked) {
-                    sneak_blocked = true;
-                    const remaining_len = move_dir.len();
-                    if (remaining_len > 0.001) {
-                        h_vel = h_vel.scale(remaining_len / intent_len);
-                    }
-                }
-            }
-
-            // ---- 水平加速/摩擦 ----
-            if (move_dir.len2() > 0.001) {
-                // 潜行阻挡时不归一化 wish_dir，保留分量比例以模拟贴（空气）墙滑动
-                const wish_dir = if (sneak_blocked) move_dir else move_dir.norm();
-                h_vel = h_vel.add(wish_dir.scale(acceleration * dt));
-                const h_speed = h_vel.len();
-                if (h_speed > max_speed) h_vel = h_vel.scale(max_speed / h_speed);
-            } else {
-                if (on_ground.value) {
-                    // 地面摩擦力：每帧乘系数减速
-                    h_vel = h_vel.scale(GROUND_FRICTION);
                 } else {
-                    // 空气阻力：每秒扣除固定量
-                    const h_speed = h_vel.len();
-                    if (h_speed > 0.001) {
-                        const reduction = AIR_FRICTION * dt;
-                        const new_speed = @max(h_speed - reduction, 0);
-                        h_vel = h_vel.scale(new_speed / h_speed);
+                    vel.vec.y -= effective_gravity * dt;
+                    if (intent.jump and on_ground.value) {
+                        vel.vec.y = intent.jump_power;
+                        on_ground.value = false;
                     }
                 }
+
+                // ---- 潜行边缘保护：阻止从方块边缘坠落 ----
+                var sneak_blocked = false;
+                if (intent.sneak and move_dir.len2() > 0.001 and on_ground.value) {
+                    // 边缘保留宽度：AABB 底面积仅剩此比例接触方块时阻止移动
+                    const edge_margin = aabb.width * 0.1;
+                    const intent_len = move_dir.len();
+                    var edge_blocked = false;
+
+                    // 逐轴独立检测：沿移动方向探测 edge_margin，检查该处 AABB 底部是否仍有方块
+                    if (move_dir.x != 0) {
+                        const s: f32 = if (move_dir.x > 0) 1.0 else -1.0;
+                        if (!self.hasGroundUnder(pos.vec.add(Vec3.new(edge_margin * s, 0, 0)), aabb)) {
+                            h_vel.x = 0;
+                            move_dir.x = 0;
+                            edge_blocked = true;
+                        }
+                    }
+                    if (move_dir.z != 0) {
+                        const s: f32 = if (move_dir.z > 0) 1.0 else -1.0;
+                        if (!self.hasGroundUnder(pos.vec.add(Vec3.new(0, 0, edge_margin * s)), aabb)) {
+                            h_vel.z = 0;
+                            move_dir.z = 0;
+                            edge_blocked = true;
+                        }
+                    }
+
+                    // 有轴向被边缘阻挡时，按剩余意图比例缩放速度，实现贴墙滑动
+                    if (edge_blocked) {
+                        sneak_blocked = true;
+                        const remaining_len = move_dir.len();
+                        if (remaining_len > 0.001) {
+                            h_vel = h_vel.scale(remaining_len / intent_len);
+                        }
+                    }
+                }
+
+                // ---- 水平加速/摩擦 ----
+                if (move_dir.len2() > 0.001) {
+                    // 潜行阻挡时不归一化 wish_dir，保留分量比例以模拟贴（空气）墙滑动
+                    const wish_dir = if (sneak_blocked) move_dir else move_dir.norm();
+                    h_vel = h_vel.add(wish_dir.scale(acceleration * dt));
+                    const h_speed = h_vel.len();
+                    if (h_speed > max_speed) h_vel = h_vel.scale(max_speed / h_speed);
+                } else {
+                    if (on_ground.value) {
+                        // 地面摩擦力：每帧乘系数减速
+                        h_vel = h_vel.scale(GROUND_FRICTION);
+                    } else {
+                        // 空气阻力：每秒扣除固定量
+                        const h_speed = h_vel.len();
+                        if (h_speed > 0.001) {
+                            const reduction = AIR_FRICTION * dt;
+                            const new_speed = @max(h_speed - reduction, 0);
+                            h_vel = h_vel.scale(new_speed / h_speed);
+                        }
+                    }
+                }
+            } else {
+                // 飞行移动：速度由移动意图直接驱动，Shift 切换加速
+                const fly_speed: f32 = if (intent.sprint) 40.0 else 20.0;
+                h_vel = move_dir.scale(fly_speed);
+                vel.vec.y = intent.direction.y * fly_speed;
             }
             vel.vec.x = h_vel.x;
             vel.vec.z = h_vel.z;
+
+            // 旁观者模式：绕过碰撞解算，直接应用位移
+            if (flying) {
+                if (registry.tryGet(Comps.Player, entity)) |player| {
+                    if (player.mode == .spectator) {
+                        pos.vec.x += vel.vec.x * dt;
+                        pos.vec.y += vel.vec.y * dt;
+                        pos.vec.z += vel.vec.z * dt;
+                        intent.jump = false;
+                        continue;
+                    }
+                }
+            }
 
             // ---- 碰撞解算：将速度转为位移，交 moveEntity 处理方块碰撞与 on_ground 更新 ----
             const dx = vel.vec.x * dt;

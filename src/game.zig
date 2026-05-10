@@ -13,13 +13,15 @@ ubo: SceneUniform,
 player_id: u32 = 0,
 block_world: BlockWorld.BlockWorld,
 load_range: i32,
+flying: bool = false,
+last_space_press: f64 = 0.0,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
     var main_menu = @import("ui/main_menu.zig"){};
     // 创建玩家实体
     const player_entity = self.registry.create();
-    self.registry.add(player_entity, Comps.Player{ .id = self.player_id });
+    self.registry.add(player_entity, Comps.Player{ .id = self.player_id, .mode = .creative });
     self.registry.add(player_entity, Comps.Position{ .vec = Vec3.new(8, 130, 8) });
     self.registry.add(player_entity, Comps.Velocity{ .vec = Vec3.zero });
     self.registry.add(player_entity, Comps.Collider{ .width = 0.6, .height = 1.8 });
@@ -66,6 +68,9 @@ pub fn start(self: *Game) !void {
         self.input.beginFrame();
         self.window.pollEvents();
         if (!main_menu.visible) {
+            // 双击空格切换飞行模式
+            handleFlightToggle(self);
+
             // 1. 输入 -> MoveIntent
             produceMoveIntent(self);
             // 2. 物理
@@ -159,7 +164,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.ui_system = ui_system;
 
     // 测试方块世界
-    self.load_range = 4;
+    self.load_range = 16;
     const load_range: i32 = self.load_range;
     const max_chunks: usize = @intCast((2 * load_range + 1) * (2 * load_range + 1) * 4);
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
@@ -235,10 +240,10 @@ fn produceMoveIntent(self: *Game) void {
             intent.sprint = !intent.sprint;
         }
 
-        // 按住左 Ctrl 进入潜行，同时关闭冲刺；松开则退出潜行
+        // 按住左 Ctrl 进入潜行；松开则退出潜行（飞行时不关闭冲刺）
         if (self.input.isKeyPressed(.left_control)) {
             intent.sneak = true;
-            intent.sprint = false;
+            if (!self.flying) intent.sprint = false;
         } else {
             intent.sneak = false;
         }
@@ -246,6 +251,36 @@ fn produceMoveIntent(self: *Game) void {
         // 归一化后写入移动意图，供物理系统消费
         if (move_dir.len2() > 0.001) move_dir = move_dir.norm();
         intent.direction = move_dir;
+    }
+}
+
+/// 双击空格切换飞行模式（0.3 秒内再次按下空格则添加/移除 Flying 组件）
+fn handleFlightToggle(self: *Game) void {
+    self.last_space_press -= self.window.delta_time;
+    if (self.last_space_press < 0) self.last_space_press = 0;
+
+    if (self.input.isKeyDown(.space)) {
+        if (self.last_space_press > 0) {
+            // 找到玩家实体，切换 Flying 组件
+            var view = self.registry.view(.{Comps.Player}, .{});
+            var iter = view.entityIterator();
+            while (iter.next()) |entity| {
+                const player = view.get(entity);
+                if (player.id == self.player_id) {
+                    if (self.registry.has(Comps.Flying, entity)) {
+                        self.registry.remove(Comps.Flying, entity);
+                        self.flying = false;
+                    } else {
+                        self.registry.add(entity, Comps.Flying{});
+                        self.flying = true;
+                    }
+                    break;
+                }
+            }
+            self.last_space_press = 0;
+        } else {
+            self.last_space_press = 0.3;
+        }
     }
 }
 
@@ -339,7 +374,7 @@ fn tryPlaceBlock(self: *Game) !void {
         }
     }
 
-    // if (!can_place) return;
+    if (!can_place) return;
 
     try self.block_world.setBlock(place_pos, .fromName("foo"));
 }
