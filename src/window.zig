@@ -117,7 +117,7 @@ fn windowSizeCallback(glfw_window: ?*Glfw.GLFWwindow, width: i32, height: i32) c
             game.ubo.proj_matrix = Mat4.perspectiveReversedZ(
                 70,
                 aspect_ratio,
-                0.001,
+                0.1,
                 500,
             );
             // 更新UiUniform

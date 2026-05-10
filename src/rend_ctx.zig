@@ -593,7 +593,7 @@ pub const SceneUniform = struct {
         const proj_matrix = Mat4.perspectiveReversedZ(
             70,
             aspect_ratio,
-            0.001,
+            0.1,
             500,
         );
         const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero, Vec3.up);
