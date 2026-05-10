@@ -160,7 +160,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const registry = ECS.Registry.init(allocator);
     self.registry = registry;
     // 初始化UI系统
-    const ui_system = try UiSystem.init(allocator, &self.gctx, self, "resources/fonts/SourceHanSansSC-VF.ttf");
+    const ui_system = try UiSystem.init(allocator, &self.gctx, self, "resources/fonts/wqy-microhei.ttc");
     self.ui_system = ui_system;
 
     // 测试方块世界

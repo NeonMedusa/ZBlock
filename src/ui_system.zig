@@ -1,18 +1,54 @@
-// ui_system.zig
+// ui_system.zig — 基于 SDF（Signed Distance Field）的 UI 文字渲染系统
 const UiSystem = @This();
 
-// SDF 图集常量
-const GLYPH_SIZE: u32 = 64; // 每个字形 SDF 槽位尺寸（宽高一致）
-const ATLAS_SIZE: u32 = 2048; // 图集总尺寸（R8 单通道，4MB）
-const GLYPHS_PER_ROW: u32 = ATLAS_SIZE / GLYPH_SIZE;
-const GLYPH_SLOTS: u32 = GLYPHS_PER_ROW * GLYPHS_PER_ROW;
-const ATLAS_ROW_STRIDE: u32 = 256; // wgpuQueueWriteTexture 要求字节行对齐到 256
+// ═══════════════════════════════════════════════
+//  SDF 图集常量 — 调整以下参数平衡质量与容量
+// ═══════════════════════════════════════════════
 
-// SDF 生成参数
+/// 每个字形在图集中占的像素尺寸（宽高一致）。
+/// - 64: 默认，适配 ASCII 及中等复杂字体。CJK需配合合适的 SDF_SCALE_HEIGHT
+/// - 96: CJK 笔画更清晰，总槽数降为 (2048/96)² ≈ 441
+/// - 128: CJK 笔画完整保留，总槽数降为 (2048/128)² = 256
+const GLYPH_SIZE: u32 = 64;
+
+/// 图集纹理的单边像素尺寸（总大小 = ATLAS_SIZE² 字节，R8 单通道）。
+/// 必须为 GLYPH_SIZE 的整数倍。
+const ATLAS_SIZE: u32 = 2048;
+
+/// 每行排列的字形数（由 ATLAS_SIZE ÷ GLYPH_SIZE 自动算出）。
+const GLYPHS_PER_ROW: u32 = ATLAS_SIZE / GLYPH_SIZE;
+
+/// 图集总槽位数（总可缓存的不同字形数）。
+/// 超过此数时，新字形会覆盖最久未被使用的槽位。
+const GLYPH_SLOTS: u32 = GLYPHS_PER_ROW * GLYPHS_PER_ROW;
+
+/// wgpuQueueWriteTexture 要求的源数据行对齐字节数。
+/// 部分 WGPU 后端要求 bytesPerRow≥256，设为此值兼容所有实现。
+const ATLAS_ROW_STRIDE: u32 = 256;
+
+// ═══════════════════════════════════════════════
+//  SDF 生成参数 — 调整以下参数影响渲染质量
+// ═══════════════════════════════════════════════
+
+/// SDF 位图在字形外额外保留的像素边距。
+/// 用于给 smoothstep 留出渐变过渡空间，防止边缘裁切。
 const SDF_PADDING: c_int = 4;
+
+/// SDF 中代表"轮廓边缘"的像素值（0-255）。
+/// 通常 128，即 0=远外部、128=边缘、255=深内部。
 const SDF_ONEDGE: u8 = 128;
-const SDF_PIXEL_DIST_SCALE: f32 = 64.0; // 64 值单位 = 1 像素距离
-const SDF_SCALE_HEIGHT: f32 = 64.0; // 生成 SDF 的基准字号
+
+/// 距离场精度系数：SDF 值变化多少单位对应 1 像素实际距离。
+/// - 64（默认）: 1px → 64 值单位，边缘±2px 范围内有渐变
+/// - 32: 1px → 32 值单位，渐变范围 ±4px，边缘更柔和
+/// - 128: 1px → 128 值单位，渐变范围 ±1px，边缘更锐利
+/// 增大可提升精度，但过大会使远距区域饱和（255）失去梯度。
+const SDF_PIXEL_DIST_SCALE: f32 = 64.0;
+
+/// 生成 SDF 时使用的标准字号（像素）。
+/// 建议值 = GLYPH_SIZE - (SDF_PADDING × 2) 左右，留出 padding 空间。
+/// 例如 GLYPH_SIZE=64 时取 56，glyph 最大约 56px + 8px padding = 64px。
+const SDF_SCALE_HEIGHT: f32 = 56;
 
 // 一个图集中的字形槽位
 const GlyphSlot = struct {
@@ -57,11 +93,9 @@ index_count: usize,
 vertex_buffer: Wgpu.WGPUBuffer,
 index_buffer: Wgpu.WGPUBuffer,
 
-// 最基本的按钮
-pub fn button(self: *UiSystem, x: f32, y: f32) bool {
+// 按钮
+pub fn button(self: *UiSystem, x: f32, y: f32, width: f32, height: f32) bool {
     var input = self.game_ptr.input;
-    const width: f32 = 100;
-    const height: f32 = 30;
     // 根据鼠标位置调整状态
     const mouse_pos = input.getCursorPos();
     const is_hovered = (mouse_pos.x >= x and mouse_pos.x <= x + width and
@@ -98,8 +132,35 @@ pub fn deinit(self: *@This()) void {
 pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: []const u8) !UiSystem {
     var self: UiSystem = undefined;
 
-    const max_vertices = 65536;
-    const max_indices = 131072;
+    // === 先加载字体（失败不浪费 GPU 资源）===
+    const font_data = try std.fs.cwd().readFileAllocOptions(
+        allocator,
+        font_path,
+        std.math.maxInt(usize),
+        null,
+        .@"8",
+        null,
+    );
+    errdefer allocator.free(font_data);
+
+    const font_offset = Stb.stbtt_GetFontOffsetForIndex(font_data.ptr, 0);
+    if (font_offset < 0) return error.FontInitFailed;
+
+    var font_info: Stb.stbtt_fontinfo = undefined;
+    if (Stb.stbtt_InitFont(&font_info, font_data.ptr, font_offset) == 0) {
+        return error.FontInitFailed;
+    }
+
+    var ascent: c_int = undefined;
+    var descent: c_int = undefined;
+    var line_gap: c_int = undefined;
+    Stb.stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
+
+    const canonical_scale = Stb.stbtt_ScaleForPixelHeight(&font_info, SDF_SCALE_HEIGHT);
+
+    // === 创建 GPU 资源 ===
+    const max_vertices: usize = 65536;
+    const max_indices: usize = 131072;
 
     const frame_vertices = try allocator.alloc(UiVertex, max_vertices);
     const frame_indices = try allocator.alloc(u32, max_indices);
@@ -121,28 +182,6 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
     });
     const ubo = UiUniform.init(game.window);
 
-    // 加载字体
-    const font_data = try std.fs.cwd().readFileAllocOptions(
-        allocator,
-        font_path,
-        std.math.maxInt(usize),
-        null,
-        .@"8",
-        null,
-    );
-
-    var font_info: Stb.stbtt_fontinfo = undefined;
-    if (Stb.stbtt_InitFont(&font_info, font_data.ptr, 0) == 0) {
-        return error.FontInitFailed;
-    }
-
-    var ascent: c_int = undefined;
-    var descent: c_int = undefined;
-    var line_gap: c_int = undefined;
-    Stb.stbtt_GetFontVMetrics(&font_info, &ascent, &descent, &line_gap);
-
-    const canonical_scale = Stb.stbtt_ScaleForPixelHeight(&font_info, SDF_SCALE_HEIGHT);
-
     // 创建 SDF 图集纹理
     const sdf_texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &.{
         .usage = @as(Wgpu.WGPUTextureUsage, Wgpu.WGPUTextureUsage_CopyDst) | Wgpu.WGPUTextureUsage_TextureBinding,
@@ -158,7 +197,6 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
         .viewFormatCount = 0,
         .viewFormats = null,
     });
-
     const sdf_texture_view = Wgpu.wgpuTextureCreateView(sdf_texture, null);
 
     const sdf_sampler = Wgpu.wgpuDeviceCreateSampler(gctx.device, &.{
@@ -174,10 +212,11 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
         .maxAnisotropy = 1,
     });
 
+    // === 填充 self ===
     self.allocator = allocator;
+    self.game_ptr = game;
     self.vertex_buffer = vertex_buffer;
     self.index_buffer = index_buffer;
-    self.game_ptr = game;
     self.frame_vertices = frame_vertices;
     self.frame_indices = frame_indices;
     self.max_vertices = max_vertices;
@@ -198,7 +237,6 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
     self.glyph_slots = .{null} ** GLYPH_SLOTS;
     self.next_slot = 0;
     self.lru_counter = 0;
-    // 先创建好所有 buffer，再创建渲染管线
     self.render_pipeline = try UiRenderPipeline.init(gctx, "resources/shaders/ui_render_shader.wgsl", &self);
     return self;
 }

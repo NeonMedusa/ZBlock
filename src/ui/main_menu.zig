@@ -1,20 +1,29 @@
-//main_menu.zig
+//main_menu.zig — 居中宽按钮主菜单
 visible: bool = true,
 pub fn update(self: *@This(), game: *Game) void {
-    // ESC键切换主菜单是否可见
     if (game.input.isKeyDown(.escape))
         self.visible = !self.visible;
-    // 如果自身为不可见状态，则直接返回不做渲染
     if (!self.visible) return;
-    // 继续游戏按钮
-    if (game.ui_system.button(20, 20))
+
+    const win_w = game.window.width;
+    const win_h = game.window.height;
+
+    const btn_w: f32 = 240;
+    const btn_h: f32 = 56;
+    const btn_x = (win_w - btn_w) / 2;
+    const btn_y1 = (win_h - btn_h) / 2 - 36;
+    const btn_y2 = (win_h - btn_h) / 2 + 36;
+    const font_size: f32 = 22;
+
+    if (game.ui_system.button(btn_x, btn_y1, btn_w, btn_h))
         self.visible = !self.visible;
-    // 退出游戏按钮
-    if (game.ui_system.button(500, 20))
+
+    if (game.ui_system.button(btn_x, btn_y2, btn_w, btn_h))
         game.window.setWindowShouldClose();
-    // 按钮文字
-    game.ui_system.drawText(&game.gctx, 28, 42, "继续", 20, .{ 1, 1, 1, 1 });
-    game.ui_system.drawText(&game.gctx, 528, 42, "quit", 20, .{ 1, 1, 1, 1 });
+
+    // 文字居中于按钮
+    game.ui_system.drawText(&game.gctx, btn_x + (btn_w - 40) / 2, btn_y1 + 38, "继续", font_size, .{ 1, 1, 1, 1 });
+    game.ui_system.drawText(&game.gctx, btn_x + (btn_w - 40) / 2, btn_y2 + 38, "退出", font_size, .{ 1, 1, 1, 1 });
 }
 const std = @import("std");
 const UiSystem = @import("../ui_system.zig");
