@@ -9,7 +9,7 @@ const UiSystem = @This();
 /// - 64: 默认，适配 ASCII 及中等复杂字体。CJK需配合合适的 SDF_SCALE_HEIGHT
 /// - 96: CJK 笔画更清晰，总槽数降为 (2048/96)² ≈ 441
 /// - 128: CJK 笔画完整保留，总槽数降为 (2048/128)² = 256
-const GLYPH_SIZE: u32 = 64;
+const GLYPH_SIZE: u32 = 96;
 
 /// 图集纹理的单边像素尺寸（总大小 = ATLAS_SIZE² 字节，R8 单通道）。
 /// 必须为 GLYPH_SIZE 的整数倍。
@@ -76,7 +76,6 @@ sdf_texture_view: Wgpu.WGPUTextureView,
 sdf_sampler: Wgpu.WGPUSampler,
 glyph_slots: [GLYPH_SLOTS]?GlyphSlot,
 next_slot: u32,
-lru_counter: u64,
 // ui通用缓冲区
 ubo: UiUniform,
 uniform_buffer: Wgpu.WGPUBuffer,
@@ -236,7 +235,6 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
     self.sdf_sampler = sdf_sampler;
     self.glyph_slots = .{null} ** GLYPH_SLOTS;
     self.next_slot = 0;
-    self.lru_counter = 0;
     self.render_pipeline = try UiRenderPipeline.init(gctx, "resources/shaders/ui_render_shader.wgsl", &self);
     return self;
 }
@@ -297,27 +295,17 @@ pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color:
     self.index_count += 6;
 }
 
-// 获取或生成一个字形，返回槽位索引
+// 获取或生成一个字形，返回槽位索引（RingBuffer 淘汰）
 fn getOrCreateGlyph(self: *UiSystem, gctx: *Gctx, codepoint: u21) ?u32 {
     // 查缓存
     for (self.glyph_slots, 0..) |maybe_slot, i| {
         if (maybe_slot) |slot| {
-            if (slot.codepoint == codepoint) {
-                self.lru_counter += 1;
-                return @as(u32, @intCast(i));
-            }
+            if (slot.codepoint == codepoint) return @as(u32, @intCast(i));
         }
     }
 
-    // 槽位已满时 LRU 淘汰
-    var slot_idx: u32 = undefined;
-    if (self.next_slot < GLYPH_SLOTS) {
-        slot_idx = self.next_slot;
-        self.next_slot += 1;
-    } else {
-        // 简单 FIFO 淘汰（用满后从头覆盖）
-        slot_idx = @as(u32, @intCast(self.lru_counter % GLYPH_SLOTS));
-    }
+    const slot_idx = self.next_slot;
+    self.next_slot = (self.next_slot + 1) % GLYPH_SLOTS;
 
     // 生成 SDF 位图
     var sdf_w: c_int = undefined;
@@ -396,7 +384,6 @@ fn getOrCreateGlyph(self: *UiSystem, gctx: *Gctx, codepoint: u21) ?u32 {
         .sdf_xoff = sdf_xoff,
         .sdf_yoff = sdf_yoff,
     };
-    self.lru_counter += 1;
 
     return slot_idx;
 }
@@ -567,8 +554,8 @@ pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32,
 //  物品栏渲染
 // ═══════════════════════════════════════════════════════════════
 
-/// 绘制底部物品栏（9 格 + 选中高亮 + 色块图标 + 数量文字）
-pub fn drawHotbar(self: *UiSystem, hotbar: *const Hotbar) void {
+/// 绘制底部物品栏（9 格 + 选中高亮 + 纹理图标 + 数量文字）
+pub fn drawHotbar(self: *UiSystem, hotbar: *const Hotbar, icon_atlas: *IconAtlas) void {
     const window = self.game_ptr.window;
     const slot: f32 = 50;
     const gap: f32 = 4;
@@ -581,11 +568,9 @@ pub fn drawHotbar(self: *UiSystem, hotbar: *const Hotbar) void {
         const x = start_x + @as(f32, @floatFromInt(i)) * (slot + gap);
         const sel = i == hotbar.selected;
 
-        // 槽位背景
         const bg: [4]f32 = if (sel) .{ 0.35, 0.35, 0.35, 1.0 } else .{ 0.15, 0.15, 0.15, 0.85 };
         self.drawRect(x, y, slot, slot, bg);
 
-        // 选中槽位：黄色边框
         if (sel) {
             const border: [4]f32 = .{ 1.0, 0.85, 0.2, 1.0 };
             self.drawRect(x, y, slot, 2, border);
@@ -594,13 +579,11 @@ pub fn drawHotbar(self: *UiSystem, hotbar: *const Hotbar) void {
             self.drawRect(x + slot - 2, y, 2, slot, border);
         }
 
-        // 方块色块
         if (@intFromEnum(item.block_id) != air_id) {
-            const color = blockColor(item.block_id);
-            self.drawRect(x + 3, y + 3, slot - 6, slot - 6, color);
+            const slot_i = icon_atlas.getOrLoad(@intFromEnum(item.block_id)) orelse continue;
+            icon_atlas.addQuad(IconAtlas.slotUV(slot_i), x + 4, y + 4, slot - 8);
         }
 
-        // 数量文字
         if (item.count > 1) {
             var buf: [16]u8 = undefined;
             const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch continue;
@@ -777,6 +760,10 @@ const UiRenderPipeline = struct {
     }
 };
 
+// ═══════════════════════════════════════════════════════════════
+//  图标渲染管线（独立于主 UI 管线，纹理采样 RGBA）
+// ═══════════════════════════════════════════════════════════════
+
 pub const UiUniform = struct {
     ortho_matrix: Mat4,
     pub fn init(window: Window) @This() {
@@ -804,5 +791,5 @@ const Mat4 = Algebra.Mat4;
 const Window = Imports.Window;
 const Stb = @import("stb").c;
 const Hotbar = @import("inventory.zig").Hotbar;
-const blockColor = @import("inventory.zig").blockColor;
+const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 const BlockId = @import("block_registry.zig").BlockId;

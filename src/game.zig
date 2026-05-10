@@ -11,7 +11,8 @@ render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
-hotbar: Hotbar = .{},
+hotbar: Hotbar,
+icon_atlas: IconAtlas,
 block_world: BlockWorld.BlockWorld,
 load_range: i32,
 flying: bool = false,
@@ -109,10 +110,11 @@ pub fn start(self: *Game) !void {
                 try tryPlaceBlock(self); // 右键放置
             }
         }
+        self.icon_atlas.reset();
         self.ui_system.beginFrame();
         main_menu.update(self);
         self.handleHotbarInput();
-        self.ui_system.drawHotbar(&self.hotbar);
+        self.ui_system.drawHotbar(&self.hotbar, &self.icon_atlas);
         try self.ui_system.endFrame(&self.gctx);
         // 6. 处理待构建的区块mesh（可能由异步worker完成）
         try self.block_world.processCompletedBuilds();
@@ -166,6 +168,12 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const ui_system = try UiSystem.init(allocator, &self.gctx, self, "resources/fonts/wqy-microhei.ttc");
     self.ui_system = ui_system;
 
+    // 物品栏
+    self.hotbar = .{};
+
+    // 图标缓存 + 图标管线（传入 uniform 缓冲）
+    self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
+
     // 测试方块世界
     self.load_range = 16;
     const load_range: i32 = self.load_range;
@@ -196,6 +204,7 @@ pub fn deinit(self: *@This()) void {
     }
     self.registry.deinit();
     self.ui_system.deinit();
+    self.icon_atlas.deinit();
     self.block_world.deinit();
 }
 
@@ -639,6 +648,7 @@ const BlockRegistry = @import("block_registry.zig");
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
+const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 
 fn getSurfaceY(world: *BlockWorld.BlockWorld, x: i32, z: i32) ?i32 {
     var y: i32 = @intCast(BlockWorld.CHUNK_SIZE_Y - 1);
