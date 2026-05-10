@@ -12,6 +12,9 @@ pub fn update(self: *@This(), game: *Game) void {
     // 退出游戏按钮
     if (game.ui_system.button(500, 20))
         game.window.setWindowShouldClose();
+    // 按钮文字
+    game.ui_system.drawText(&game.gctx, 28, 42, "继续", 20, .{ 1, 1, 1, 1 });
+    game.ui_system.drawText(&game.gctx, 528, 42, "quit", 20, .{ 1, 1, 1, 1 });
 }
 const std = @import("std");
 const UiSystem = @import("../ui_system.zig");
