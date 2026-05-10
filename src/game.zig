@@ -11,6 +11,7 @@ render_pipeline: RenderPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
+hotbar: Hotbar = .{},
 block_world: BlockWorld.BlockWorld,
 load_range: i32,
 flying: bool = false,
@@ -110,6 +111,8 @@ pub fn start(self: *Game) !void {
         }
         self.ui_system.beginFrame();
         main_menu.update(self);
+        self.handleHotbarInput();
+        self.ui_system.drawHotbar(&self.hotbar);
         try self.ui_system.endFrame(&self.gctx);
         // 6. 处理待构建的区块mesh（可能由异步worker完成）
         try self.block_world.processCompletedBuilds();
@@ -254,6 +257,46 @@ fn produceMoveIntent(self: *Game) void {
     }
 }
 
+/// 物品栏输入处理：数字键切换到、滚轮切换、中键拾取方块
+fn handleHotbarInput(self: *Game) void {
+    // 数字键 1-9 选中对应槽位
+    for (0..9) |i| {
+        const key_code = @intFromEnum(Input.Key.num1) + @as(i32, @intCast(i));
+        const key: Input.Key = @enumFromInt(key_code);
+        if (self.input.isKeyDown(key)) {
+            self.hotbar.selected = @intCast(i);
+        }
+    }
+
+    // 滚轮切换选中槽位
+    const scroll = self.input.getScrollDelta();
+    if (scroll.y > 0) {
+        self.hotbar.selected = (self.hotbar.selected + 8) % 9;
+    } else if (scroll.y < 0) {
+        self.hotbar.selected = (self.hotbar.selected + 1) % 9;
+    }
+
+    // 鼠标中键：拾取瞄准的方块到当前槽位
+    if (self.input.isMouseButtonDown(.mouse_middle)) {
+        const ray = self.camera.getCursorRay();
+        const hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
+        if (hit.hit) {
+            const block = self.block_world.getBlockAt(Vec3.new(
+                @as(f32, @floatFromInt(hit.block_pos.x)) + 0.5,
+                @as(f32, @floatFromInt(hit.block_pos.y)) + 0.5,
+                @as(f32, @floatFromInt(hit.block_pos.z)) + 0.5,
+            ));
+            const air_id = @intFromEnum(BlockRegistry.BlockId.fromName("air"));
+            if (@intFromEnum(block) != air_id) {
+                self.hotbar.slots[self.hotbar.selected] = .{
+                    .block_id = block,
+                    .count = 1,
+                };
+            }
+        }
+    }
+}
+
 /// 双击空格切换飞行模式（0.3 秒内再次按下空格则添加/移除 Flying 组件）
 fn handleFlightToggle(self: *Game) void {
     self.last_space_press -= self.window.delta_time;
@@ -376,7 +419,11 @@ fn tryPlaceBlock(self: *Game) !void {
 
     if (!can_place) return;
 
-    try self.block_world.setBlock(place_pos, .fromName("foo"));
+    // 使用物品栏选中的方块放置，空气跳过
+    const selected_id = self.hotbar.selectedBlock();
+    if (@intFromEnum(selected_id) == @intFromEnum(BlockRegistry.BlockId.fromName("air"))) return;
+
+    try self.block_world.setBlock(place_pos, selected_id);
 }
 
 fn updateEntities(self: *Game) !void {
@@ -591,6 +638,7 @@ const BlockWorld = @import("block_world.zig");
 const BlockRegistry = @import("block_registry.zig");
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
+const Hotbar = @import("inventory.zig").Hotbar;
 
 fn getSurfaceY(world: *BlockWorld.BlockWorld, x: i32, z: i32) ?i32 {
     var y: i32 = @intCast(BlockWorld.CHUNK_SIZE_Y - 1);

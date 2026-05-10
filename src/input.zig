@@ -132,6 +132,7 @@ pub const KeyState = enum {
 pub const MouseButton = enum(i32) {
     mouse_left = Glfw.GLFW_MOUSE_BUTTON_LEFT,
     mouse_right = Glfw.GLFW_MOUSE_BUTTON_RIGHT,
+    mouse_middle = Glfw.GLFW_MOUSE_BUTTON_MIDDLE,
 };
 // 键盘按键
 pub const Key = enum(i32) {

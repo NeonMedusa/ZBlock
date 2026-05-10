@@ -563,6 +563,52 @@ pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32,
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+//  物品栏渲染
+// ═══════════════════════════════════════════════════════════════
+
+/// 绘制底部物品栏（9 格 + 选中高亮 + 色块图标 + 数量文字）
+pub fn drawHotbar(self: *UiSystem, hotbar: *const Hotbar) void {
+    const window = self.game_ptr.window;
+    const slot: f32 = 50;
+    const gap: f32 = 4;
+    const total = 9 * slot + 8 * gap;
+    const start_x = (window.width - total) / 2;
+    const y = window.height - 60;
+    const air_id = @intFromEnum(BlockId.fromName("air"));
+
+    for (&hotbar.slots, 0..) |*item, i| {
+        const x = start_x + @as(f32, @floatFromInt(i)) * (slot + gap);
+        const sel = i == hotbar.selected;
+
+        // 槽位背景
+        const bg: [4]f32 = if (sel) .{ 0.35, 0.35, 0.35, 1.0 } else .{ 0.15, 0.15, 0.15, 0.85 };
+        self.drawRect(x, y, slot, slot, bg);
+
+        // 选中槽位：黄色边框
+        if (sel) {
+            const border: [4]f32 = .{ 1.0, 0.85, 0.2, 1.0 };
+            self.drawRect(x, y, slot, 2, border);
+            self.drawRect(x, y + slot - 2, slot, 2, border);
+            self.drawRect(x, y, 2, slot, border);
+            self.drawRect(x + slot - 2, y, 2, slot, border);
+        }
+
+        // 方块色块
+        if (@intFromEnum(item.block_id) != air_id) {
+            const color = blockColor(item.block_id);
+            self.drawRect(x + 3, y + 3, slot - 6, slot - 6, color);
+        }
+
+        // 数量文字
+        if (item.count > 1) {
+            var buf: [16]u8 = undefined;
+            const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch continue;
+            self.drawText(&self.game_ptr.gctx, x + slot - 18, y + slot - 16, count_str, 10, .{ 1, 1, 1, 1 });
+        }
+    }
+}
+
 // UiVertex 定义（顺序必须与 shader 中 layout 一致）
 pub const UiVertex = struct {
     pos: [3]f32, // 顶点位置（屏幕像素坐标）
@@ -757,3 +803,6 @@ const Algebra = @import("algebra.zig");
 const Mat4 = Algebra.Mat4;
 const Window = Imports.Window;
 const Stb = @import("stb").c;
+const Hotbar = @import("inventory.zig").Hotbar;
+const blockColor = @import("inventory.zig").blockColor;
+const BlockId = @import("block_registry.zig").BlockId;
