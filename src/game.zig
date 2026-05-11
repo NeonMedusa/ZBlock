@@ -55,17 +55,26 @@ pub fn start(self: *Game) !void {
             }
         }
     }
-    // 加载玩家数据（位置、血量、物品栏）
+    // 加载玩家数据（位置、血量、物品栏、飞行状态）
     self.save_manager.loadPlayer(&self.hotbar, &self.registry) catch {};
+
+    // 同步飞行状态到 Game 标记
+    {
+        var view = self.registry.view(.{ Comps.Player, Comps.Flying }, .{});
+        var iter = view.entityIterator();
+        if (iter.next()) |_| {
+            self.flying = true;
+        }
+    }
+
     // 等待worker完成初始区块的mesh构建
     while (self.block_world.pendingCount() > 0) {
         try self.block_world.processCompletedBuilds();
         std.Thread.yield() catch {};
     }
 
-    // 测试敌对实体
-    spawnEnemy(self, "zombie", Vec3.new(12, 130, 12)) catch {};
-    spawnEnemy(self, "wolf", Vec3.new(20, 130, 20)) catch {};
+    // 加载 AI 实体（从存档恢复）
+    self.save_manager.loadAllEntities(&self.registry) catch |err| std.debug.print("loadEntities error: {}\n", .{err});
 
     // var i: ECS.Entity = undefined;
 

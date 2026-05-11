@@ -73,4 +73,10 @@ pub const EntityTypeId = enum(u32) {
     pub fn info(self: EntityTypeId) EntityTypeInfo {
         return entity_infos[@intFromEnum(self)];
     }
+    pub fn fromNameRuntime(name: []const u8) ?EntityTypeId {
+        for (&entity_infos, 0..) |ent, i| {
+            if (std.mem.eql(u8, ent.name, name)) return @enumFromInt(i);
+        }
+        return null;
+    }
 };

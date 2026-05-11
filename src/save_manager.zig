@@ -13,6 +13,7 @@ const Vec3i = @import("algebra.zig").Vec3i;
 const ECS = @import("zigecs");
 const Comps = @import("components.zig").Components;
 const Hotbar = @import("inventory.zig").Hotbar;
+const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 
 pub const REGION_SIZE: i32 = 32; // 每个 region 包含 32×32 区块
 const CHUNK_SIZE_X: u32 = BW.CHUNK_SIZE_X;
@@ -60,19 +61,17 @@ fn unpackBlocks(buf: []const u8, blocks: *[CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZ
 
 const WorldRow = struct {
     id: ?i64 = null,
-    schema_version: u32,
-    game_version: []const u8,
     created_at: []const u8,
     last_played: []const u8,
-    player_pos_x: ?f32, player_pos_y: ?f32, player_pos_z: ?f32,
-    player_health: ?f32,
-    spawn_pos_x: ?f32, spawn_pos_y: ?f32, spawn_pos_z: ?f32,
+    player_pos_x: f32, player_pos_y: f32, player_pos_z: f32,
+    player_health: f32,
+    is_flying: i64,
 };
 
 const HotbarRow = struct {
     id: ?i64 = null,
     slot: u32,
-    block_id: []const u8,
+    block_id: u32,
     count: u32,
 };
 
@@ -109,16 +108,15 @@ pub const SaveManager = struct {
         try wdb.conn.execAll(
             \\CREATE TABLE IF NOT EXISTS "WorldRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
-            \\  schema_version INTEGER NOT NULL DEFAULT 1, game_version TEXT NOT NULL DEFAULT '',
             \\  created_at TEXT NOT NULL DEFAULT (datetime('now')),
             \\  last_played TEXT NOT NULL DEFAULT (datetime('now')),
-            \\  player_pos_x REAL, player_pos_y REAL, player_pos_z REAL,
-            \\  player_health REAL,
-            \\  spawn_pos_x REAL, spawn_pos_y REAL, spawn_pos_z REAL
+            \\  player_pos_x REAL NOT NULL, player_pos_y REAL NOT NULL, player_pos_z REAL NOT NULL,
+            \\  player_health REAL NOT NULL,
+            \\  is_flying INTEGER NOT NULL DEFAULT 0
             \\);
             \\CREATE TABLE IF NOT EXISTS "HotbarRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
-            \\  block_id TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1
+            \\  block_id INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 1
             \\);
             \\CREATE TABLE IF NOT EXISTS "EntityRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, type_id TEXT NOT NULL,
@@ -128,6 +126,7 @@ pub const SaveManager = struct {
             \\PRAGMA journal_mode=WAL;
             \\PRAGMA synchronous=NORMAL;
         );
+
         return SaveManager{
             .allocator = allocator,
             .save_dir = save_dir,
@@ -159,7 +158,7 @@ pub const SaveManager = struct {
             var ins = try self.world_db.conn.prepare("INSERT INTO HotbarRow (slot, block_id, count) VALUES (?, ?, ?)", &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
-            try ins.bind(1, fr.Value{ .string = item.block_id.name() });
+            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(@intFromEnum(item.block_id))) });
             try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
             try ins.exec();
         }
@@ -175,47 +174,40 @@ pub const SaveManager = struct {
         if (iter.next()) |entity| {
             const pos = view.get(Comps.Position, entity);
             const hp = view.get(Comps.Health, entity);
+            const flying: i64 = @intFromBool(registry.has(Comps.Flying, entity));
             var ins = try self.world_db.conn.prepare(
-                \\INSERT INTO WorldRow (schema_version, game_version, created_at, last_played,
-                \\  player_pos_x, player_pos_y, player_pos_z, player_health) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                \\INSERT INTO WorldRow (created_at, last_played,
+                \\  player_pos_x, player_pos_y, player_pos_z, player_health, is_flying)
+                \\  VALUES (?, ?, ?, ?, ?, ?, ?)
             , &.{});
             defer ins.deinit();
-            try ins.bind(0, fr.Value{ .int = 1 });
-            try ins.bind(1, fr.Value{ .string = "0.1" });
-            try ins.bind(2, fr.Value{ .string = "" });
-            try ins.bind(3, fr.Value{ .string = "" });
-            try ins.bind(4, fr.Value{ .float = @as(f64, @floatCast(pos.vec.x)) });
-            try ins.bind(5, fr.Value{ .float = @as(f64, @floatCast(pos.vec.y)) });
-            try ins.bind(6, fr.Value{ .float = @as(f64, @floatCast(pos.vec.z)) });
-            try ins.bind(7, fr.Value{ .float = @as(f64, @floatCast(hp.current)) });
+            try ins.bind(0, fr.Value{ .string = "" });
+            try ins.bind(1, fr.Value{ .string = "" });
+            try ins.bind(2, fr.Value{ .float = @as(f64, @floatCast(pos.vec.x)) });
+            try ins.bind(3, fr.Value{ .float = @as(f64, @floatCast(pos.vec.y)) });
+            try ins.bind(4, fr.Value{ .float = @as(f64, @floatCast(pos.vec.z)) });
+            try ins.bind(5, fr.Value{ .float = @as(f64, @floatCast(hp.current)) });
+            try ins.bind(6, fr.Value{ .int = flying });
             try ins.exec();
         }
     }
 
     pub fn loadPlayer(self: *SaveManager, hotbar: *Hotbar, registry: *ECS.Registry) !void {
-        // WorldInfo — 恢复位置
-        {
-            const rows = try self.world_db.query(WorldRow).findAll();
-            if (rows.len > 0 and rows[0].player_pos_x != null) {
-                const info = rows[0];
-                var view = registry.view(.{ Comps.Player, Comps.Position }, .{});
-                var iter = view.entityIterator();
-                if (iter.next()) |entity| {
-                    var pos = view.get(Comps.Position, entity);
-                    pos.vec = Vec3.new(
-                        info.player_pos_x.?,
-                        info.player_pos_y.?,
-                        info.player_pos_z.?,
-                    );
-                }
-            }
-            if (rows.len > 0 and rows[0].player_health != null) {
-                var view = registry.view(.{ Comps.Player, Comps.Health }, .{});
-                var iter = view.entityIterator();
-                if (iter.next()) |entity| {
-                    var health = view.get(Comps.Health, entity);
-                    health.current = rows[0].player_health.?;
-                }
+        // WorldInfo — 恢复位置、血量、飞行、物理状态
+        const rows = try self.world_db.query(WorldRow).findAll();
+        if (rows.len > 0) {
+            const info = rows[0];
+            var view = registry.view(.{ Comps.Player, Comps.Position, Comps.Health }, .{});
+            var iter = view.entityIterator();
+            if (iter.next()) |entity| {
+                var pos = view.get(Comps.Position, entity);
+                pos.vec = Vec3.new(info.player_pos_x, info.player_pos_y + 0.01, info.player_pos_z);
+                // +0.01 避免浮点舍入使玩家刚好嵌在方块表面，第一帧被重力拉进方块
+                var health = view.get(Comps.Health, entity);
+                health.current = info.player_health;
+                if (registry.tryGet(Comps.Velocity, entity)) |vel| vel.vec = Vec3.zero;
+                if (registry.tryGet(Comps.OnGround, entity)) |og| og.value = true;
+                if (info.is_flying != 0) registry.add(entity, Comps.Flying{});
             }
         }
 
@@ -224,10 +216,10 @@ pub const SaveManager = struct {
             const slots = try self.world_db.query(HotbarRow).findAll();
             for (slots) |s| {
                 if (s.slot < 9) {
-                        hotbar.slots[@as(usize, @intCast(s.slot))] = .{
-                            .block_id = blockIdFromName(s.block_id) orelse BlockId.fromName("air"),
-                            .count = s.count,
-                        };
+                    hotbar.slots[@as(usize, @intCast(s.slot))] = .{
+                        .block_id = BlockId.fromInt(s.block_id),
+                        .count = s.count,
+                    };
                 }
             }
         }
@@ -259,9 +251,24 @@ pub const SaveManager = struct {
     }
 
     pub fn loadAllEntities(self: *SaveManager, registry: *ECS.Registry) !void {
-        _ = registry;
         const rows = try self.world_db.query(EntityRow).findAll();
-        _ = rows;
+        for (rows) |row| {
+            const eid = EntityTypeId.fromNameRuntime(row.type_id) orelse continue;
+            const info = eid.info();
+            const pos = Vec3.new(row.pos_x, row.pos_y, row.pos_z);
+            const entity = registry.create();
+            registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
+            registry.add(entity, Comps.ModelName{ .id = info.model_id });
+            registry.add(entity, Comps.Position{ .vec = pos });
+            registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
+            registry.add(entity, Comps.Collider{ .width = info.collider_width, .height = info.collider_height });
+            registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });
+            registry.add(entity, Comps.JumpVelocity{ .value = info.jump_vel });
+            registry.add(entity, Comps.OnGround{ .value = false });
+            registry.add(entity, Comps.MoveIntent{});
+            registry.add(entity, Comps.Health{ .current = row.health, .max = info.health });
+            registry.add(entity, Comps.AttackCooldown{ .interval = info.attack_interval });
+        }
     }
 
     // ── 区块（经 region 分片） ──
@@ -351,11 +358,3 @@ pub const SaveManager = struct {
         std.fs.cwd().deleteTree(dir) catch {};
     }
 };
-
-/// 运行时按字符串名查找 BlockId（fromName 是 comptime 的）
-fn blockIdFromName(name: []const u8) ?BlockId {
-    for (BlockRegistry.block_infos, 0..) |info, i| {
-        if (std.mem.eql(u8, info.name, name)) return @enumFromInt(i);
-    }
-    return null;
-}
