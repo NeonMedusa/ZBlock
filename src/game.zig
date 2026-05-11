@@ -20,6 +20,7 @@ flying: bool = false,
 last_space_press: f64 = 0.0,
 accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
 sprint_toggled: bool = false, // 冲刺开关，渲染层触发，tick 层读取
+keybinds: Keybinds,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
@@ -122,14 +123,14 @@ pub fn start(self: *Game) !void {
         // 渲染帧（输入事件处理、摄像机、UI，不受 tick 影响）
         if (!main_menu.visible) {
             handleFlightToggle(self);
-            if (self.input.isKeyJustPressed(.left_shift) or self.input.isKeyJustPressed(.right_shift))
+            if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
                 self.sprint_toggled = !self.sprint_toggled;
             syncCameraFromPlayer(self);
             try updateChunks(self);
 
-            if (self.input.isMouseJustPressed(.mouse_left))
+            if (self.keybinds.isJustPressed(&self.input, .break_block))
                 try handleLeftClick(self);
-            if (self.input.isMouseJustPressed(.mouse_right))
+            if (self.keybinds.isJustPressed(&self.input, .place_block))
                 try tryPlaceBlock(self);
         }
         self.icon_atlas.reset();
@@ -196,6 +197,9 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 存档系统
     self.save_manager = try SaveManager.init(allocator, "world_1");
 
+    // 按键绑定（加载配置文件，不存在则使用默认值）
+    self.keybinds = try Keybinds.load(allocator, "config/keybinds.json");
+
     // 图标缓存 + 图标管线（传入 uniform 缓冲）
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
@@ -255,26 +259,26 @@ fn produceMoveIntent(self: *Game) void {
 
         // WASD 水平输入
         var move_dir = Vec3.zero;
-        if (self.input.isKeyHeld(.w)) move_dir = move_dir.add(front_h);
-        if (self.input.isKeyHeld(.s)) move_dir = move_dir.sub(front_h);
-        if (self.input.isKeyHeld(.a)) move_dir = move_dir.sub(right_h);
-        if (self.input.isKeyHeld(.d)) move_dir = move_dir.add(right_h);
+        if (self.keybinds.isHeld(&self.input, .forward)) move_dir = move_dir.add(front_h);
+        if (self.keybinds.isHeld(&self.input, .back)) move_dir = move_dir.sub(front_h);
+        if (self.keybinds.isHeld(&self.input, .left)) move_dir = move_dir.sub(right_h);
+        if (self.keybinds.isHeld(&self.input, .right)) move_dir = move_dir.add(right_h);
 
-        // 空格：跳跃 + 水中上浮指示
-        if (self.input.isKeyHeld(.space)) {
+        // 跳跃 + 水中上浮
+        if (self.keybinds.isHeld(&self.input, .jump)) {
             intent.jump = true;
             move_dir.y = 1.0;
         }
-        // Ctrl：水中下潜指示
-        if (self.input.isKeyHeld(.left_control) or self.input.isKeyHeld(.right_control)) {
+        // 水中下潜
+        if (self.keybinds.isHeld(&self.input, .swim_down)) {
             move_dir.y = -1.0;
         }
 
-        // 无水平输入时，强制关闭冲刺（防止松开按键后仍保持冲刺状态）
-        const has_movement = self.input.isKeyHeld(.w) or
-            self.input.isKeyHeld(.s) or
-            self.input.isKeyHeld(.a) or
-            self.input.isKeyHeld(.d);
+        // 无水平输入时，强制关闭冲刺
+        const has_movement = self.keybinds.isHeld(&self.input, .forward) or
+            self.keybinds.isHeld(&self.input, .back) or
+            self.keybinds.isHeld(&self.input, .left) or
+            self.keybinds.isHeld(&self.input, .right);
         if (!has_movement) {
             intent.sprint = false;
             self.sprint_toggled = false;
@@ -282,8 +286,8 @@ fn produceMoveIntent(self: *Game) void {
             intent.sprint = self.sprint_toggled;
         }
 
-        // 按住左 Ctrl 进入潜行；松开则退出潜行（飞行时不关闭冲刺）
-        if (self.input.isKeyHeld(.left_control)) {
+        // 潜行（按住）
+        if (self.keybinds.isHeld(&self.input, .sneak)) {
             intent.sneak = true;
             if (!self.flying) intent.sprint = false;
         } else {
@@ -299,24 +303,25 @@ fn produceMoveIntent(self: *Game) void {
 /// 物品栏输入处理：数字键切换到、滚轮切换、中键拾取方块
 fn handleHotbarInput(self: *Game) void {
     // 数字键 1-9 选中对应槽位
-    for (0..9) |i| {
-        const key_code = @intFromEnum(Input.Key.num1) + @as(i32, @intCast(i));
-        const key: Input.Key = @enumFromInt(key_code);
-        if (self.input.isKeyJustPressed(key)) {
-            self.hotbar.selected = @intCast(i);
+    const hotbar_actions = [_]KeyAction{
+        .hotbar_1, .hotbar_2, .hotbar_3, .hotbar_4, .hotbar_5,
+        .hotbar_6, .hotbar_7, .hotbar_8, .hotbar_9,
+    };
+    inline for (hotbar_actions, 0..) |action, slot| {
+        if (self.keybinds.isJustPressed(&self.input, action)) {
+            self.hotbar.selected = @intCast(slot);
         }
     }
 
     // 滚轮切换选中槽位
-    const scroll = self.input.getScrollDelta();
-    if (scroll.y > 0) {
+    if (self.keybinds.isJustPressed(&self.input, .hotbar_scroll_up)) {
         self.hotbar.selected = (self.hotbar.selected + 8) % 9;
-    } else if (scroll.y < 0) {
+    } else if (self.keybinds.isJustPressed(&self.input, .hotbar_scroll_down)) {
         self.hotbar.selected = (self.hotbar.selected + 1) % 9;
     }
 
     // 鼠标中键：拾取瞄准的方块到当前槽位
-    if (self.input.isMouseJustPressed(.mouse_middle)) {
+    if (self.keybinds.isJustPressed(&self.input, .pick_block)) {
         const ray = self.camera.getCursorRay();
         const hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
         if (hit.hit) {
@@ -682,6 +687,8 @@ const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
 const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 const SaveManager = @import("save_manager.zig").SaveManager;
+const Keybinds = @import("keybinds.zig").Keybinds;
+const KeyAction = @import("keybinds.zig").Action;
 
 /// 构建 ChunkIO 回调，使区块加载/卸载时自动读写存档
 fn chunkIO(mgr: *SaveManager) BlockWorld.ChunkIO {
