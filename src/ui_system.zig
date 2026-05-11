@@ -99,7 +99,7 @@ pub fn button(self: *UiSystem, x: f32, y: f32, width: f32, height: f32) bool {
     const mouse_pos = input.getCursorPos();
     const is_hovered = (mouse_pos.x >= x and mouse_pos.x <= x + width and
         mouse_pos.y >= y and mouse_pos.y <= y + height);
-    const is_clicked = is_hovered and input.isMouseButtonDown(.mouse_left);
+    const is_clicked = is_hovered and input.isMouseJustPressed(.mouse_left);
     // 根据状态选择颜色
     const color = if (is_clicked) [4]f32{ 0.2, 0.2, 0.8, 1.0 } else if (is_hovered) [4]f32{ 0.8, 0.8, 0.2, 1.0 } else [4]f32{ 0.5, 0.5, 0.5, 1.0 };
     // 绘制按钮背景

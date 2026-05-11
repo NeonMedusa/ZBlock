@@ -122,14 +122,14 @@ pub fn start(self: *Game) !void {
         // 渲染帧（输入事件处理、摄像机、UI，不受 tick 影响）
         if (!main_menu.visible) {
             handleFlightToggle(self);
-            if (self.input.isKeyDown(.left_shift) or self.input.isKeyDown(.right_shift))
+            if (self.input.isKeyJustPressed(.left_shift) or self.input.isKeyJustPressed(.right_shift))
                 self.sprint_toggled = !self.sprint_toggled;
             syncCameraFromPlayer(self);
             try updateChunks(self);
 
-            if (self.input.isMouseButtonDown(.mouse_left))
+            if (self.input.isMouseJustPressed(.mouse_left))
                 try handleLeftClick(self);
-            if (self.input.isMouseButtonDown(.mouse_right))
+            if (self.input.isMouseJustPressed(.mouse_right))
                 try tryPlaceBlock(self);
         }
         self.icon_atlas.reset();
@@ -255,26 +255,26 @@ fn produceMoveIntent(self: *Game) void {
 
         // WASD 水平输入
         var move_dir = Vec3.zero;
-        if (self.input.isKeyPressed(.w)) move_dir = move_dir.add(front_h);
-        if (self.input.isKeyPressed(.s)) move_dir = move_dir.sub(front_h);
-        if (self.input.isKeyPressed(.a)) move_dir = move_dir.sub(right_h);
-        if (self.input.isKeyPressed(.d)) move_dir = move_dir.add(right_h);
+        if (self.input.isKeyHeld(.w)) move_dir = move_dir.add(front_h);
+        if (self.input.isKeyHeld(.s)) move_dir = move_dir.sub(front_h);
+        if (self.input.isKeyHeld(.a)) move_dir = move_dir.sub(right_h);
+        if (self.input.isKeyHeld(.d)) move_dir = move_dir.add(right_h);
 
         // 空格：跳跃 + 水中上浮指示
-        if (self.input.isKeyPressed(.space)) {
+        if (self.input.isKeyHeld(.space)) {
             intent.jump = true;
             move_dir.y = 1.0;
         }
         // Ctrl：水中下潜指示
-        if (self.input.isKeyPressed(.left_control) or self.input.isKeyPressed(.right_control)) {
+        if (self.input.isKeyHeld(.left_control) or self.input.isKeyHeld(.right_control)) {
             move_dir.y = -1.0;
         }
 
         // 无水平输入时，强制关闭冲刺（防止松开按键后仍保持冲刺状态）
-        const has_movement = self.input.isKeyPressed(.w) or
-            self.input.isKeyPressed(.s) or
-            self.input.isKeyPressed(.a) or
-            self.input.isKeyPressed(.d);
+        const has_movement = self.input.isKeyHeld(.w) or
+            self.input.isKeyHeld(.s) or
+            self.input.isKeyHeld(.a) or
+            self.input.isKeyHeld(.d);
         if (!has_movement) {
             intent.sprint = false;
             self.sprint_toggled = false;
@@ -283,7 +283,7 @@ fn produceMoveIntent(self: *Game) void {
         }
 
         // 按住左 Ctrl 进入潜行；松开则退出潜行（飞行时不关闭冲刺）
-        if (self.input.isKeyPressed(.left_control)) {
+        if (self.input.isKeyHeld(.left_control)) {
             intent.sneak = true;
             if (!self.flying) intent.sprint = false;
         } else {
@@ -302,7 +302,7 @@ fn handleHotbarInput(self: *Game) void {
     for (0..9) |i| {
         const key_code = @intFromEnum(Input.Key.num1) + @as(i32, @intCast(i));
         const key: Input.Key = @enumFromInt(key_code);
-        if (self.input.isKeyDown(key)) {
+        if (self.input.isKeyJustPressed(key)) {
             self.hotbar.selected = @intCast(i);
         }
     }
@@ -316,7 +316,7 @@ fn handleHotbarInput(self: *Game) void {
     }
 
     // 鼠标中键：拾取瞄准的方块到当前槽位
-    if (self.input.isMouseButtonDown(.mouse_middle)) {
+    if (self.input.isMouseJustPressed(.mouse_middle)) {
         const ray = self.camera.getCursorRay();
         const hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
         if (hit.hit) {
@@ -341,7 +341,7 @@ fn handleFlightToggle(self: *Game) void {
     self.last_space_press -= self.window.delta_time;
     if (self.last_space_press < 0) self.last_space_press = 0;
 
-    if (self.input.isKeyDown(.space)) {
+    if (self.input.isKeyJustPressed(.space)) {
         if (self.last_space_press > 0) {
             // 找到玩家实体，切换 Flying 组件
             var view = self.registry.view(.{Comps.Player}, .{});
@@ -675,7 +675,8 @@ const Raycast = @import("raycast.zig");
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
 
 const BlockWorld = @import("block_world.zig");
-const TICK_DT = BlockWorld.TICK_DT;const BlockRegistry = @import("block_registry.zig");
+const TICK_DT = BlockWorld.TICK_DT;
+const BlockRegistry = @import("block_registry.zig");
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;

@@ -60,37 +60,37 @@ pub fn updateScroll(self: *Input, xoffset: f64, yoffset: f64) void {
     self.scroll_delta = Vec2.new(@floatCast(xoffset), @floatCast(yoffset));
 }
 // 按键状态查询函数（可在游戏循环中调用）
-pub fn isKeyDown(self: *Input, key: Key) bool {
+pub fn isKeyJustPressed(self: *Input, key: Key) bool {
     const keyCode = @intFromEnum(key);
     if (keyCode < 0 or keyCode >= self.key_states.len) return false;
     const idx = @as(usize, @intCast(keyCode));
     return (self.key_states[idx] == .down and self.prev_key_states[idx] == .up);
 }
-pub fn isKeyPressed(self: *Input, key: Key) bool {
+pub fn isKeyHeld(self: *Input, key: Key) bool {
     const keyCode = @intFromEnum(key);
     if (keyCode < 0 or keyCode >= self.key_states.len) return false;
     return self.key_states[@as(usize, @intCast(keyCode))] == .down;
 }
-pub fn isKeyUp(self: *Input, key: Key) bool {
+pub fn isKeyJustReleased(self: *Input, key: Key) bool {
     const keyCode = @intFromEnum(key);
     if (keyCode < 0 or keyCode >= self.key_states.len) return false;
     const idx = @as(usize, @intCast(keyCode));
     return (self.key_states[idx] == .up and self.prev_key_states[idx] == .down);
 }
 // 鼠标状态查询函数（可在游戏循环中调用）
-pub fn isMouseButtonPressed(self: *Input, mouse_button: MouseButton) bool {
+pub fn isMouseHeld(self: *Input, mouse_button: MouseButton) bool {
     const mouse_button_code = @intFromEnum(mouse_button);
     if (mouse_button_code < 0 or mouse_button_code >= self.mouse_states.len) return false;
     const idx = @as(usize, @intCast(mouse_button_code));
     return (self.mouse_states[idx] == .down);
 }
-pub fn isMouseButtonDown(self: *Input, mouse_button: MouseButton) bool {
+pub fn isMouseJustPressed(self: *Input, mouse_button: MouseButton) bool {
     const mouse_button_code = @intFromEnum(mouse_button);
     if (mouse_button_code < 0 or mouse_button_code >= self.mouse_states.len) return false;
     const idx = @as(usize, @intCast(mouse_button_code));
     return (self.mouse_states[idx] == .down and self.prev_mouse_states[idx] == .up);
 }
-pub fn isMouseButtonReleased(self: *Input, mouse_button: MouseButton) bool {
+pub fn isMouseJustReleased(self: *Input, mouse_button: MouseButton) bool {
     const mouse_button_code = @intFromEnum(mouse_button);
     if (mouse_button_code < 0 or mouse_button_code >= self.mouse_states.len) return false;
     const idx = @as(usize, @intCast(mouse_button_code));

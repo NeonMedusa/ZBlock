@@ -43,12 +43,12 @@ pub fn updateFromKeyboard(self: *@This(), game: *Game) void {
     var input = game.input;
     const velocity = self.movement_speed * game.window.delta_time;
     const right = self.front.cross(self.up).norm();
-    if (input.isKeyPressed(.w)) self.position = self.position.add(self.front.scale(velocity));
-    if (input.isKeyPressed(.s)) self.position = self.position.sub(self.front.scale(velocity));
-    if (input.isKeyPressed(.a)) self.position = self.position.sub(right.scale(velocity));
-    if (input.isKeyPressed(.d)) self.position = self.position.add(right.scale(velocity));
-    if (input.isKeyPressed(.space)) self.position = self.position.add(self.up.scale(velocity));
-    if (input.isKeyPressed(.left_control) or input.isKeyPressed(.right_control))
+    if (input.isKeyHeld(.w)) self.position = self.position.add(self.front.scale(velocity));
+    if (input.isKeyHeld(.s)) self.position = self.position.sub(self.front.scale(velocity));
+    if (input.isKeyHeld(.a)) self.position = self.position.sub(right.scale(velocity));
+    if (input.isKeyHeld(.d)) self.position = self.position.add(right.scale(velocity));
+    if (input.isKeyHeld(.space)) self.position = self.position.add(self.up.scale(velocity));
+    if (input.isKeyHeld(.left_control) or input.isKeyHeld(.right_control))
         self.position = self.position.sub(self.up.scale(velocity));
     // 更新视图矩阵（位置变化后）
     self.game.ubo.view_matrix = Mat4.lookAt(self.position, self.position.add(self.front), self.up);

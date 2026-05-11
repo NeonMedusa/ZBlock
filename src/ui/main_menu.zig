@@ -1,7 +1,7 @@
 //main_menu.zig — 居中宽按钮主菜单
 visible: bool = true,
 pub fn update(self: *@This(), game: *Game) void {
-    if (game.input.isKeyDown(.escape))
+    if (game.input.isKeyJustPressed(.escape))
         self.visible = !self.visible;
     if (!self.visible) return;
 
