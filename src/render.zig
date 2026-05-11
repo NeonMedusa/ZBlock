@@ -29,9 +29,11 @@ pub fn draw(game: *Game) void {
     var view = game.registry.view(.{ Comps.ModelName, Comps.Position }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
-        const entity_pos = game.registry.getConst(Comps.Position, entity);
+        const entity_pos = view.getConst(Comps.Position, entity);
+        const alpha = game.accumulator / TICK_DT;
+        const render_pos = Vec3.lerp(entity_pos.prev, entity_pos.vec, alpha);
         game.res_manager.entities_data[entity_idx] = EntityData{
-            .transform = Mat4.fromTranslate(entity_pos.vec),
+            .transform = Mat4.fromTranslate(render_pos),
         };
 
         const model_name = view.getConst(Comps.ModelName, entity);
@@ -211,3 +213,5 @@ const InstanceData = RendCTX.InstanceData;
 const Game = Imports.Game;
 
 const Comps = Imports.Comps;
+
+const TICK_DT = @import("block_world.zig").TICK_DT;

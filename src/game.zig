@@ -18,6 +18,8 @@ block_world: BlockWorld.BlockWorld,
 load_range: i32,
 flying: bool = false,
 last_space_press: f64 = 0.0,
+accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
+sprint_toggled: bool = false, // 冲刺开关，渲染层触发，tick 层读取
 
 // 开始游戏
 pub fn start(self: *Game) !void {
@@ -25,7 +27,7 @@ pub fn start(self: *Game) !void {
     // 创建玩家实体
     const player_entity = self.registry.create();
     self.registry.add(player_entity, Comps.Player{ .id = self.player_id, .mode = .creative });
-    self.registry.add(player_entity, Comps.Position{ .vec = Vec3.new(8, 130, 8) });
+    self.registry.add(player_entity, Comps.Position{ .vec = Vec3.new(8, 130, 8), .prev = Vec3.zero });
     self.registry.add(player_entity, Comps.Velocity{ .vec = Vec3.zero });
     self.registry.add(player_entity, Comps.Collider{ .width = 0.6, .height = 1.8 });
     self.registry.add(player_entity, Comps.MoveSpeed{ .value = 4.0 });
@@ -76,52 +78,59 @@ pub fn start(self: *Game) !void {
     // 加载 AI 实体（从存档恢复）
     self.save_manager.loadAllEntities(&self.registry) catch |err| std.debug.print("loadEntities error: {}\n", .{err});
 
-    // var i: ECS.Entity = undefined;
-
     // 主循环
     while (!self.window.shouldClose()) {
         self.input.beginFrame();
         self.window.pollEvents();
-        if (!main_menu.visible) {
-            // 双击空格切换飞行模式
-            handleFlightToggle(self);
 
-            // 1. 输入 -> MoveIntent
-            produceMoveIntent(self);
-            // 2. 物理
-            self.block_world.updatePhysics(&self.registry, self.window.delta_time);
+        self.accumulator += self.window.delta_time;
+        if (self.accumulator > TICK_DT * 5) self.accumulator = TICK_DT * 5;
 
-            // 3.AI 目标选择：从 ECS 读取玩家脚底坐标传给所有 AI 实体
-            {
-                var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
-                var piter = pview.entityIterator();
-                while (piter.next()) |entity| {
-                    const player = pview.get(Comps.Player, entity);
-                    if (player.id == self.player_id) {
-                        const ppos = pview.get(Comps.Position, entity);
-                        BlockWorld.BlockWorld.updateAIAgent(&self.registry, ppos.vec);
-                        break;
+        // 准备 tick：保存当前位置到 prev，用于渲染插值
+        if (self.accumulator >= TICK_DT) {
+            var pv = self.registry.view(.{Comps.Position}, .{});
+            var pi = pv.entityIterator();
+            while (pi.next()) |e| {
+                var p = pv.get(e);
+                p.prev = p.vec;
+            }
+        }
+
+        // tick 循环（固定步长）
+        while (self.accumulator >= TICK_DT) {
+            self.accumulator -= TICK_DT;
+            if (!main_menu.visible) {
+                produceMoveIntent(self);
+                self.block_world.updatePhysics(&self.registry, TICK_DT);
+                {
+                    var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+                    var piter = pview.entityIterator();
+                    while (piter.next()) |entity| {
+                        const player = pview.get(Comps.Player, entity);
+                        if (player.id == self.player_id) {
+                            const ppos = pview.get(Comps.Position, entity);
+                            BlockWorld.BlockWorld.updateAIAgent(&self.registry, ppos.vec);
+                            break;
+                        }
                     }
                 }
+                self.block_world.updateAI(&self.registry, TICK_DT);
+                try updateEntities(self);
             }
-            // 4. AI — 寻路执行：分步 A* + 路径跟随 + 跳跃
-            self.block_world.updateAI(&self.registry, self.window.delta_time);
+        }
 
-            // 5. 摄像机同步
+        // 渲染帧（输入事件处理、摄像机、UI，不受 tick 影响）
+        if (!main_menu.visible) {
+            handleFlightToggle(self);
+            if (self.input.isKeyDown(.left_shift) or self.input.isKeyDown(.right_shift))
+                self.sprint_toggled = !self.sprint_toggled;
             syncCameraFromPlayer(self);
-
-            // 6. 动态加载/卸载区块
             try updateChunks(self);
 
-            // 7. 实体更新
-            try updateEntities(self);
-
-            if (self.input.isMouseButtonDown(.mouse_left)) {
+            if (self.input.isMouseButtonDown(.mouse_left))
                 try handleLeftClick(self);
-            }
-            if (self.input.isMouseButtonDown(.mouse_right)) {
-                try tryPlaceBlock(self); // 右键放置
-            }
+            if (self.input.isMouseButtonDown(.mouse_right))
+                try tryPlaceBlock(self);
         }
         self.icon_atlas.reset();
         self.ui_system.beginFrame();
@@ -268,11 +277,9 @@ fn produceMoveIntent(self: *Game) void {
             self.input.isKeyPressed(.d);
         if (!has_movement) {
             intent.sprint = false;
-        }
-
-        // Shift 按下时切换冲刺开关状态
-        if (self.input.isKeyDown(.left_shift) or self.input.isKeyDown(.right_shift)) {
-            intent.sprint = !intent.sprint;
+            self.sprint_toggled = false;
+        } else {
+            intent.sprint = self.sprint_toggled;
         }
 
         // 按住左 Ctrl 进入潜行；松开则退出潜行（飞行时不关闭冲刺）
@@ -368,7 +375,9 @@ fn syncCameraFromPlayer(self: *Game) void {
             const pos = view.get(Comps.Position, entity);
             const collider = view.get(Comps.Collider, entity);
             const eye_offset = Vec3.new(0, collider.height - 0.2, 0);
-            self.camera.position = pos.vec.add(eye_offset);
+            const alpha = self.accumulator / TICK_DT;
+            const eye = Vec3.lerp(pos.prev, pos.vec, alpha).add(eye_offset);
+            self.camera.position = eye;
             self.camera.updateFromMouse(self);
             self.ubo.camera_pos = self.camera.position;
             break;
@@ -510,8 +519,8 @@ fn updateEntities(self: *Game) !void {
                     ebox.min_z < pbox.max_z and ebox.max_z > pbox.min_z)
                 // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
                 {
-                    hp.current -= info.attack_damage * self.window.delta_time;
-                    std.debug.print("Player took {d:.2} damage, HP: {d:.1}/{d:.1}\n", .{ info.attack_damage * self.window.delta_time, hp.current, hp.max });
+                    hp.current -= info.attack_damage * TICK_DT;
+                    std.debug.print("Player took {d:.2} damage, HP: {d:.1}/{d:.1}\n", .{ info.attack_damage * TICK_DT, hp.current, hp.max });
                 }
             }
         }
@@ -568,7 +577,7 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     const entity = self.registry.create();
     self.registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
     self.registry.add(entity, Comps.ModelName{ .id = info.model_id });
-    self.registry.add(entity, Comps.Position{ .vec = pos });
+    self.registry.add(entity, Comps.Position{ .vec = pos, .prev = pos });
     self.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
     self.registry.add(entity, Comps.Collider{ .width = info.collider_width, .height = info.collider_height });
     self.registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });
@@ -666,7 +675,7 @@ const Raycast = @import("raycast.zig");
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
 
 const BlockWorld = @import("block_world.zig");
-const BlockRegistry = @import("block_registry.zig");
+const TICK_DT = BlockWorld.TICK_DT;const BlockRegistry = @import("block_registry.zig");
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;

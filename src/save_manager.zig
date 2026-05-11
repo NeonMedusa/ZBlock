@@ -259,7 +259,7 @@ pub const SaveManager = struct {
             const entity = registry.create();
             registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
             registry.add(entity, Comps.ModelName{ .id = info.model_id });
-            registry.add(entity, Comps.Position{ .vec = pos });
+            registry.add(entity, Comps.Position{ .vec = pos, .prev = pos });
             registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
             registry.add(entity, Comps.Collider{ .width = info.collider_width, .height = info.collider_height });
             registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });

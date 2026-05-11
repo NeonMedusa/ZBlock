@@ -116,6 +116,7 @@ const applyMeshResult = ChunkMesh.applyMeshResult;
 /// 物理常量（可调整）
 const GRAVITY: f32 = 25.0;
 const FLUID_GRAVITY: f32 = 5.0;
+pub const TICK_DT: f32 = 1.0 / 30.0; // 每秒 30 tick（Δt ≈ 0.033s），物理步长
 const SWIM_UP_SPEED: f32 = 5.0;
 const SWIM_DOWN_SPEED: f32 = 3.0;
 const SINK_TERMINAL: f32 = -2.0;

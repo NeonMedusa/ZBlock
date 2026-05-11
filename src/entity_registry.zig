@@ -73,6 +73,7 @@ pub const EntityTypeId = enum(u32) {
     pub fn info(self: EntityTypeId) EntityTypeInfo {
         return entity_infos[@intFromEnum(self)];
     }
+    /// 运行时按字符串名查找，用于数据库反序列化（fromName 是 comptime 的）
     pub fn fromNameRuntime(name: []const u8) ?EntityTypeId {
         for (&entity_infos, 0..) |ent, i| {
             if (std.mem.eql(u8, ent.name, name)) return @enumFromInt(i);

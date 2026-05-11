@@ -24,7 +24,10 @@ pub const Components = struct {
     };
 
     // ---- 物理状态 ----
-    pub const Position = struct { vec: Vec3 };
+    pub const Position = struct {
+        vec: Vec3,                // 物理 tick 后的最新位置
+        prev: Vec3 = Vec3.zero,   // 上一 tick 的位置，用于渲染插值
+    };
     pub const Velocity = struct { vec: Vec3 = Vec3.zero };
     pub const Collider = struct { // 物理碰撞箱（相对于位置）
         width: f32 = 0.6,
