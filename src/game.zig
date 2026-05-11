@@ -434,7 +434,7 @@ fn tryPlaceBlock(self: *Game) !void {
         @as(f32, @floatFromInt(place_pos.x)) + 0.5,
         @as(f32, @floatFromInt(place_pos.y)) + 0.5,
         @as(f32, @floatFromInt(place_pos.z)) + 0.5,
-    )) != BlockRegistry.BlockId.fromName("air")) return;
+    )).prototype().is_solid) return;
 
     // 放置方块的 AABB
     const block_box = AABB{
@@ -473,7 +473,7 @@ fn tryPlaceBlock(self: *Game) !void {
 }
 
 fn updateEntities(self: *Game) !void {
-    const DESPAWN_DISTANCE: f32 = 24.0;
+    const DESPAWN_DISTANCE: f32 = @as(f32, @floatFromInt(self.load_range)) * 16.0 - 32.0;
 
     // 1. 销毁远离所有玩家的 AI 实体
     {
@@ -555,7 +555,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 1000;
+        const MAX_ENEMIES: u32 = 3;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

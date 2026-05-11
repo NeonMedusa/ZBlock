@@ -125,6 +125,7 @@ const AIR_FRICTION: f32 = 4.0;
 const ACCELERATION: f32 = 30.0;
 const SPRINT_MULTIPLIER: f32 = 1.5;
 const SNEAK_MULTIPLIER: f32 = 0.5;
+const FLY_SPEED_MULTIPLIER: f32 = 2.3; // 飞行极速 = 走速 × 此值
 
 const LoadedChunk = struct {
     chunk: *Chunk,
@@ -542,10 +543,21 @@ pub const BlockWorld = struct {
                     }
                 }
             } else {
-                // 飞行移动：速度由移动意图直接驱动，Shift 切换加速
-                const fly_speed: f32 = if (intent.sprint) 40.0 else 20.0;
-                h_vel = move_dir.scale(fly_speed);
-                vel.vec.y = intent.direction.y * fly_speed;
+                // 飞行移动：lerp 方式，最大飞速 = 走速 × 飞速倍率
+                const fly_top_speed: f32 = move_speed.value * FLY_SPEED_MULTIPLIER *
+                    (if (intent.sprint) SPRINT_MULTIPLIER else 1.0);
+                const fly_response: f32 = 8.0;
+                const factor: f32 = 1.0 - std.math.exp(-fly_response * dt);
+
+                if (move_dir.len2() > 0.001) {
+                    const target = move_dir.norm().scale(fly_top_speed);
+                    h_vel = Vec3.lerp(h_vel, target, factor);
+                } else {
+                    h_vel = Vec3.lerp(h_vel, Vec3.zero, factor);
+                }
+
+                const v_target = intent.direction.y * fly_top_speed;
+                vel.vec.y += (v_target - vel.vec.y) * factor;
             }
             vel.vec.x = h_vel.x;
             vel.vec.z = h_vel.z;
