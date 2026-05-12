@@ -68,18 +68,14 @@ pub fn update(self: *@This(), game: *Game) void {
         }
     }
 
-    const btn_w: f32 = 180;
-    const btn_h: f32 = 44;
-    const btn_y = win_h - 80;
-    const left_btn_x = col_x + 10;
-    const right_btn_x = col_x + col_w - btn_w - 10;
-
-    if (game.ui_system.textButton(left_btn_x, btn_y, btn_w, btn_h, "← 返回", 18)) {
+    game.ui_system.cursor_col_x = col_x + 10;
+    game.ui_system.cursor_y = win_h - 80;
+    if (game.ui_system.button("← 返回", 180, 44, 18)) {
         game.menu_state = .MainMenu;
         return;
     }
-
-    if (game.ui_system.textButton(right_btn_x, btn_y, btn_w, btn_h, "新游戏", 18)) {
+    game.ui_system.sameLine(20);
+    if (game.ui_system.button("新游戏", 180, 44, 18)) {
         const name = SaveManager.autoName(game.allocator) catch return;
         defer game.allocator.free(name);
         game.startSave(name) catch {};

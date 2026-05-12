@@ -94,6 +94,15 @@ index_buffer: Wgpu.WGPUBuffer,
 device: Wgpu.WGPUDevice,
 frame_under_counter: u32 = 0,
 
+// 游标布局
+cursor_x: f32 = 0,
+cursor_y: f32 = 0,
+row_top_y: f32 = 0,
+row_bottom_y: f32 = 0,
+cursor_col_x: f32 = 0,
+next_same_line: bool = false,
+same_line_spacing: f32 = 0,
+
 // 带文字的按钮：背景 + 居中文字 + 点击检测
 pub fn textButton(self: *UiSystem, x: f32, y: f32, w: f32, h: f32, label: []const u8, font_size: f32) bool {
     const hit = self.buttonHover(x, y, w, h);
@@ -124,6 +133,58 @@ pub fn drawButton(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, hove
 /// 水平居中偏移量
 pub fn centerX(_: *UiSystem, container: f32, element: f32) f32 {
     return (container - element) / 2;
+}
+
+// ═══════════════════════════════════════════════
+//  游标布局 API（基于现有 textButton / drawText）
+// ═══════════════════════════════════════════════
+
+/// 按钮：游标位置绘制 + 自动推进 Y
+pub fn button(self: *UiSystem, label: []const u8, w: f32, h: f32, font_size: f32) bool {
+    if (!self.next_same_line) {
+        self.cursor_y = @max(self.cursor_y, self.row_bottom_y);
+        self.row_top_y = self.cursor_y;
+        self.cursor_x = self.cursor_col_x;
+    } else {
+        self.next_same_line = false;
+        self.cursor_x += self.same_line_spacing;
+        self.cursor_y = self.row_top_y;
+    }
+    const clicked = self.textButton(self.cursor_x, self.cursor_y, w, h, label, font_size);
+    self.row_bottom_y = @max(self.row_bottom_y, self.cursor_y + h);
+    self.cursor_x += w;
+    return clicked;
+}
+
+/// 下一个 widget 保持同行
+pub fn sameLine(self: *UiSystem, s: f32) void {
+    self.next_same_line = true;
+    self.same_line_spacing = s;
+}
+
+/// 文字：游标位置绘制 + 自动推进 Y
+pub fn drawLabel(self: *UiSystem, str: []const u8, font_size: f32, color: [4]f32) void {
+    if (!self.next_same_line) {
+        self.cursor_y = @max(self.cursor_y, self.row_bottom_y);
+        self.row_top_y = self.cursor_y;
+        self.cursor_x = self.cursor_col_x;
+    } else {
+        self.next_same_line = false;
+        self.cursor_x += self.same_line_spacing;
+        self.cursor_y = self.row_top_y;
+    }
+    self.drawText(&self.game_ptr.gctx, self.cursor_x, self.cursor_y, str, font_size, color);
+    const w = self.measureText(&self.game_ptr.gctx, str, font_size);
+    self.row_bottom_y = @max(self.row_bottom_y, self.cursor_y + font_size);
+    self.cursor_x += w;
+}
+
+/// 垂直空距
+pub fn spacing(self: *UiSystem, h: f32) void {
+    self.cursor_y = @max(self.cursor_y, self.row_bottom_y) + h;
+    self.cursor_x = self.cursor_col_x;
+    self.row_top_y = self.cursor_y;
+    self.row_bottom_y = self.cursor_y;
 }
 
 // 析构函数
@@ -257,6 +318,12 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
 pub fn beginFrame(self: *@This()) void {
     self.vertex_count = 0;
     self.index_count = 0;
+    self.cursor_x = 0;
+    self.cursor_y = 0;
+    self.row_top_y = 0;
+    self.row_bottom_y = 0;
+    self.cursor_col_x = 0;
+    self.next_same_line = false;
 }
 
 // 每帧结束时更新 GPU 缓冲区（含缩容检测）
