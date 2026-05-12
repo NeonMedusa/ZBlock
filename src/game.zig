@@ -21,11 +21,114 @@ last_space_press: f64 = 0.0,
 accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
 sprint_toggled: bool = false, // 冲刺开关，渲染层触发，tick 层读取
 keybinds: Keybinds,
+save_initialized: bool = false, // 延迟初始化：选存档后才加载游戏
+show_save_menu: bool = false, // 由主菜单"开始"按钮触发
+game_cleaned: bool = false, // returnToMenu 已清理 gameplay 资源，阻止 deinit 重复释放
+return_to_main_menu: bool = false, // 由 pause_menu/save_menu 触发，主循环检测后显示主菜单
 
 // 开始游戏
 pub fn start(self: *Game) !void {
     var main_menu = @import("ui/main_menu.zig"){};
-    // 创建玩家实体
+    var save_menu = @import("ui/save_menu.zig"){};
+    var pause_menu = @import("ui/pause_menu.zig"){};
+
+    // 主循环（仅菜单，游戏初始化推迟到选存档后）
+    while (!self.window.shouldClose()) {
+        self.input.beginFrame();
+        self.window.pollEvents();
+
+        self.icon_atlas.reset();
+        self.ui_system.beginFrame();
+
+        if (save_menu.visible) {
+            save_menu.update(self);
+        } else if (self.show_save_menu) {
+            save_menu.refresh(self.allocator);
+            save_menu.visible = true;
+            main_menu.visible = false;
+            self.show_save_menu = false;
+        } else if (self.save_initialized) {
+            if (pause_menu.visible) {
+                pause_menu.update(self);
+            } else if (self.keybinds.isJustPressed(&self.input, .pause_menu)) {
+                pause_menu.visible = true;
+            }
+        } else {
+            main_menu.update(self);
+        }
+
+        if (self.return_to_main_menu) {
+            main_menu.visible = true;
+            self.return_to_main_menu = false;
+        }
+
+        // 游戏初始化后才运行物理和渲染
+        if (self.save_initialized) {
+            self.accumulator += self.window.delta_time;
+            if (self.accumulator > TICK_DT * 5) self.accumulator = TICK_DT * 5;
+
+            if (self.accumulator >= TICK_DT) {
+                var pv = self.registry.view(.{Comps.Position}, .{});
+                var pi = pv.entityIterator();
+                while (pi.next()) |e| {
+                    var p = pv.get(e);
+                    p.prev = p.vec;
+                }
+            }
+
+            while (self.accumulator >= TICK_DT) {
+                self.accumulator -= TICK_DT;
+                if (!pause_menu.visible) {
+                    produceMoveIntent(self);
+                    self.block_world.updatePhysics(&self.registry, TICK_DT);
+                    {
+                        var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+                        var piter = pview.entityIterator();
+                        while (piter.next()) |entity| {
+                            const player = pview.get(Comps.Player, entity);
+                            if (player.id == self.player_id) {
+                                const ppos = pview.get(Comps.Position, entity);
+                                BlockWorld.BlockWorld.updateAIAgent(&self.registry, ppos.vec);
+                                break;
+                            }
+                        }
+                    }
+                    self.block_world.updateAI(&self.registry, TICK_DT);
+                    try updateEntities(self);
+                }
+            }
+
+            if (!pause_menu.visible) {
+                handleFlightToggle(self);
+                if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
+                    self.sprint_toggled = !self.sprint_toggled;
+                syncCameraFromPlayer(self);
+                try updateChunks(self);
+
+                if (self.keybinds.isJustPressed(&self.input, .break_block))
+                    try handleLeftClick(self);
+                if (self.keybinds.isJustPressed(&self.input, .place_block))
+                    try tryPlaceBlock(self);
+            }
+        }
+
+        if (self.save_initialized and !pause_menu.visible) {
+            self.handleHotbarInput();
+            self.ui_system.drawHotbar(&self.hotbar, &self.icon_atlas);
+        }
+        try self.ui_system.endFrame(&self.gctx);
+        if (self.save_initialized) {
+            try self.block_world.processCompletedBuilds();
+            Render.draw(self);
+        } else if (self.ui_system.index_count > 0) {
+            Render.drawUI(self);
+        }
+    }
+    save_menu.deinit(self.allocator);
+}
+
+/// 选存档后初始化游戏世界（玩家实体、区块、存档数据）
+fn initGame(self: *Game) !void {
     const player_entity = self.registry.create();
     self.registry.add(player_entity, Comps.Player{ .id = self.player_id, .mode = .creative });
     self.registry.add(player_entity, Comps.Position{ .vec = Vec3.new(8, 130, 8), .prev = Vec3.zero });
@@ -38,7 +141,7 @@ pub fn start(self: *Game) !void {
     self.registry.add(player_entity, Comps.Health{ .current = 100, .max = 100 });
     self.registry.add(player_entity, Comps.SpawnPos{ .pos = Vec3.new(8, 130, 8) });
 
-    // 加载初始区块（尝试从存档恢复，无存档则生成）
+    // 加载初始区块
     {
         var chunk_io = chunkIO(&self.save_manager);
         const player_origin = BlockWorld.BlockWorld.chunkOrigin(
@@ -58,91 +161,20 @@ pub fn start(self: *Game) !void {
             }
         }
     }
-    // 加载玩家数据（位置、血量、物品栏、飞行状态）
+
     self.save_manager.loadPlayer(&self.hotbar, &self.registry) catch {};
 
-    // 同步飞行状态到 Game 标记
-    {
-        var view = self.registry.view(.{ Comps.Player, Comps.Flying }, .{});
-        var iter = view.entityIterator();
-        if (iter.next()) |_| {
-            self.flying = true;
-        }
-    }
+    var view = self.registry.view(.{ Comps.Player, Comps.Flying }, .{});
+    var iter = view.entityIterator();
+    if (iter.next()) |_| self.flying = true;
 
-    // 等待worker完成初始区块的mesh构建
     while (self.block_world.pendingCount() > 0) {
         try self.block_world.processCompletedBuilds();
         std.Thread.yield() catch {};
     }
 
-    // 加载 AI 实体（从存档恢复）
     self.save_manager.loadAllEntities(&self.registry) catch |err| std.debug.print("loadEntities error: {}\n", .{err});
-
-    // 主循环
-    while (!self.window.shouldClose()) {
-        self.input.beginFrame();
-        self.window.pollEvents();
-
-        self.accumulator += self.window.delta_time;
-        if (self.accumulator > TICK_DT * 5) self.accumulator = TICK_DT * 5;
-
-        // 准备 tick：保存当前位置到 prev，用于渲染插值
-        if (self.accumulator >= TICK_DT) {
-            var pv = self.registry.view(.{Comps.Position}, .{});
-            var pi = pv.entityIterator();
-            while (pi.next()) |e| {
-                var p = pv.get(e);
-                p.prev = p.vec;
-            }
-        }
-
-        // tick 循环（固定步长）
-        while (self.accumulator >= TICK_DT) {
-            self.accumulator -= TICK_DT;
-            if (!main_menu.visible) {
-                produceMoveIntent(self);
-                self.block_world.updatePhysics(&self.registry, TICK_DT);
-                {
-                    var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
-                    var piter = pview.entityIterator();
-                    while (piter.next()) |entity| {
-                        const player = pview.get(Comps.Player, entity);
-                        if (player.id == self.player_id) {
-                            const ppos = pview.get(Comps.Position, entity);
-                            BlockWorld.BlockWorld.updateAIAgent(&self.registry, ppos.vec);
-                            break;
-                        }
-                    }
-                }
-                self.block_world.updateAI(&self.registry, TICK_DT);
-                try updateEntities(self);
-            }
-        }
-
-        // 渲染帧（输入事件处理、摄像机、UI，不受 tick 影响）
-        if (!main_menu.visible) {
-            handleFlightToggle(self);
-            if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
-                self.sprint_toggled = !self.sprint_toggled;
-            syncCameraFromPlayer(self);
-            try updateChunks(self);
-
-            if (self.keybinds.isJustPressed(&self.input, .break_block))
-                try handleLeftClick(self);
-            if (self.keybinds.isJustPressed(&self.input, .place_block))
-                try tryPlaceBlock(self);
-        }
-        self.icon_atlas.reset();
-        self.ui_system.beginFrame();
-        main_menu.update(self);
-        self.handleHotbarInput();
-        self.ui_system.drawHotbar(&self.hotbar, &self.icon_atlas);
-        try self.ui_system.endFrame(&self.gctx);
-        // 6. 处理待构建的区块mesh（可能由异步worker完成）
-        try self.block_world.processCompletedBuilds();
-        Render.draw(self);
-    }
+    self.save_initialized = true;
 }
 
 pub fn init(allocator: std.mem.Allocator) !*@This() {
@@ -194,7 +226,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 物品栏
     self.hotbar = .{};
 
-    // 存档系统
+    // 存档系统（默认 world_1，玩家可在菜单切换）
     self.save_manager = try SaveManager.init(allocator, "world_1");
 
     // 按键绑定（加载配置文件，不存在则使用默认值）
@@ -222,14 +254,53 @@ pub fn deinit(self: *@This()) void {
     self.window.deinit();
     self.gctx.deinit();
 
-    // 退出前保存
+    self.res_manager.deinit(self.allocator);
+    self.render_pipeline.deinit();
+    self.ui_system.deinit();
+    self.icon_atlas.deinit();
+
+    if (!self.game_cleaned) {
+        // 退出前保存
+        self.save_manager.savePlayer(&self.hotbar, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+        self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
+        self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
+        // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
+        {
+            var view = self.registry.view(.{Comps.AIAgent}, .{});
+            var iter = view.entityIterator();
+            while (iter.next()) |entity| {
+                self.block_world.cleanupEntity(&self.registry, entity);
+            }
+        }
+        self.registry.deinit();
+        self.block_world.deinit();
+        self.save_manager.deinit();
+    }
+}
+
+/// 切换存档（由存档管理界面调用）
+pub fn startSave(self: *Game, name: []const u8) !void {
+    if (!self.game_cleaned) self.save_manager.deinit();
+    self.save_manager = try SaveManager.init(self.allocator, name);
+    if (self.game_cleaned) {
+        const range: i32 = self.load_range;
+        const max_chunks: usize = @intCast((2 * range + 1) * (2 * range + 1) * 4);
+        self.registry = ECS.Registry.init(self.allocator);
+        self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
+        try self.block_world.spawnWorker();
+        try self.block_world.spawnAStarWorker();
+    }
+    self.game_cleaned = false;
+    try self.initGame();
+}
+
+/// 返回主菜单（由暂停菜单调用）
+pub fn returnToMenu(self: *Game) void {
+    // 保存当前游戏状态
     self.save_manager.savePlayer(&self.hotbar, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
     self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
     self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
-
-    self.res_manager.deinit(self.allocator);
-    self.render_pipeline.deinit();
-    // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
+    // 清理 AI 实体的寻路状态和路径内存
     {
         var view = self.registry.view(.{Comps.AIAgent}, .{});
         var iter = view.entityIterator();
@@ -237,11 +308,17 @@ pub fn deinit(self: *@This()) void {
             self.block_world.cleanupEntity(&self.registry, entity);
         }
     }
+    // 释放 gameplay 子系统
     self.registry.deinit();
-    self.ui_system.deinit();
-    self.icon_atlas.deinit();
     self.block_world.deinit();
     self.save_manager.deinit();
+    // 标记已清理，防止 deinit 重复释放
+    self.game_cleaned = true;
+    self.save_initialized = false;
+    self.player_id = 0;
+    self.flying = false;
+    // 通知主循环恢复主菜单
+    self.return_to_main_menu = true;
 }
 
 fn produceMoveIntent(self: *Game) void {

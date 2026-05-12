@@ -92,25 +92,36 @@ index_count: usize,
 vertex_buffer: Wgpu.WGPUBuffer,
 index_buffer: Wgpu.WGPUBuffer,
 
-// 按钮
-pub fn button(self: *UiSystem, x: f32, y: f32, width: f32, height: f32) bool {
-    var input = self.game_ptr.input;
-    // 根据鼠标位置调整状态
-    const mouse_pos = input.getCursorPos();
-    const is_hovered = (mouse_pos.x >= x and mouse_pos.x <= x + width and
-        mouse_pos.y >= y and mouse_pos.y <= y + height);
-    const is_clicked = is_hovered and input.isMouseJustPressed(.mouse_left);
-    // 根据状态选择颜色
-    const color = if (is_clicked) [4]f32{ 0.2, 0.2, 0.8, 1.0 } else if (is_hovered) [4]f32{ 0.8, 0.8, 0.2, 1.0 } else [4]f32{ 0.5, 0.5, 0.5, 1.0 };
-    // 绘制按钮背景
+// 带文字的按钮：背景 + 居中文字 + 点击检测
+pub fn textButton(self: *UiSystem, x: f32, y: f32, w: f32, h: f32, label: []const u8, font_size: f32) bool {
+    const hit = self.buttonHover(x, y, w, h);
+    const clicked = hit and self.game_ptr.input.isMouseJustPressed(.mouse_left);
+    self.drawButton(x, y, w, h, hit, false);
+    const txt_w = self.measureText(label, font_size);
+    self.drawText(&self.game_ptr.gctx, x + self.centerX(w, txt_w), y + self.centerX(h, font_size), label, font_size, .{ 1, 1, 1, 1 });
+    return clicked;
+}
+
+/// 仅检测鼠标是否悬停在矩形区域内
+pub fn buttonHover(self: *UiSystem, x: f32, y: f32, width: f32, height: f32) bool {
+    const p = self.game_ptr.input.getCursorPos();
+    return p.x >= x and p.x <= x + width and p.y >= y and p.y <= y + height;
+}
+
+/// 仅绘制按钮背景和边框（不含文字），由 button / save_menu 等调用
+pub fn drawButton(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, hovered: bool, active: bool) void {
+    const color = if (active) [4]f32{ 0.2, 0.2, 0.8, 1.0 } else if (hovered) [4]f32{ 0.8, 0.8, 0.2, 1.0 } else [4]f32{ 0.5, 0.5, 0.5, 1.0 };
     self.drawRect(x, y, width, height, color);
-    // 绘制边框
     const border_color = [4]f32{ 0.1, 0.1, 0.1, 1.0 };
-    self.drawRect(x, y, width, 1, border_color); // 上边框
-    self.drawRect(x, y + height - 1, width, 1, border_color); // 下边框
-    self.drawRect(x, y, 1, height, border_color); // 左边框
-    self.drawRect(x + width - 1, y, 1, height, border_color); // 右边框
-    return is_clicked;
+    self.drawRect(x, y, width, 1, border_color);
+    self.drawRect(x, y + height - 1, width, 1, border_color);
+    self.drawRect(x, y, 1, height, border_color);
+    self.drawRect(x + width - 1, y, 1, height, border_color);
+}
+
+/// 水平居中偏移量
+pub fn centerX(_: *UiSystem, container: f32, element: f32) f32 {
+    return (container - element) / 2;
 }
 
 // 析构函数
@@ -412,8 +423,46 @@ fn glyphUVs(slot_idx: u32, slot: GlyphSlot) [4][2]f32 {
     };
 }
 
+/// 精确计算文字的像素宽度（使用 stb 字形度量）
+pub fn measureText(self: *UiSystem, text: []const u8, font_size: f32) f32 {
+    const scale = self.canonical_scale * (font_size / SDF_SCALE_HEIGHT);
+    var pw: f32 = 0;
+    var prev: u21 = 0;
+    var last_cp: u21 = 0;
+    var utf8 = std.unicode.Utf8View.init(text) catch return 0;
+    var it = utf8.iterator();
+    while (it.nextCodepoint()) |cp| {
+        if (prev != 0) {
+            pw += @as(f32, @floatFromInt(Stb.stbtt_GetCodepointKernAdvance(
+                &self.font_info, @intCast(prev), @intCast(cp),
+            ))) * scale;
+        }
+        var adv: c_int = undefined;
+        Stb.stbtt_GetCodepointHMetrics(&self.font_info, @intCast(cp), &adv, null);
+        pw += @as(f32, @floatFromInt(adv)) * scale;
+        prev = cp;
+        last_cp = cp;
+    }
+    // 将最后一个字形的 advance 替换为视觉宽度（advance 含右侧空白）
+    if (last_cp == 0) return pw;
+    var adv_last: c_int = undefined;
+    var lsb_last: c_int = undefined;
+    Stb.stbtt_GetCodepointHMetrics(&self.font_info, @intCast(last_cp), &adv_last, &lsb_last);
+    var sdf_w: c_int = undefined;
+    var sdf_h: c_int = undefined;
+    var sdf_xoff: c_int = undefined;
+    var sdf_yoff: c_int = undefined;
+    const sdf = Stb.stbtt_GetCodepointSDF(&self.font_info, self.canonical_scale, @intCast(last_cp), SDF_PADDING, SDF_ONEDGE, SDF_PIXEL_DIST_SCALE, &sdf_w, &sdf_h, &sdf_xoff, &sdf_yoff);
+    if (sdf) |ptr| Stb.stbtt_FreeBitmap(ptr, null);
+    const render_scale = font_size / SDF_SCALE_HEIGHT;
+    const visual_width = (@as(f32, @floatFromInt(lsb_last)) * self.canonical_scale + @as(f32, @floatFromInt(sdf_w))) * render_scale;
+    return pw - (@as(f32, @floatFromInt(adv_last)) * scale - visual_width);
+}
+
 // 绘制文本
 pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, font_size: f32, color: [4]f32) void {
+    // y 是文字顶部坐标，内部转基线
+    const baseline_y = y + font_size * 0.78;
     const render_scale = font_size / SDF_SCALE_HEIGHT;
 
     var cursor_x: f32 = x;
@@ -447,7 +496,7 @@ pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, 
         }
 
         const glyph_x = cursor_x + @as(f32, @floatFromInt(slot.lsb)) * self.canonical_scale * render_scale;
-        const glyph_y = y + @as(f32, @floatFromInt(slot.sdf_yoff)) * render_scale;
+        const glyph_y = baseline_y + @as(f32, @floatFromInt(slot.sdf_yoff)) * render_scale;
         const glyph_w = @as(f32, @floatFromInt(slot.sdf_width)) * render_scale;
         const glyph_h = @as(f32, @floatFromInt(slot.sdf_height)) * render_scale;
 
@@ -478,11 +527,12 @@ pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, 
 
 // 自动换行文本框
 pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32, text: []const u8, font_size: f32, color: [4]f32) void {
+    const baseline_y = y + font_size * 0.78;
     const render_scale = font_size / SDF_SCALE_HEIGHT;
     const line_height = font_size * 1.4;
 
     var cursor_x: f32 = x;
-    var cursor_y: f32 = y;
+    var cursor_y: f32 = baseline_y;
     var prev_codepoint: u21 = 0;
 
     var utf8_view = std.unicode.Utf8View.init(text) catch return;
@@ -587,7 +637,7 @@ pub fn drawHotbar(self: *UiSystem, hotbar: *const Hotbar, icon_atlas: *IconAtlas
         if (item.count > 1) {
             var buf: [16]u8 = undefined;
             const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch continue;
-            self.drawText(&self.game_ptr.gctx, x + slot - 18, y + slot - 16, count_str, 10, .{ 1, 1, 1, 1 });
+            self.drawText(&self.game_ptr.gctx, x + slot - 18, y + slot - 24, count_str, 10, .{ 1, 1, 1, 1 });
         }
     }
 }

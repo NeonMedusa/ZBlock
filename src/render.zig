@@ -198,6 +198,73 @@ pub fn draw(game: *Game) void {
     Wgpu.wgpuTextureRelease(surface_texture.texture);
 }
 
+pub fn drawUI(game: *Game) void {
+    var surface_texture: Wgpu.WGPUSurfaceTexture = undefined;
+    Wgpu.wgpuSurfaceGetCurrentTexture(game.gctx.surface, &surface_texture);
+    const surface_texture_view = Wgpu.wgpuTextureCreateView(surface_texture.texture, null);
+    defer Wgpu.wgpuTextureViewRelease(surface_texture_view);
+
+    const encoder = Wgpu.wgpuDeviceCreateCommandEncoder(game.gctx.device, null);
+
+    Wgpu.wgpuQueueWriteBuffer(
+        game.gctx.queue,
+        game.res_manager.scene_uniform_buffer,
+        0,
+        &game.ubo,
+        Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
+    );
+
+    const color_attachment = Wgpu.WGPURenderPassColorAttachment{
+        .view = surface_texture_view,
+        .loadOp = Wgpu.WGPULoadOp_Clear,
+        .storeOp = Wgpu.WGPUStoreOp_Store,
+        .depthSlice = Wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
+        .clearValue = Wgpu.WGPUColor{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 },
+    };
+
+    const render_pass_desc = Wgpu.WGPURenderPassDescriptor{
+        .colorAttachmentCount = 1,
+        .colorAttachments = &color_attachment,
+        .depthStencilAttachment = &Wgpu.WGPURenderPassDepthStencilAttachment{
+            .view = game.gctx.depth_texture_view,
+            .depthLoadOp = Wgpu.WGPULoadOp_Clear,
+            .depthStoreOp = Wgpu.WGPUStoreOp_Store,
+            .depthClearValue = 0.0,
+            .depthReadOnly = 0,
+            .stencilLoadOp = Wgpu.WGPULoadOp_Undefined,
+            .stencilStoreOp = Wgpu.WGPUStoreOp_Undefined,
+            .stencilClearValue = 0,
+            .stencilReadOnly = 1,
+        },
+    };
+
+    const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
+
+    Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.ui_system.render_pipeline.handle);
+    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.ui_system.render_pipeline.bind_group, 0, null);
+    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.ui_system.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.ui_system.vertex_buffer));
+    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.ui_system.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.ui_system.index_buffer));
+    Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @as(u32, @intCast(game.ui_system.index_count)), 1, 0, 0, 0);
+
+    if (game.icon_atlas.vertex_count > 0) {
+        game.icon_atlas.upload(game.gctx.queue);
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.icon_atlas.pipeline.handle);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.icon_atlas.pipeline.bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.icon_atlas.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.icon_atlas.vertex_buffer));
+        Wgpu.wgpuRenderPassEncoderDraw(pass, @as(u32, @intCast(game.icon_atlas.vertex_count)), 1, 0, 0);
+    }
+
+    Wgpu.wgpuRenderPassEncoderEnd(pass);
+    Wgpu.wgpuRenderPassEncoderRelease(pass);
+
+    const command_buffer = Wgpu.wgpuCommandEncoderFinish(encoder, null);
+    Wgpu.wgpuCommandEncoderRelease(encoder);
+    Wgpu.wgpuQueueSubmit(game.gctx.queue, 1, &command_buffer);
+    Wgpu.wgpuCommandBufferRelease(command_buffer);
+    _ = Wgpu.wgpuSurfacePresent(game.gctx.surface);
+    Wgpu.wgpuTextureRelease(surface_texture.texture);
+}
+
 const Imports = @import("imports.zig");
 
 const Wgpu = Imports.Wgpu;

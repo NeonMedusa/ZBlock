@@ -63,7 +63,9 @@ const WorldRow = struct {
     id: ?i64 = null,
     created_at: []const u8,
     last_played: []const u8,
-    player_pos_x: f32, player_pos_y: f32, player_pos_z: f32,
+    player_pos_x: f32,
+    player_pos_y: f32,
+    player_pos_z: f32,
     player_health: f32,
     is_flying: i64,
 };
@@ -78,8 +80,16 @@ const HotbarRow = struct {
 const EntityRow = struct {
     id: ?i64 = null,
     type_id: []const u8,
-    pos_x: f32, pos_y: f32, pos_z: f32,
+    pos_x: f32,
+    pos_y: f32,
+    pos_z: f32,
     health: f32,
+};
+
+/// 存档列表条目
+pub const SaveEntry = struct {
+    name: []const u8,
+    last_played: []const u8,
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -178,16 +188,14 @@ pub const SaveManager = struct {
             var ins = try self.world_db.conn.prepare(
                 \\INSERT INTO WorldRow (created_at, last_played,
                 \\  player_pos_x, player_pos_y, player_pos_z, player_health, is_flying)
-                \\  VALUES (?, ?, ?, ?, ?, ?, ?)
+                \\  VALUES (datetime('now'), datetime('now'), ?, ?, ?, ?, ?)
             , &.{});
             defer ins.deinit();
-            try ins.bind(0, fr.Value{ .string = "" });
-            try ins.bind(1, fr.Value{ .string = "" });
-            try ins.bind(2, fr.Value{ .float = @as(f64, @floatCast(pos.vec.x)) });
-            try ins.bind(3, fr.Value{ .float = @as(f64, @floatCast(pos.vec.y)) });
-            try ins.bind(4, fr.Value{ .float = @as(f64, @floatCast(pos.vec.z)) });
-            try ins.bind(5, fr.Value{ .float = @as(f64, @floatCast(hp.current)) });
-            try ins.bind(6, fr.Value{ .int = flying });
+            try ins.bind(0, fr.Value{ .float = @as(f64, @floatCast(pos.vec.x)) });
+            try ins.bind(1, fr.Value{ .float = @as(f64, @floatCast(pos.vec.y)) });
+            try ins.bind(2, fr.Value{ .float = @as(f64, @floatCast(pos.vec.z)) });
+            try ins.bind(3, fr.Value{ .float = @as(f64, @floatCast(hp.current)) });
+            try ins.bind(4, fr.Value{ .int = flying });
             try ins.exec();
         }
     }
@@ -351,10 +359,65 @@ pub const SaveManager = struct {
         return true;
     }
 
-    /// 删除整个存档（「新游戏」用）
+    /// 删除整个存档
     pub fn deleteSave(save_name: []const u8) !void {
         const dir = try std.fs.path.join(std.heap.page_allocator, &.{ "saves", save_name });
         defer std.heap.page_allocator.free(dir);
         std.fs.cwd().deleteTree(dir) catch {};
+    }
+
+    /// 列出所有存档（按最后游玩时间降序）
+    pub fn listSaves(allocator: Allocator) ![]SaveEntry {
+        var list = std.ArrayListUnmanaged(SaveEntry){};
+        errdefer list.deinit(allocator);
+
+        var dir = std.fs.cwd().openDir("saves", .{ .iterate = true }) catch return &.{};
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            const db_path = try std.fs.path.join(allocator, &.{ "saves", entry.name, "world.db" });
+            const last_played = getLastPlayed(db_path) orelse "";
+            allocator.free(db_path);
+            try list.append(allocator, SaveEntry{
+                .name = try allocator.dupe(u8, entry.name),
+                .last_played = try allocator.dupe(u8, last_played),
+            });
+        }
+        // 按 last_played 降序
+        std.mem.sort(SaveEntry, list.items, {}, struct {
+            fn less(_: void, a: SaveEntry, b: SaveEntry) bool {
+                return std.mem.order(u8, a.last_played, b.last_played) == .gt;
+            }
+        }.less);
+        return list.toOwnedSlice(allocator);
+    }
+
+    /// 自动生成下一个存档名（world_1, world_2, …）
+    pub fn autoName(allocator: Allocator) ![]const u8 {
+        var max_n: u32 = 0;
+        var dir = std.fs.cwd().openDir("saves", .{ .iterate = true }) catch return allocator.dupe(u8, "world_1");
+        defer dir.close();
+        var it = dir.iterate();
+        while (try it.next()) |entry| {
+            if (entry.kind != .directory) continue;
+            if (std.mem.startsWith(u8, entry.name, "world_")) {
+                const num_str = entry.name["world_".len..];
+                const n = std.fmt.parseInt(u32, num_str, 10) catch continue;
+                if (n > max_n) max_n = n;
+            }
+        }
+        return std.fmt.allocPrint(allocator, "world_{d}", .{max_n + 1});
+    }
+
+    /// 从存档的 world.db 读取最后游玩时间
+    fn getLastPlayed(path: []const u8) ?[]const u8 {
+        const path_z = std.heap.page_allocator.dupeZ(u8, path) catch return null;
+        defer std.heap.page_allocator.free(path_z);
+        var db = fr.Session.open(fr.SQLite3, std.heap.page_allocator, .{ .filename = path_z }) catch return null;
+        defer db.deinit();
+        const rows = db.query(WorldRow).findAll() catch return null;
+        if (rows.len == 0) return null;
+        return std.heap.page_allocator.dupe(u8, rows[0].last_played) catch null;
     }
 };
