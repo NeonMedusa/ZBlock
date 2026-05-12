@@ -91,6 +91,8 @@ index_count: usize,
 // 顶点/索引缓冲区，每帧更新
 vertex_buffer: Wgpu.WGPUBuffer,
 index_buffer: Wgpu.WGPUBuffer,
+device: Wgpu.WGPUDevice,
+frame_under_counter: u32 = 0,
 
 // 带文字的按钮：背景 + 居中文字 + 点击检测
 pub fn textButton(self: *UiSystem, x: f32, y: f32, w: f32, h: f32, label: []const u8, font_size: f32) bool {
@@ -227,6 +229,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
     self.game_ptr = game;
     self.vertex_buffer = vertex_buffer;
     self.index_buffer = index_buffer;
+    self.device = gctx.device;
     self.frame_vertices = frame_vertices;
     self.frame_indices = frame_indices;
     self.max_vertices = max_vertices;
@@ -256,8 +259,19 @@ pub fn beginFrame(self: *@This()) void {
     self.index_count = 0;
 }
 
-// 每帧结束时更新 GPU 缓冲区
+// 每帧结束时更新 GPU 缓冲区（含缩容检测）
 pub fn endFrame(self: *@This(), gctx: *Gctx) !void {
+    if (self.max_vertices > 1024) {
+        if (self.vertex_count < self.max_vertices / 4 and self.index_count < self.max_indices / 4) {
+            self.frame_under_counter += 1;
+            if (self.frame_under_counter >= 1000) {
+                self.ensureCapacity(self.max_vertices / 2, self.max_indices / 2);
+                self.frame_under_counter = 0;
+            }
+        } else {
+            self.frame_under_counter = 0;
+        }
+    }
     if (self.index_count == 0) return;
     Wgpu.wgpuQueueWriteBuffer(
         gctx.queue,
@@ -282,12 +296,43 @@ pub fn endFrame(self: *@This(), gctx: *Gctx) !void {
     );
 }
 
+// 动态扩缩容（CPU realloc + GPU recreate），接缝处取 2ⁿ 对齐
+fn ensureCapacity(self: *UiSystem, need_v: usize, need_i: usize) void {
+    var new_max_v = need_v;
+    var new_max_i = need_i;
+    if (new_max_v < 1024) new_max_v = 1024;
+    if (new_max_i < 2048) new_max_i = 2048;
+    new_max_v = std.math.ceilPowerOfTwo(usize, new_max_v) catch @panic("顶点容量过大");
+    new_max_i = std.math.ceilPowerOfTwo(usize, new_max_i) catch @panic("索引容量过大");
+
+    if (new_max_v == self.max_vertices and new_max_i == self.max_indices) return;
+
+    self.frame_vertices = self.allocator.realloc(self.frame_vertices, new_max_v) catch @panic("OOM");
+    self.frame_indices = self.allocator.realloc(self.frame_indices, new_max_i) catch @panic("OOM");
+
+    const new_vb = Wgpu.wgpuDeviceCreateBuffer(self.device, &.{
+        .size = new_max_v * @sizeOf(UiVertex),
+        .usage = Wgpu.WGPUBufferUsage_CopyDst | Wgpu.WGPUBufferUsage_Vertex,
+    });
+    const new_ib = Wgpu.wgpuDeviceCreateBuffer(self.device, &.{
+        .size = new_max_i * @sizeOf(u32),
+        .usage = Wgpu.WGPUBufferUsage_CopyDst | Wgpu.WGPUBufferUsage_Index,
+    });
+    Wgpu.wgpuBufferRelease(self.vertex_buffer);
+    Wgpu.wgpuBufferRelease(self.index_buffer);
+
+    self.vertex_buffer = new_vb;
+    self.index_buffer = new_ib;
+    self.max_vertices = new_max_v;
+    self.max_indices = new_max_i;
+}
+
 // 矩形绘制
 pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color: [4]f32) void {
-    if (self.vertex_count + 4 > self.max_vertices or self.index_count + 6 > self.max_indices) {
-        std.debug.print("UI缓冲区溢出！\n", .{});
-        return;
-    }
+    const need_v = self.vertex_count + 4;
+    const need_i = self.index_count + 6;
+    if (need_v > self.max_vertices or need_i > self.max_indices)
+        self.ensureCapacity(need_v, need_i);
     const base_vertex = @as(u32, @intCast(self.vertex_count));
     const no_tex = [2]f32{ -1, -1 };
     self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ x, y, 0 }, .color = color, .texcoord = no_tex };
@@ -467,25 +512,28 @@ fn emitGlyph(self: *UiSystem, cp: u21, slot_idx: u32, slot: *const GlyphSlot, re
     const glyph_w = @as(f32, @floatFromInt(slot.sdf_width)) * render_scale;
     const glyph_h = @as(f32, @floatFromInt(slot.sdf_height)) * render_scale;
 
-    if (self.vertex_count + 4 <= self.max_vertices and self.index_count + 6 <= self.max_indices) {
-        const base_vertex = @as(u32, @intCast(self.vertex_count));
-        const uvs = glyphUVs(slot_idx, slot.*);
+    const need_v = self.vertex_count + 4;
+    const need_i = self.index_count + 6;
+    if (need_v > self.max_vertices or need_i > self.max_indices)
+        self.ensureCapacity(need_v, need_i);
 
-        self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ glyph_x, glyph_y, 0 }, .color = color, .texcoord = uvs[0] };
-        self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y, 0 }, .color = color, .texcoord = uvs[1] };
-        self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[2] };
-        self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ glyph_x, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[3] };
+    const base_vertex = @as(u32, @intCast(self.vertex_count));
+    const uvs = glyphUVs(slot_idx, slot.*);
 
-        self.frame_indices[self.index_count] = base_vertex + 0;
-        self.frame_indices[self.index_count + 1] = base_vertex + 1;
-        self.frame_indices[self.index_count + 2] = base_vertex + 2;
-        self.frame_indices[self.index_count + 3] = base_vertex + 0;
-        self.frame_indices[self.index_count + 4] = base_vertex + 2;
-        self.frame_indices[self.index_count + 5] = base_vertex + 3;
+    self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ glyph_x, glyph_y, 0 }, .color = color, .texcoord = uvs[0] };
+    self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y, 0 }, .color = color, .texcoord = uvs[1] };
+    self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[2] };
+    self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ glyph_x, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[3] };
 
-        self.vertex_count += 4;
-        self.index_count += 6;
-    }
+    self.frame_indices[self.index_count] = base_vertex + 0;
+    self.frame_indices[self.index_count + 1] = base_vertex + 1;
+    self.frame_indices[self.index_count + 2] = base_vertex + 2;
+    self.frame_indices[self.index_count + 3] = base_vertex + 0;
+    self.frame_indices[self.index_count + 4] = base_vertex + 2;
+    self.frame_indices[self.index_count + 5] = base_vertex + 3;
+
+    self.vertex_count += 4;
+    self.index_count += 6;
 }
 
 // 绘制文本
