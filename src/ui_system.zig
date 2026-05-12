@@ -394,28 +394,34 @@ fn ensureCapacity(self: *UiSystem, need_v: usize, need_i: usize) void {
     self.max_indices = new_max_i;
 }
 
-// 矩形绘制
-pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color: [4]f32) void {
+// 内核：在缓冲区追加一个四边形（4 顶点 + 6 索引）
+fn emitQuad(self: *UiSystem, x: f32, y: f32, w: f32, h: f32, color: [4]f32, uvs: [4][2]f32) void {
     const need_v = self.vertex_count + 4;
     const need_i = self.index_count + 6;
     if (need_v > self.max_vertices or need_i > self.max_indices)
         self.ensureCapacity(need_v, need_i);
-    const base_vertex = @as(u32, @intCast(self.vertex_count));
-    const no_tex = [2]f32{ -1, -1 };
-    self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ x, y, 0 }, .color = color, .texcoord = no_tex };
-    self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ x + width, y, 0 }, .color = color, .texcoord = no_tex };
-    self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ x + width, y + height, 0 }, .color = color, .texcoord = no_tex };
-    self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ x, y + height, 0 }, .color = color, .texcoord = no_tex };
 
-    self.frame_indices[self.index_count] = base_vertex + 0;
-    self.frame_indices[self.index_count + 1] = base_vertex + 1;
-    self.frame_indices[self.index_count + 2] = base_vertex + 2;
-    self.frame_indices[self.index_count + 3] = base_vertex + 0;
-    self.frame_indices[self.index_count + 4] = base_vertex + 2;
-    self.frame_indices[self.index_count + 5] = base_vertex + 3;
+    const base = @as(u32, @intCast(self.vertex_count));
+    self.frame_vertices[base + 0] = .{ .pos = [3]f32{ x, y, 0 }, .color = color, .texcoord = uvs[0] };
+    self.frame_vertices[base + 1] = .{ .pos = [3]f32{ x + w, y, 0 }, .color = color, .texcoord = uvs[1] };
+    self.frame_vertices[base + 2] = .{ .pos = [3]f32{ x + w, y + h, 0 }, .color = color, .texcoord = uvs[2] };
+    self.frame_vertices[base + 3] = .{ .pos = [3]f32{ x, y + h, 0 }, .color = color, .texcoord = uvs[3] };
+
+    self.frame_indices[self.index_count + 0] = base + 0;
+    self.frame_indices[self.index_count + 1] = base + 1;
+    self.frame_indices[self.index_count + 2] = base + 2;
+    self.frame_indices[self.index_count + 3] = base + 0;
+    self.frame_indices[self.index_count + 4] = base + 2;
+    self.frame_indices[self.index_count + 5] = base + 3;
 
     self.vertex_count += 4;
     self.index_count += 6;
+}
+
+/// 矩形绘制
+pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color: [4]f32) void {
+    const no_tex = [_][2]f32{ .{ -1, -1 } } ** 4;
+    self.emitQuad(x, y, width, height, color, no_tex);
 }
 
 // 获取或生成一个字形，返回槽位索引（RingBuffer 淘汰）
@@ -563,8 +569,11 @@ pub fn measureText(self: *UiSystem, gctx: *Gctx, text: []const u8, font_size: f3
     return pw - (@as(f32, @floatFromInt(slot.advance)) * scale - visual_width);
 }
 
-// 内核：渲染单个字形（kerning + 顶点/索引写入），不推进 cursor_x
-fn emitGlyph(self: *UiSystem, cp: u21, slot_idx: u32, slot: *const GlyphSlot, render_scale: f32, color: [4]f32, cursor_x: *f32, prev_codepoint: *u21, line_y: f32) void {
+// 内核：渲染单个字形 + 返回 advance（null 表示字形生成失败）
+fn emitGlyph(self: *UiSystem, gctx: *Gctx, cp: u21, render_scale: f32, color: [4]f32, cursor_x: *f32, prev_codepoint: *u21, line_y: f32) ?f32 {
+    const slot_idx = self.getOrCreateGlyph(gctx, cp) orelse return null;
+    const slot = self.glyph_slots[@as(usize, @intCast(slot_idx))] orelse unreachable;
+
     if (prev_codepoint.* != 0) {
         const kern = Stb.stbtt_GetCodepointKernAdvance(
             &self.font_info,
@@ -576,31 +585,11 @@ fn emitGlyph(self: *UiSystem, cp: u21, slot_idx: u32, slot: *const GlyphSlot, re
 
     const glyph_x = cursor_x.* + @as(f32, @floatFromInt(slot.lsb)) * self.canonical_scale * render_scale;
     const glyph_y = line_y + @as(f32, @floatFromInt(slot.sdf_yoff)) * render_scale;
-    const glyph_w = @as(f32, @floatFromInt(slot.sdf_width)) * render_scale;
-    const glyph_h = @as(f32, @floatFromInt(slot.sdf_height)) * render_scale;
 
-    const need_v = self.vertex_count + 4;
-    const need_i = self.index_count + 6;
-    if (need_v > self.max_vertices or need_i > self.max_indices)
-        self.ensureCapacity(need_v, need_i);
+    self.emitQuad(glyph_x, glyph_y, @as(f32, @floatFromInt(slot.sdf_width)) * render_scale, @as(f32, @floatFromInt(slot.sdf_height)) * render_scale, color, glyphUVs(slot_idx, slot));
 
-    const base_vertex = @as(u32, @intCast(self.vertex_count));
-    const uvs = glyphUVs(slot_idx, slot.*);
-
-    self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ glyph_x, glyph_y, 0 }, .color = color, .texcoord = uvs[0] };
-    self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y, 0 }, .color = color, .texcoord = uvs[1] };
-    self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[2] };
-    self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ glyph_x, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[3] };
-
-    self.frame_indices[self.index_count] = base_vertex + 0;
-    self.frame_indices[self.index_count + 1] = base_vertex + 1;
-    self.frame_indices[self.index_count + 2] = base_vertex + 2;
-    self.frame_indices[self.index_count + 3] = base_vertex + 0;
-    self.frame_indices[self.index_count + 4] = base_vertex + 2;
-    self.frame_indices[self.index_count + 5] = base_vertex + 3;
-
-    self.vertex_count += 4;
-    self.index_count += 6;
+    prev_codepoint.* = cp;
+    return @as(f32, @floatFromInt(slot.advance)) * self.canonical_scale * render_scale;
 }
 
 // 绘制文本
@@ -622,16 +611,12 @@ pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, 
             continue;
         }
 
-        const slot_idx = self.getOrCreateGlyph(gctx, cp) orelse {
+        const advance = self.emitGlyph(gctx, cp, render_scale, color, &cursor_x, &prev_codepoint, baseline_y) orelse {
             cursor_x += 10.0 * render_scale;
             prev_codepoint = cp;
             continue;
         };
-
-        const slot = self.glyph_slots[@as(usize, @intCast(slot_idx))] orelse unreachable;
-        self.emitGlyph(cp, slot_idx, &slot, render_scale, color, &cursor_x, &prev_codepoint, baseline_y);
-        cursor_x += @as(f32, @floatFromInt(slot.advance)) * self.canonical_scale * render_scale;
-        prev_codepoint = cp;
+        cursor_x += advance;
     }
 }
 
@@ -656,12 +641,12 @@ pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32,
             continue;
         }
 
-        const slot_idx = self.getOrCreateGlyph(gctx, cp) orelse {
+        // 先获取字形 advance 做换行检测
+        const slot_idx = (self.getOrCreateGlyph(gctx, cp) orelse {
             cursor_x += 10.0 * render_scale;
             prev_codepoint = cp;
             continue;
-        };
-
+        });
         const slot = self.glyph_slots[@as(usize, @intCast(slot_idx))] orelse unreachable;
         const advance = @as(f32, @floatFromInt(slot.advance)) * self.canonical_scale * render_scale;
 
@@ -671,7 +656,7 @@ pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32,
             prev_codepoint = 0;
         }
 
-        self.emitGlyph(cp, slot_idx, &slot, render_scale, color, &cursor_x, &prev_codepoint, cursor_y);
+        _ = self.emitGlyph(gctx, cp, render_scale, color, &cursor_x, &prev_codepoint, cursor_y);
         cursor_x += advance;
         prev_codepoint = cp;
     }
