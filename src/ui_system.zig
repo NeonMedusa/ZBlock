@@ -491,8 +491,8 @@ fn emitGlyph(self: *UiSystem, cp: u21, slot_idx: u32, slot: *const GlyphSlot, re
 // 绘制文本
 pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, font_size: f32, color: [4]f32) void {
     // y 是文字顶部坐标，内部转基线
-    const baseline_y = y + font_size * 0.78;
     const render_scale = font_size / SDF_SCALE_HEIGHT;
+    const baseline_y = y + @as(f32, @floatFromInt(self.ascent)) * self.canonical_scale * render_scale;
 
     var cursor_x: f32 = x;
     var prev_codepoint: u21 = 0;
@@ -522,8 +522,8 @@ pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, 
 
 // 自动换行文本框
 pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32, text: []const u8, font_size: f32, color: [4]f32) void {
-    const baseline_y = y + font_size * 0.78;
     const render_scale = font_size / SDF_SCALE_HEIGHT;
+    const baseline_y = y + @as(f32, @floatFromInt(self.ascent)) * self.canonical_scale * render_scale;
     const line_height = font_size * 1.4;
 
     var cursor_x: f32 = x;

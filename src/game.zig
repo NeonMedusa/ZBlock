@@ -22,9 +22,8 @@ accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
 sprint_toggled: bool = false, // 冲刺开关，渲染层触发，tick 层读取
 keybinds: Keybinds,
 save_initialized: bool = false, // 延迟初始化：选存档后才加载游戏
-show_save_menu: bool = false, // 由主菜单"开始"按钮触发
 game_cleaned: bool = false, // returnToMenu 已清理 gameplay 资源，阻止 deinit 重复释放
-return_to_main_menu: bool = false, // 由 pause_menu/save_menu 触发，主循环检测后显示主菜单
+menu_state: MenuState = .MainMenu,
 
 // 开始游戏
 pub fn start(self: *Game) !void {
@@ -40,26 +39,19 @@ pub fn start(self: *Game) !void {
         self.icon_atlas.reset();
         self.ui_system.beginFrame();
 
-        if (save_menu.visible) {
-            save_menu.update(self);
-        } else if (self.show_save_menu) {
-            save_menu.refresh(self.allocator);
-            save_menu.visible = true;
-            main_menu.visible = false;
-            self.show_save_menu = false;
-        } else if (self.save_initialized) {
-            if (pause_menu.visible) {
-                pause_menu.update(self);
-            } else if (self.keybinds.isJustPressed(&self.input, .pause_menu)) {
-                pause_menu.visible = true;
-            }
-        } else {
-            main_menu.update(self);
-        }
-
-        if (self.return_to_main_menu) {
-            main_menu.visible = true;
-            self.return_to_main_menu = false;
+        switch (self.menu_state) {
+            .MainMenu => {
+                const prev = self.menu_state;
+                main_menu.update(self);
+                if (self.menu_state != prev and self.menu_state == .SaveSelect)
+                    save_menu.refresh(self.allocator);
+            },
+            .SaveSelect => save_menu.update(self),
+            .Gameplay => {
+                if (self.keybinds.isJustPressed(&self.input, .pause_menu))
+                    self.menu_state = .Pause;
+            },
+            .Pause => pause_menu.update(self),
         }
 
         // 游戏初始化后才运行物理和渲染
@@ -78,7 +70,7 @@ pub fn start(self: *Game) !void {
 
             while (self.accumulator >= TICK_DT) {
                 self.accumulator -= TICK_DT;
-                if (!pause_menu.visible) {
+                if (self.menu_state != .Pause) {
                     produceMoveIntent(self);
                     self.block_world.updatePhysics(&self.registry, TICK_DT);
                     {
@@ -98,7 +90,7 @@ pub fn start(self: *Game) !void {
                 }
             }
 
-            if (!pause_menu.visible) {
+            if (self.menu_state != .Pause) {
                 handleFlightToggle(self);
                 if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
                     self.sprint_toggled = !self.sprint_toggled;
@@ -112,7 +104,7 @@ pub fn start(self: *Game) !void {
             }
         }
 
-        if (self.save_initialized and !pause_menu.visible) {
+        if (self.save_initialized and self.menu_state != .Pause) {
             self.handleHotbarInput();
             self.ui_system.drawHotbar(&self.hotbar, &self.icon_atlas);
         }
@@ -231,6 +223,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 按键绑定（加载配置文件，不存在则使用默认值）
     self.keybinds = try Keybinds.load(allocator, "config/keybinds.json");
+    self.menu_state = .MainMenu;
 
     // 图标缓存 + 图标管线（传入 uniform 缓冲）
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
@@ -317,8 +310,6 @@ pub fn returnToMenu(self: *Game) void {
     self.save_initialized = false;
     self.player_id = 0;
     self.flying = false;
-    // 通知主循环恢复主菜单
-    self.return_to_main_menu = true;
 }
 
 fn produceMoveIntent(self: *Game) void {
@@ -719,6 +710,13 @@ fn updateChunks(self: *Game) !void {
 }
 
 const Game = @This();
+
+pub const MenuState = enum {
+    MainMenu,
+    SaveSelect,
+    Gameplay,
+    Pause,
+};
 
 const std = @import("std");
 const Imports = @import("imports.zig");

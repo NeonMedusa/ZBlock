@@ -5,7 +5,6 @@ const UiSystem = @import("../ui_system.zig");
 const SaveManager = @import("../save_manager.zig").SaveManager;
 const SaveEntry = @import("../save_manager.zig").SaveEntry;
 
-visible: bool = false,
 scroll: u32 = 0,
 entries: []SaveEntry = &.{},
 
@@ -22,8 +21,6 @@ pub fn refresh(self: *@This(), allocator: std.mem.Allocator) void {
 }
 
 pub fn update(self: *@This(), game: *Game) void {
-    if (!self.visible) return;
-
     const win_w = game.window.width;
     const win_h = game.window.height;
     const col_w: f32 = 400;
@@ -33,8 +30,7 @@ pub fn update(self: *@This(), game: *Game) void {
     const list_top: f32 = 100;
 
     if (game.keybinds.isJustPressed(&game.input, .pause_menu)) {
-        game.return_to_main_menu = true;
-        self.visible = false;
+        game.menu_state = .MainMenu;
         return;
     }
 
@@ -67,7 +63,7 @@ pub fn update(self: *@This(), game: *Game) void {
 
         if (clicked) {
             game.startSave(entry.name) catch {};
-            self.visible = false;
+            game.menu_state = .Gameplay;
             return;
         }
     }
@@ -79,8 +75,7 @@ pub fn update(self: *@This(), game: *Game) void {
     const right_btn_x = col_x + col_w - btn_w - 10;
 
     if (game.ui_system.textButton(left_btn_x, btn_y, btn_w, btn_h, "← 返回", 18)) {
-        game.return_to_main_menu = true;
-        self.visible = false;
+        game.menu_state = .MainMenu;
         return;
     }
 
@@ -88,6 +83,6 @@ pub fn update(self: *@This(), game: *Game) void {
         const name = SaveManager.autoName(game.allocator) catch return;
         defer game.allocator.free(name);
         game.startSave(name) catch {};
-        self.visible = false;
+        game.menu_state = .Gameplay;
     }
 }

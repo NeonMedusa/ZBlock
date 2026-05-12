@@ -1,13 +1,9 @@
 // pause_menu.zig — 游戏内暂停菜单
 const Game = @import("../game.zig");
 
-visible: bool = false,
-
-pub fn update(self: *@This(), game: *Game) void {
-    if (!self.visible) return;
-
+pub fn update(_: *@This(), game: *Game) void {
     if (game.keybinds.isJustPressed(&game.input, .pause_menu)) {
-        self.visible = false;
+        game.menu_state = .Gameplay;
         return;
     }
 
@@ -24,11 +20,11 @@ pub fn update(self: *@This(), game: *Game) void {
     const btn_y2 = win_h / 2 + 10;
 
     if (game.ui_system.textButton(btn_x, btn_y1, btn_w, btn_h, "继续游戏", 22)) {
-        self.visible = false;
+        game.menu_state = .Gameplay;
     }
 
     if (game.ui_system.textButton(btn_x, btn_y2, btn_w, btn_h, "返回主菜单", 22)) {
         game.returnToMenu();
-        self.visible = false;
+        game.menu_state = .MainMenu;
     }
 }
