@@ -13,6 +13,7 @@ const Vec3i = @import("algebra.zig").Vec3i;
 const ECS = @import("zigecs");
 const Comps = @import("components.zig").Components;
 const Hotbar = @import("inventory.zig").Hotbar;
+const PlayerInventory = @import("inventory.zig").PlayerInventory;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 
 pub const REGION_SIZE: i32 = 32; // 每个 region 包含 32×32 区块
@@ -77,6 +78,13 @@ const HotbarRow = struct {
     count: u32,
 };
 
+const InventoryRow = struct {
+    id: ?i64 = null,
+    slot: u32,
+    block_id: u32,
+    count: u32,
+};
+
 const EntityRow = struct {
     id: ?i64 = null,
     type_id: []const u8,
@@ -128,6 +136,10 @@ pub const SaveManager = struct {
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
             \\  block_id INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 1
             \\);
+            \\CREATE TABLE IF NOT EXISTS "InventoryRow" (
+            \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
+            \\  block_id INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 1
+            \\);
             \\CREATE TABLE IF NOT EXISTS "EntityRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, type_id TEXT NOT NULL,
             \\  pos_x REAL NOT NULL, pos_y REAL NOT NULL, pos_z REAL NOT NULL,
@@ -155,7 +167,7 @@ pub const SaveManager = struct {
 
     // ── 玩家 ──
 
-    pub fn savePlayer(self: *SaveManager, hotbar: *const Hotbar, registry: *ECS.Registry) !void {
+    pub fn savePlayer(self: *SaveManager, hotbar: *const Hotbar, inventory: *const PlayerInventory, registry: *ECS.Registry) !void {
         // 清空旧的 Hotbar
         {
             var stmt = try self.world_db.conn.prepare("DELETE FROM HotbarRow", &.{});
@@ -166,6 +178,22 @@ pub const SaveManager = struct {
         for (&hotbar.slots, 0..) |*item, i| {
             if (@intFromEnum(item.block_id) == 0) continue;
             var ins = try self.world_db.conn.prepare("INSERT INTO HotbarRow (slot, block_id, count) VALUES (?, ?, ?)", &.{});
+            defer ins.deinit();
+            try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
+            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(@intFromEnum(item.block_id))) });
+            try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
+            try ins.exec();
+        }
+
+        // 写入背包
+        {
+            var del = try self.world_db.conn.prepare("DELETE FROM InventoryRow", &.{});
+            defer del.deinit();
+            try del.exec();
+        }
+        for (&inventory.slots, 0..) |*item, i| {
+            if (@intFromEnum(item.block_id) == 0) continue;
+            var ins = try self.world_db.conn.prepare("INSERT INTO InventoryRow (slot, block_id, count) VALUES (?, ?, ?)", &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
             try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(@intFromEnum(item.block_id))) });
@@ -200,7 +228,7 @@ pub const SaveManager = struct {
         }
     }
 
-    pub fn loadPlayer(self: *SaveManager, hotbar: *Hotbar, registry: *ECS.Registry) !void {
+    pub fn loadPlayer(self: *SaveManager, hotbar: *Hotbar, inventory: *PlayerInventory, registry: *ECS.Registry) !void {
         // WorldInfo — 恢复位置、血量、飞行、物理状态
         const rows = try self.world_db.query(WorldRow).findAll();
         if (rows.len > 0) {
@@ -225,6 +253,19 @@ pub const SaveManager = struct {
             for (slots) |s| {
                 if (s.slot < 9) {
                     hotbar.slots[@as(usize, @intCast(s.slot))] = .{
+                        .block_id = BlockId.fromInt(s.block_id),
+                        .count = s.count,
+                    };
+                }
+            }
+        }
+
+        // 背包
+        {
+            const slots = try self.world_db.query(InventoryRow).findAll();
+            for (slots) |s| {
+                if (s.slot < 27) {
+                    inventory.slots[@as(usize, @intCast(s.slot))] = .{
                         .block_id = BlockId.fromInt(s.block_id),
                         .count = s.count,
                     };

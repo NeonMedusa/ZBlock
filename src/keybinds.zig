@@ -12,6 +12,7 @@ pub const Action = enum {
     sprint_toggle, sneak, swim_down,
     // UI
     pause_menu,
+    toggle_inventory,
     // 鼠标
     break_block, place_block, pick_block,
     // 物品栏
@@ -45,6 +46,7 @@ fn default(action: Action) Binding {
         .sneak => .{ .key = .left_control },
         .swim_down => .{ .key = .left_control },
         .pause_menu => .{ .key = .escape },
+        .toggle_inventory => .{ .key = .b },
         .break_block => .{ .mouse = .mouse_left },
         .place_block => .{ .mouse = .mouse_right },
         .pick_block => .{ .mouse = .mouse_middle },

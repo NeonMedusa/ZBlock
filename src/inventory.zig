@@ -8,6 +8,11 @@ pub const ItemStack = struct {
     count: u32 = 0,
 };
 
+/// 27 格背包（3 行 × 9 列）
+pub const PlayerInventory = struct {
+    slots: [27]ItemStack = .{ItemStack{}} ** 27,
+};
+
 /// 9 格物品栏
 pub const Hotbar = struct {
     slots: [9]ItemStack = .{

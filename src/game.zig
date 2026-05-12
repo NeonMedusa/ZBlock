@@ -12,6 +12,8 @@ camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
 hotbar: Hotbar,
+inventory: PlayerInventory = .{},
+selected_item: ?SelectedItem = null,
 save_manager: SaveManager,
 icon_atlas: IconAtlas,
 block_world: BlockWorld.BlockWorld,
@@ -50,6 +52,15 @@ pub fn start(self: *Game) !void {
             .Gameplay => {
                 if (self.keybinds.isJustPressed(&self.input, .pause_menu))
                     self.menu_state = .Pause;
+                if (self.keybinds.isJustPressed(&self.input, .toggle_inventory))
+                    self.menu_state = .Inventory;
+            },
+            .Inventory => {
+                if (self.keybinds.isJustPressed(&self.input, .pause_menu) or self.keybinds.isJustPressed(&self.input, .toggle_inventory)) {
+                    self.selected_item = null;
+                    self.menu_state = .Gameplay;
+                }
+                @import("ui/inventory_screen.zig").update(self);
             },
             .Pause => pause_menu.update(self),
         }
@@ -90,7 +101,7 @@ pub fn start(self: *Game) !void {
                 }
             }
 
-            if (self.menu_state != .Pause) {
+            if (self.menu_state == .Gameplay) {
                 handleFlightToggle(self);
                 if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
                     self.sprint_toggled = !self.sprint_toggled;
@@ -104,9 +115,15 @@ pub fn start(self: *Game) !void {
             }
         }
 
-        if (self.save_initialized and self.menu_state != .Pause) {
+        if (self.save_initialized and (self.menu_state == .Gameplay or self.menu_state == .Inventory)) {
             self.handleHotbarInput();
             self.ui_system.drawHotbar(&self.hotbar, &self.icon_atlas);
+        }
+        if (self.selected_item) |sel| {
+            const pos = self.input.getCursorPos();
+            if (self.icon_atlas.getOrLoad(@intFromEnum(sel.item.block_id))) |slot_i| {
+                self.icon_atlas.addQuad(IconAtlas.slotUV(slot_i), pos.x - 16, pos.y - 16, 32);
+            }
         }
         try self.ui_system.endFrame(&self.gctx);
         if (self.save_initialized) {
@@ -154,7 +171,7 @@ fn initGame(self: *Game) !void {
         }
     }
 
-    self.save_manager.loadPlayer(&self.hotbar, &self.registry) catch {};
+    self.save_manager.loadPlayer(&self.hotbar, &self.inventory, &self.registry) catch {};
 
     var view = self.registry.view(.{ Comps.Player, Comps.Flying }, .{});
     var iter = view.entityIterator();
@@ -217,6 +234,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 物品栏
     self.hotbar = .{};
+    self.inventory = .{};
+    self.selected_item = null;
 
     // 存档系统（默认 world_1，玩家可在菜单切换）
     self.save_manager = try SaveManager.init(allocator, "world_1");
@@ -254,7 +273,7 @@ pub fn deinit(self: *@This()) void {
 
     if (!self.game_cleaned) {
         // 退出前保存
-        self.save_manager.savePlayer(&self.hotbar, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+        self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
         self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
         self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
         // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
@@ -290,7 +309,7 @@ pub fn startSave(self: *Game, name: []const u8) !void {
 /// 返回主菜单（由暂停菜单调用）
 pub fn returnToMenu(self: *Game) void {
     // 保存当前游戏状态
-    self.save_manager.savePlayer(&self.hotbar, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+    self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
     self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
     self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
     // 清理 AI 实体的寻路状态和路径内存
@@ -716,6 +735,15 @@ pub const MenuState = enum {
     SaveSelect,
     Gameplay,
     Pause,
+    Inventory,
+};
+
+pub const SlotSource = enum { hotbar, inventory };
+
+pub const SelectedItem = struct {
+    source: SlotSource,
+    slot_idx: usize,
+    item: ItemStack,
 };
 
 const std = @import("std");
@@ -760,6 +788,8 @@ const BlockRegistry = @import("block_registry.zig");
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
+const PlayerInventory = @import("inventory.zig").PlayerInventory;
+const ItemStack = @import("inventory.zig").ItemStack;
 const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 const SaveManager = @import("save_manager.zig").SaveManager;
 const Keybinds = @import("keybinds.zig").Keybinds;
