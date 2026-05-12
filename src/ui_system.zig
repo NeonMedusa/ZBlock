@@ -451,6 +451,43 @@ pub fn measureText(self: *UiSystem, gctx: *Gctx, text: []const u8, font_size: f3
     return pw - (@as(f32, @floatFromInt(slot.advance)) * scale - visual_width);
 }
 
+// 内核：渲染单个字形（kerning + 顶点/索引写入），不推进 cursor_x
+fn emitGlyph(self: *UiSystem, cp: u21, slot_idx: u32, slot: *const GlyphSlot, render_scale: f32, color: [4]f32, cursor_x: *f32, prev_codepoint: *u21, line_y: f32) void {
+    if (prev_codepoint.* != 0) {
+        const kern = Stb.stbtt_GetCodepointKernAdvance(
+            &self.font_info,
+            @as(c_int, @intCast(prev_codepoint.*)),
+            @as(c_int, @intCast(cp)),
+        );
+        cursor_x.* += @as(f32, @floatFromInt(kern)) * self.canonical_scale * render_scale;
+    }
+
+    const glyph_x = cursor_x.* + @as(f32, @floatFromInt(slot.lsb)) * self.canonical_scale * render_scale;
+    const glyph_y = line_y + @as(f32, @floatFromInt(slot.sdf_yoff)) * render_scale;
+    const glyph_w = @as(f32, @floatFromInt(slot.sdf_width)) * render_scale;
+    const glyph_h = @as(f32, @floatFromInt(slot.sdf_height)) * render_scale;
+
+    if (self.vertex_count + 4 <= self.max_vertices and self.index_count + 6 <= self.max_indices) {
+        const base_vertex = @as(u32, @intCast(self.vertex_count));
+        const uvs = glyphUVs(slot_idx, slot.*);
+
+        self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ glyph_x, glyph_y, 0 }, .color = color, .texcoord = uvs[0] };
+        self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y, 0 }, .color = color, .texcoord = uvs[1] };
+        self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[2] };
+        self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ glyph_x, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[3] };
+
+        self.frame_indices[self.index_count] = base_vertex + 0;
+        self.frame_indices[self.index_count + 1] = base_vertex + 1;
+        self.frame_indices[self.index_count + 2] = base_vertex + 2;
+        self.frame_indices[self.index_count + 3] = base_vertex + 0;
+        self.frame_indices[self.index_count + 4] = base_vertex + 2;
+        self.frame_indices[self.index_count + 5] = base_vertex + 3;
+
+        self.vertex_count += 4;
+        self.index_count += 6;
+    }
+}
+
 // 绘制文本
 pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, font_size: f32, color: [4]f32) void {
     // y 是文字顶部坐标，内部转基线
@@ -477,41 +514,7 @@ pub fn drawText(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, 
         };
 
         const slot = self.glyph_slots[@as(usize, @intCast(slot_idx))] orelse unreachable;
-
-        if (prev_codepoint != 0) {
-            const kern = Stb.stbtt_GetCodepointKernAdvance(
-                &self.font_info,
-                @as(c_int, @intCast(prev_codepoint)),
-                @as(c_int, @intCast(cp)),
-            );
-            cursor_x += @as(f32, @floatFromInt(kern)) * self.canonical_scale * render_scale;
-        }
-
-        const glyph_x = cursor_x + @as(f32, @floatFromInt(slot.lsb)) * self.canonical_scale * render_scale;
-        const glyph_y = baseline_y + @as(f32, @floatFromInt(slot.sdf_yoff)) * render_scale;
-        const glyph_w = @as(f32, @floatFromInt(slot.sdf_width)) * render_scale;
-        const glyph_h = @as(f32, @floatFromInt(slot.sdf_height)) * render_scale;
-
-        if (self.vertex_count + 4 <= self.max_vertices and self.index_count + 6 <= self.max_indices) {
-            const base_vertex = @as(u32, @intCast(self.vertex_count));
-            const uvs = glyphUVs(slot_idx, slot);
-
-            self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ glyph_x, glyph_y, 0 }, .color = color, .texcoord = uvs[0] };
-            self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y, 0 }, .color = color, .texcoord = uvs[1] };
-            self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[2] };
-            self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ glyph_x, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[3] };
-
-            self.frame_indices[self.index_count] = base_vertex + 0;
-            self.frame_indices[self.index_count + 1] = base_vertex + 1;
-            self.frame_indices[self.index_count + 2] = base_vertex + 2;
-            self.frame_indices[self.index_count + 3] = base_vertex + 0;
-            self.frame_indices[self.index_count + 4] = base_vertex + 2;
-            self.frame_indices[self.index_count + 5] = base_vertex + 3;
-
-            self.vertex_count += 4;
-            self.index_count += 6;
-        }
-
+        self.emitGlyph(cp, slot_idx, &slot, render_scale, color, &cursor_x, &prev_codepoint, baseline_y);
         cursor_x += @as(f32, @floatFromInt(slot.advance)) * self.canonical_scale * render_scale;
         prev_codepoint = cp;
     }
@@ -553,40 +556,7 @@ pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32,
             prev_codepoint = 0;
         }
 
-        if (prev_codepoint != 0) {
-            const kern = Stb.stbtt_GetCodepointKernAdvance(
-                &self.font_info,
-                @as(c_int, @intCast(prev_codepoint)),
-                @as(c_int, @intCast(cp)),
-            );
-            cursor_x += @as(f32, @floatFromInt(kern)) * self.canonical_scale * render_scale;
-        }
-
-        const glyph_x = cursor_x + @as(f32, @floatFromInt(slot.lsb)) * self.canonical_scale * render_scale;
-        const glyph_y = cursor_y + @as(f32, @floatFromInt(slot.sdf_yoff)) * render_scale;
-        const glyph_w = @as(f32, @floatFromInt(slot.sdf_width)) * render_scale;
-        const glyph_h = @as(f32, @floatFromInt(slot.sdf_height)) * render_scale;
-
-        if (self.vertex_count + 4 <= self.max_vertices and self.index_count + 6 <= self.max_indices) {
-            const base_vertex = @as(u32, @intCast(self.vertex_count));
-            const uvs = glyphUVs(slot_idx, slot);
-
-            self.frame_vertices[self.vertex_count] = .{ .pos = [3]f32{ glyph_x, glyph_y, 0 }, .color = color, .texcoord = uvs[0] };
-            self.frame_vertices[self.vertex_count + 1] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y, 0 }, .color = color, .texcoord = uvs[1] };
-            self.frame_vertices[self.vertex_count + 2] = .{ .pos = [3]f32{ glyph_x + glyph_w, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[2] };
-            self.frame_vertices[self.vertex_count + 3] = .{ .pos = [3]f32{ glyph_x, glyph_y + glyph_h, 0 }, .color = color, .texcoord = uvs[3] };
-
-            self.frame_indices[self.index_count] = base_vertex + 0;
-            self.frame_indices[self.index_count + 1] = base_vertex + 1;
-            self.frame_indices[self.index_count + 2] = base_vertex + 2;
-            self.frame_indices[self.index_count + 3] = base_vertex + 0;
-            self.frame_indices[self.index_count + 4] = base_vertex + 2;
-            self.frame_indices[self.index_count + 5] = base_vertex + 3;
-
-            self.vertex_count += 4;
-            self.index_count += 6;
-        }
-
+        self.emitGlyph(cp, slot_idx, &slot, render_scale, color, &cursor_x, &prev_codepoint, cursor_y);
         cursor_x += advance;
         prev_codepoint = cp;
     }
