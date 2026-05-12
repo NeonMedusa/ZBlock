@@ -97,7 +97,7 @@ pub fn textButton(self: *UiSystem, x: f32, y: f32, w: f32, h: f32, label: []cons
     const hit = self.buttonHover(x, y, w, h);
     const clicked = hit and self.game_ptr.input.isMouseJustPressed(.mouse_left);
     self.drawButton(x, y, w, h, hit, false);
-    const txt_w = self.measureText(label, font_size);
+    const txt_w = self.measureText(&self.game_ptr.gctx, label, font_size);
     self.drawText(&self.game_ptr.gctx, x + self.centerX(w, txt_w), y + self.centerX(h, font_size), label, font_size, .{ 1, 1, 1, 1 });
     return clicked;
 }
@@ -424,7 +424,7 @@ fn glyphUVs(slot_idx: u32, slot: GlyphSlot) [4][2]f32 {
 }
 
 /// 精确计算文字的像素宽度（使用 stb 字形度量）
-pub fn measureText(self: *UiSystem, text: []const u8, font_size: f32) f32 {
+pub fn measureText(self: *UiSystem, gctx: *Gctx, text: []const u8, font_size: f32) f32 {
     const scale = self.canonical_scale * (font_size / SDF_SCALE_HEIGHT);
     var pw: f32 = 0;
     var prev: u21 = 0;
@@ -443,20 +443,12 @@ pub fn measureText(self: *UiSystem, text: []const u8, font_size: f32) f32 {
         prev = cp;
         last_cp = cp;
     }
-    // 将最后一个字形的 advance 替换为视觉宽度（advance 含右侧空白）
     if (last_cp == 0) return pw;
-    var adv_last: c_int = undefined;
-    var lsb_last: c_int = undefined;
-    Stb.stbtt_GetCodepointHMetrics(&self.font_info, @intCast(last_cp), &adv_last, &lsb_last);
-    var sdf_w: c_int = undefined;
-    var sdf_h: c_int = undefined;
-    var sdf_xoff: c_int = undefined;
-    var sdf_yoff: c_int = undefined;
-    const sdf = Stb.stbtt_GetCodepointSDF(&self.font_info, self.canonical_scale, @intCast(last_cp), SDF_PADDING, SDF_ONEDGE, SDF_PIXEL_DIST_SCALE, &sdf_w, &sdf_h, &sdf_xoff, &sdf_yoff);
-    if (sdf) |ptr| Stb.stbtt_FreeBitmap(ptr, null);
+    const slot_idx = self.getOrCreateGlyph(gctx, last_cp) orelse return pw;
+    const slot = self.glyph_slots[@as(usize, @intCast(slot_idx))] orelse return pw;
     const render_scale = font_size / SDF_SCALE_HEIGHT;
-    const visual_width = (@as(f32, @floatFromInt(lsb_last)) * self.canonical_scale + @as(f32, @floatFromInt(sdf_w))) * render_scale;
-    return pw - (@as(f32, @floatFromInt(adv_last)) * scale - visual_width);
+    const visual_width = (@as(f32, @floatFromInt(slot.lsb)) * self.canonical_scale + @as(f32, @floatFromInt(slot.sdf_width))) * render_scale;
+    return pw - (@as(f32, @floatFromInt(slot.advance)) * scale - visual_width);
 }
 
 // 绘制文本
