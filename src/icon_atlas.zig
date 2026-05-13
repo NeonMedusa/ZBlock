@@ -41,7 +41,7 @@ pub const IconPipeline = struct {
         \\    var o: VOut; o.pos = u * vec4f(in.pos, 0.0, 1.0); o.uv = in.uv; return o;
         \\}
         \\@fragment fn fs(in: VOut) -> @location(0) vec4f {
-        \\    return textureSample(t, s, in.uv);
+        \\    return pow(textureSample(t, s, in.uv), vec4f(2.2));
         \\}
     ;
 
