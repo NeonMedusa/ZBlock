@@ -270,8 +270,8 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
         .addressModeU = Wgpu.WGPUAddressMode_ClampToEdge,
         .addressModeV = Wgpu.WGPUAddressMode_ClampToEdge,
         .addressModeW = Wgpu.WGPUAddressMode_ClampToEdge,
-        .magFilter = Wgpu.WGPUFilterMode_Linear,
-        .minFilter = Wgpu.WGPUFilterMode_Linear,
+        .magFilter = Wgpu.WGPUFilterMode_Nearest,
+        .minFilter = Wgpu.WGPUFilterMode_Nearest,
         .mipmapFilter = Wgpu.WGPUMipmapFilterMode_Nearest,
         .lodMinClamp = 0.0,
         .lodMaxClamp = 32.0,
@@ -724,10 +724,12 @@ pub fn drawHotbarBg(self: *UiSystem, hotbar: *const Hotbar) void {
     const total = 9 * slot + 8 * gap;
     const start_x = (window.width - total) / 2;
     const y = window.height - 60;
+    const mouse = self.game_ptr.input.getCursorPos();
 
     for (&hotbar.slots, 0..) |_, i| {
         const x = start_x + @as(f32, @floatFromInt(i)) * (slot + gap);
-        self.drawSlotBg(x, y, slot, i == hotbar.selected, false);
+        const hover = mouse.x >= x and mouse.x <= x + slot and mouse.y >= y and mouse.y <= y + slot;
+        self.drawSlotBg(x, y, slot, i == hotbar.selected, hover);
     }
 }
 
