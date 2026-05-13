@@ -153,20 +153,33 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         }
     }
 
-    // UI渲染
-    Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.ui_system.render_pipeline.handle);
-    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.ui_system.render_pipeline.bind_group, 0, null);
-    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.ui_system.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.ui_system.vertex_buffer));
-    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, game.ui_system.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(game.ui_system.index_buffer));
-    Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @as(u32, @intCast(game.ui_system.index_count)), 1, 0, 0, 0);
+    // 下层 UI（槽位背景等）
+    if (game.ui_system.bg_index_count > 0) {
+        const ui = &game.ui_system;
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, ui.render_pipeline.handle);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, ui.render_pipeline.bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, ui.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(ui.vertex_buffer));
+        Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, ui.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(ui.index_buffer));
+        Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @as(u32, @intCast(ui.bg_index_count)), 1, 0, 0, 0);
+    }
 
-    // 图标纹理渲染（独立管线，非索引）
+    // 图标纹理渲染（中间层）
     if (game.icon_atlas.vertex_count > 0) {
         game.icon_atlas.upload(game.gctx.queue);
         Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.icon_atlas.pipeline.handle);
         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.icon_atlas.pipeline.bind_group, 0, null);
         Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, game.icon_atlas.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(game.icon_atlas.vertex_buffer));
         Wgpu.wgpuRenderPassEncoderDraw(pass, @as(u32, @intCast(game.icon_atlas.vertex_count)), 1, 0, 0);
+    }
+
+    // 上层 UI（文字、前景等）
+    if (game.ui_system.index_count > game.ui_system.bg_index_count) {
+        const ui = &game.ui_system;
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, ui.render_pipeline.handle);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, ui.render_pipeline.bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, ui.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(ui.vertex_buffer));
+        Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, ui.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(ui.index_buffer));
+        Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, @as(u32, @intCast(ui.index_count - ui.bg_index_count)), 1, @as(u32, @intCast(ui.bg_index_count)), 0, 0);
     }
 
     Wgpu.wgpuRenderPassEncoderEnd(pass);

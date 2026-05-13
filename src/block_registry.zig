@@ -2,6 +2,14 @@
 const std = @import("std");
 const Direction = @import("direction.zig").Direction;
 
+/// 掉落物配置（原始值 u32 避免编译期循环依赖 item_registry）
+pub const ItemDropVal = struct {
+    item_id: u32,
+    min_count: u32 = 1,
+    max_count: u32 = 1,
+    probability: f32 = 1.0,
+};
+
 /// 方块原型
 pub const BlockProtoType = struct {
     name: [:0]const u8,
@@ -13,6 +21,7 @@ pub const BlockProtoType = struct {
     fluid_resistance: f32 = 0.0,
     durability: u32 = 32,
     is_directional: bool = true,
+    drops: []const ItemDropVal = &.{},
 };
 
 /// 方块注册表

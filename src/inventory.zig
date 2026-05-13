@@ -1,10 +1,8 @@
 // inventory.zig — 物品数据模型与物品栏
-const BlockRegistry = @import("block_registry.zig");
-const BlockId = BlockRegistry.BlockId;
 
-/// 一组物品（方块 + 数量，未来可扩展耐久、NBT 等）
+/// 一组物品（ID + 数量），item_id = 0 表示空气/空
 pub const ItemStack = struct {
-    block_id: BlockId = BlockId.fromName("air"),
+    item_id: u32 = 0,
     count: u32 = 0,
 };
 
@@ -13,22 +11,18 @@ pub const PlayerInventory = struct {
     slots: [27]ItemStack = .{ItemStack{}} ** 27,
 };
 
-/// 9 格物品栏
+/// 9 格物品栏（ID 值：0=air, 1=grass, 2=stone, 3=dirt, 4=sand, 5=water, 6=snow, 7=foo）
 pub const Hotbar = struct {
     slots: [9]ItemStack = .{
-        ItemStack{ .block_id = .fromName("grass"), .count = 1 },
-        ItemStack{ .block_id = .fromName("stone"), .count = 1 },
-        ItemStack{ .block_id = .fromName("dirt"), .count = 1 },
-        ItemStack{ .block_id = .fromName("sand"), .count = 1 },
-        ItemStack{ .block_id = .fromName("water"), .count = 1 },
-        ItemStack{ .block_id = .fromName("snow"), .count = 1 },
-        ItemStack{ .block_id = .fromName("foo"), .count = 1 },
-        ItemStack{ .block_id = .fromName("air"), .count = 0 },
-        ItemStack{ .block_id = .fromName("air"), .count = 0 },
+        ItemStack{ .item_id = 1, .count = 1 },
+        ItemStack{ .item_id = 2, .count = 1 },
+        ItemStack{ .item_id = 3, .count = 1 },
+        ItemStack{ .item_id = 4, .count = 1 },
+        ItemStack{ .item_id = 5, .count = 1 },
+        ItemStack{ .item_id = 6, .count = 1 },
+        ItemStack{ .item_id = 7, .count = 1 },
+        ItemStack{ .item_id = 0, .count = 0 },
+        ItemStack{ .item_id = 0, .count = 0 },
     },
     selected: u32 = 0, // 0-8
-
-    pub fn selectedBlock(self: *const Hotbar) BlockId {
-        return self.slots[self.selected].block_id;
-    }
 };

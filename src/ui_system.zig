@@ -88,6 +88,8 @@ frame_indices: []u32,
 // 追踪实际使用的数量
 vertex_count: usize,
 index_count: usize,
+// 分层计数器：bg_index_count 之前的索引为下层（背景），之后为上层（文字/前景）
+bg_index_count: usize = 0,
 // 顶点/索引缓冲区，每帧更新
 vertex_buffer: Wgpu.WGPUBuffer,
 index_buffer: Wgpu.WGPUBuffer,
@@ -185,6 +187,11 @@ pub fn spacing(self: *UiSystem, h: f32) void {
     self.cursor_x = self.cursor_col_x;
     self.row_top_y = self.cursor_y;
     self.row_bottom_y = self.cursor_y;
+}
+
+/// 标记分层点：累计所有下层（背景）的索引，取最大值确保不被覆盖
+pub fn splitLayer(self: *@This()) void {
+    self.bg_index_count = @max(self.bg_index_count, self.index_count);
 }
 
 // 析构函数
@@ -324,6 +331,7 @@ pub fn beginFrame(self: *@This()) void {
     self.row_bottom_y = 0;
     self.cursor_col_x = 0;
     self.next_same_line = false;
+    self.bg_index_count = 0;
 }
 
 // 每帧结束时更新 GPU 缓冲区（含缩容检测）
@@ -662,45 +670,76 @@ pub fn drawTextBox(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, max_width: f32,
     }
 }
 
+/// 全屏半透明遮罩
+pub fn drawOverlay(self: *UiSystem, alpha: f32) void {
+    const window = self.game_ptr.window;
+    self.drawRect(0, 0, window.width, window.height, .{ 0, 0, 0, alpha });
+}
+
+/// 槽位背景 + 选中边框（下层 UI）
+pub fn drawSlotBg(self: *UiSystem, x: f32, y: f32, size: f32, selected: bool, hovered: bool) void {
+    const bg: [4]f32 = if (selected) .{ 0.35, 0.35, 0.35, 0.9 } else if (hovered) .{ 0.4, 0.4, 0.4, 0.9 } else .{ 0.2, 0.2, 0.2, 0.8 };
+    self.drawRect(x, y, size, size, bg);
+    if (selected) {
+        const border: [4]f32 = .{ 1.0, 0.85, 0.2, 1.0 };
+        self.drawRect(x, y, size, 2, border);
+        self.drawRect(x, y + size - 2, size, 2, border);
+        self.drawRect(x, y, 2, size, border);
+        self.drawRect(x + size - 2, y, 2, size, border);
+    } else {
+        const border: [4]f32 = .{ 0.3, 0.3, 0.3, 1.0 };
+        self.drawRect(x, y, size, 1, border);
+        self.drawRect(x, y + size - 1, size, 1, border);
+        self.drawRect(x, y, 1, size, border);
+        self.drawRect(x + size - 1, y, 1, size, border);
+    }
+}
+
+/// 槽位图标 + 数量文字（上层 UI）
+pub fn drawSlotFg(self: *UiSystem, x: f32, y: f32, size: f32, item: ItemStack, icon_atlas: *IconAtlas) void {
+    if (item.item_id != 0) {
+        if (icon_atlas.getOrLoad(item.item_id)) |slot_i| {
+            icon_atlas.addQuad(IconAtlas.slotUV(slot_i), x + 4, y + 4, size - 8);
+        }
+        if (item.count > 1) {
+            var buf: [16]u8 = undefined;
+            const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch return;
+            self.drawText(&self.game_ptr.gctx, x + 4, y + size - 18, count_str, 12, .{ 1, 1, 1, 1 });
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  物品栏渲染
 // ═══════════════════════════════════════════════════════════════
 
-/// 绘制底部物品栏（9 格 + 选中高亮 + 纹理图标 + 数量文字）
-pub fn drawHotbar(self: *UiSystem, hotbar: *const Hotbar, icon_atlas: *IconAtlas) void {
+/// 绘制底部物品栏背景 + 边框（下层 UI，需先于图标和文字调用）
+pub fn drawHotbarBg(self: *UiSystem, hotbar: *const Hotbar) void {
     const window = self.game_ptr.window;
     const slot: f32 = 50;
     const gap: f32 = 4;
     const total = 9 * slot + 8 * gap;
     const start_x = (window.width - total) / 2;
     const y = window.height - 60;
-    const air_id = @intFromEnum(BlockId.fromName("air"));
+
+    for (&hotbar.slots, 0..) |_, i| {
+        const x = start_x + @as(f32, @floatFromInt(i)) * (slot + gap);
+        self.drawSlotBg(x, y, slot, i == hotbar.selected, false);
+    }
+}
+
+/// 绘制底部物品栏图标 + 数量文字（上层 UI，需在 splitLayer 后调用）
+pub fn drawHotbarFg(self: *UiSystem, hotbar: *const Hotbar, icon_atlas: *IconAtlas) void {
+    const window = self.game_ptr.window;
+    const slot: f32 = 50;
+    const gap: f32 = 4;
+    const total = 9 * slot + 8 * gap;
+    const start_x = (window.width - total) / 2;
+    const y = window.height - 60;
 
     for (&hotbar.slots, 0..) |*item, i| {
         const x = start_x + @as(f32, @floatFromInt(i)) * (slot + gap);
-        const sel = i == hotbar.selected;
-
-        const bg: [4]f32 = if (sel) .{ 0.35, 0.35, 0.35, 1.0 } else .{ 0.15, 0.15, 0.15, 0.85 };
-        self.drawRect(x, y, slot, slot, bg);
-
-        if (sel) {
-            const border: [4]f32 = .{ 1.0, 0.85, 0.2, 1.0 };
-            self.drawRect(x, y, slot, 2, border);
-            self.drawRect(x, y + slot - 2, slot, 2, border);
-            self.drawRect(x, y, 2, slot, border);
-            self.drawRect(x + slot - 2, y, 2, slot, border);
-        }
-
-        if (@intFromEnum(item.block_id) != air_id) {
-            const slot_i = icon_atlas.getOrLoad(@intFromEnum(item.block_id)) orelse continue;
-            icon_atlas.addQuad(IconAtlas.slotUV(slot_i), x + 4, y + 4, slot - 8);
-        }
-
-        if (item.count > 1) {
-            var buf: [16]u8 = undefined;
-            const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch continue;
-            self.drawText(&self.game_ptr.gctx, x + slot - 18, y + slot - 24, count_str, 10, .{ 1, 1, 1, 1 });
-        }
+        self.drawSlotFg(x, y, slot, item.*, icon_atlas);
     }
 }
 
@@ -903,5 +942,6 @@ const Mat4 = Algebra.Mat4;
 const Window = Imports.Window;
 const Stb = @import("stb").c;
 const Hotbar = @import("inventory.zig").Hotbar;
+const ItemStack = @import("inventory.zig").ItemStack;
 const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 const BlockId = @import("block_registry.zig").BlockId;

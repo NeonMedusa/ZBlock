@@ -11,8 +11,7 @@ pub fn update(_: *@This(), game: *Game) void {
     const win_h = game.window.height;
     const ui = &game.ui_system;
 
-    // 半透明遮罩
-    ui.drawRect(0, 0, win_w, win_h, .{ 0, 0, 0, 0.5 });
+    ui.drawOverlay(0.5);
 
     ui.cursor_col_x = ui.centerX(win_w, 240);
     ui.cursor_y = win_h / 2 - 56 - 10;

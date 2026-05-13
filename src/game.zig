@@ -61,6 +61,7 @@ pub fn start(self: *Game) !void {
                     self.menu_state = .Gameplay;
                 }
                 @import("ui/inventory_screen.zig").update(self);
+                @import("ui/inventory_screen.zig").drawBg(self);
             },
             .Pause => pause_menu.update(self),
         }
@@ -117,11 +118,19 @@ pub fn start(self: *Game) !void {
 
         if (self.save_initialized and (self.menu_state == .Gameplay or self.menu_state == .Inventory)) {
             self.handleHotbarInput();
-            self.ui_system.drawHotbar(&self.hotbar, &self.icon_atlas);
+            self.ui_system.drawHotbarBg(&self.hotbar);
+        }
+        // 下层（背景）→ 分层 → 上层（图标+文字）
+        self.ui_system.splitLayer();
+        if (self.save_initialized and (self.menu_state == .Gameplay or self.menu_state == .Inventory)) {
+            self.ui_system.drawHotbarFg(&self.hotbar, &self.icon_atlas);
+        }
+        if (self.menu_state == .Inventory) {
+            @import("ui/inventory_screen.zig").drawFg(self);
         }
         if (self.selected_item) |sel| {
             const pos = self.input.getCursorPos();
-            if (self.icon_atlas.getOrLoad(@intFromEnum(sel.item.block_id))) |slot_i| {
+            if (self.icon_atlas.getOrLoad(sel.item.item_id)) |slot_i| {
                 self.icon_atlas.addQuad(IconAtlas.slotUV(slot_i), pos.x - 16, pos.y - 16, 32);
             }
         }
@@ -417,13 +426,20 @@ fn handleHotbarInput(self: *Game) void {
                 @as(f32, @floatFromInt(hit.block_pos.y)) + 0.5,
                 @as(f32, @floatFromInt(hit.block_pos.z)) + 0.5,
             ));
-            const air_id = @intFromEnum(BlockRegistry.BlockId.fromName("air"));
-            if (@intFromEnum(block) != air_id) {
-                self.hotbar.slots[self.hotbar.selected] = .{
-                    .block_id = block,
-                    .count = 1,
-                };
+            const block_id = @intFromEnum(block);
+            if (block_id == 0) return;
+
+            for (&self.hotbar.slots, 0..) |slot, i| {
+                if (slot.item_id == block_id) {
+                    self.hotbar.selected = @as(u32, @intCast(i));
+                    return;
+                }
             }
+
+            self.hotbar.slots[self.hotbar.selected] = .{
+                .item_id = block_id,
+                .count = 1,
+            };
         }
     }
 }
@@ -495,6 +511,14 @@ fn handleLeftClick(self: *Game) !void {
             if (self.registry.tryGet(Comps.Health, entity_hit.entity)) |health| {
                 health.current -= 10;
                 if (health.current <= 0) {
+                    if (self.registry.tryGet(Comps.AIAgent, entity_hit.entity)) |agent| {
+                        const rng = std.crypto.random;
+                        for (agent.type_id.info().drops) |drop| {
+                            if (rng.float(f32) >= drop.probability) continue;
+                            const extra: u32 = @intFromFloat(rng.float(f32) * @as(f32, @floatFromInt(drop.max_count - drop.min_count + 1)));
+                            tryItemToInventory(self, drop.item_id, drop.min_count + extra);
+                        }
+                    }
                     self.block_world.cleanupEntity(&self.registry, entity_hit.entity);
                     self.registry.destroy(entity_hit.entity);
                 }
@@ -552,11 +576,63 @@ fn tryPlaceBlock(self: *Game) !void {
 
     if (!can_place) return;
 
-    // 使用物品栏选中的方块放置，空气跳过
-    const selected_id = self.hotbar.selectedBlock();
-    if (@intFromEnum(selected_id) == @intFromEnum(BlockRegistry.BlockId.fromName("air"))) return;
+    // 使用物品栏选中的物品放置，空气跳过
+    const selected_item_id = self.hotbar.slots[self.hotbar.selected].item_id;
+    if (selected_item_id == 0) return;
+    const block_id = BlockRegistry.BlockId.fromInt(selected_item_id);
+    try self.block_world.setBlock(place_pos, block_id);
+}
 
-    try self.block_world.setBlock(place_pos, selected_id);
+/// 尝试将物品加入热栏/背包（优先堆叠，次优先空位）
+fn tryItemToInventory(self: *Game, item_id: u32, count: u32) void {
+    var remaining = count;
+    const max_stack = item_infos[@as(usize, @intCast(item_id))].max_stack;
+
+    // 1. 热栏已有堆叠
+    for (&self.hotbar.slots) |*slot| {
+        if (slot.item_id == item_id and slot.count < max_stack) {
+            const space = max_stack - slot.count;
+            const move = @min(remaining, space);
+            slot.count += move;
+            remaining -= move;
+            if (remaining == 0) return;
+        }
+    }
+
+    // 2. 热栏空格
+    for (&self.hotbar.slots) |*slot| {
+        if (slot.item_id == 0) {
+            const put = @min(remaining, max_stack);
+            slot.* = .{ .item_id = item_id, .count = put };
+            remaining -= put;
+            if (remaining == 0) return;
+        }
+    }
+
+    // 3. 背包已有堆叠
+    for (&self.inventory.slots) |*slot| {
+        if (slot.item_id == item_id and slot.count < max_stack) {
+            const space = max_stack - slot.count;
+            const move = @min(remaining, space);
+            slot.count += move;
+            remaining -= move;
+            if (remaining == 0) return;
+        }
+    }
+
+    // 4. 背包空格
+    for (&self.inventory.slots) |*slot| {
+        if (slot.item_id == 0) {
+            const put = @min(remaining, max_stack);
+            slot.* = .{ .item_id = item_id, .count = put };
+            remaining -= put;
+            if (remaining == 0) return;
+        }
+    }
+
+    if (remaining > 0) {
+        std.debug.print("背包已满，丢失 {d}x item_id={d}\n", .{ remaining, item_id });
+    }
 }
 
 fn updateEntities(self: *Game) !void {
@@ -790,6 +866,7 @@ const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
 const PlayerInventory = @import("inventory.zig").PlayerInventory;
 const ItemStack = @import("inventory.zig").ItemStack;
+const item_infos = @import("item_registry.zig").item_infos;
 const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 const SaveManager = @import("save_manager.zig").SaveManager;
 const Keybinds = @import("keybinds.zig").Keybinds;

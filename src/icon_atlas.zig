@@ -6,6 +6,8 @@ const Wgpu = @import("imports.zig").Wgpu;
 const zigimg = @import("zigimg");
 const BlockRegistry = @import("block_registry.zig");
 const BlockId = BlockRegistry.BlockId;
+const block_infos = BlockRegistry.block_infos;
+const item_infos = @import("item_registry.zig").item_infos;
 
 const ICON_SLOT: u32 = 16;
 const ATLAS_W: u32 = 2048;
@@ -240,16 +242,19 @@ pub const IconAtlas = struct {
         self.vertex_count += 6;
     }
 
-    /// 获取 block_id 的图集槽位索引，未缓存则自动加载
-    pub fn getOrLoad(self: *IconAtlas, block_id: u32) ?u32 {
+    /// 获取 item_id 的图集槽位索引，未缓存则自动加载
+    pub fn getOrLoad(self: *IconAtlas, item_id: u32) ?u32 {
         for (self.slots, 0..) |maybe, i| {
-            if (maybe) |stored| if (stored == block_id) return @intCast(i);
+            if (maybe) |stored| if (stored == item_id) return @intCast(i);
         }
         const dst = self.next_free;
         self.next_free = (self.next_free + 1) % MAX_SLOTS;
 
-        const name = BlockId.fromInt(block_id).name();
-        const path = std.fmt.allocPrint(self.allocator, "resources/textures/blocks/{s}_0.png", .{name}) catch return null;
+        const name = item_infos[item_id].name;
+        const path = if (item_id < block_infos.len)
+            std.fmt.allocPrint(self.allocator, "resources/textures/blocks/{s}_0.png", .{name}) catch return null
+        else
+            std.fmt.allocPrint(self.allocator, "resources/textures/items/{s}.png", .{name}) catch return null;
         defer self.allocator.free(path);
         var rgba: [ICON_SLOT * ICON_SLOT * 4]u8 = .{0} ** (ICON_SLOT * ICON_SLOT * 4);
         loadAndScale(path, &rgba);
@@ -264,7 +269,7 @@ pub const IconAtlas = struct {
             &.{ .offset = 0, .bytesPerRow = ICON_SLOT * 4, .rowsPerImage = ICON_SLOT },
             &.{ .width = ICON_SLOT, .height = ICON_SLOT, .depthOrArrayLayers = 1 },
         );
-        self.slots[@as(usize, @intCast(dst))] = block_id;
+        self.slots[@as(usize, @intCast(dst))] = item_id;
         return @intCast(dst);
     }
 

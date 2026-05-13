@@ -3,30 +3,54 @@ const std = @import("std");
 const Game = @import("../game.zig");
 const IconAtlas = @import("../icon_atlas.zig").IconAtlas;
 const ItemStack = @import("../inventory.zig").ItemStack;
-const BlockId = @import("../block_registry.zig").BlockId;
-const air_id = @intFromEnum(BlockId.fromName("air"));
+const item_infos = @import("../item_registry.zig").item_infos;
 
-pub fn update(game: *Game) void {
-    const ui = &game.ui_system;
+const cols: usize = 9;
+const rows: usize = 3;
+const slot_size: f32 = 50;
+const gap: f32 = 4;
+
+fn layoutInfo(game: *Game) struct { f32, f32, f32, f32 } {
     const win_w = game.window.width;
     const win_h = game.window.height;
-
-    // 半透明遮罩（让背包背景半透明）
-    ui.drawRect(0, 0, win_w, win_h, .{ 0, 0, 0, 0.4 });
-
-    // 背包网格布局
-    const cols: usize = 9;
-    const rows: usize = 3;
-    const slot_size: f32 = 50;
-    const gap: f32 = 4;
     const grid_w = @as(f32, @floatFromInt(cols)) * slot_size + @as(f32, @floatFromInt(cols - 1)) * gap;
     const start_x = (win_w - grid_w) / 2;
     const start_y = win_h / 2 - @as(f32, @floatFromInt(rows)) * (slot_size + gap) / 2;
+    return .{ win_w, win_h, start_x, start_y };
+}
 
-    // 绘制标题
+/// ESC/B 键处理
+pub fn update(game: *Game) void {
+    if (game.keybinds.isJustPressed(&game.input, .pause_menu) or game.keybinds.isJustPressed(&game.input, .toggle_inventory)) {
+        game.selected_item = null;
+        game.menu_state = .Gameplay;
+    }
+}
+
+/// 绘制下层：遮罩 + 标题 + 槽位背景 + 边框
+pub fn drawBg(game: *Game) void {
+    const ui = &game.ui_system;
+    const _w, const _h, const start_x, const start_y = layoutInfo(game);
+    _ = _w; _ = _h;
+
+    ui.drawOverlay(0.4);
     ui.drawText(&game.gctx, start_x, start_y - 40, "背包", 24, .{ 1, 1, 1, 1 });
 
-    // 渲染网格 + 处理点击
+    const mouse = game.input.getCursorPos();
+    for (0..rows) |r| {
+        for (0..cols) |c| {
+            const x = start_x + @as(f32, @floatFromInt(c)) * (slot_size + gap);
+            const y = start_y + @as(f32, @floatFromInt(r)) * (slot_size + gap);
+            const hover = mouse.x >= x and mouse.x <= x + slot_size and mouse.y >= y and mouse.y <= y + slot_size;
+            ui.drawSlotBg(x, y, slot_size, false, hover);
+        }
+    }
+}
+
+/// 绘制上层：图标 + 数量文字 + 处理点击
+pub fn drawFg(game: *Game) void {
+    const ui = &game.ui_system;
+    const win_w, const win_h, const start_x, const start_y = layoutInfo(game);
     const mouse = game.input.getCursorPos();
 
     for (0..rows) |r| {
@@ -35,30 +59,9 @@ pub fn update(game: *Game) void {
             const x = start_x + @as(f32, @floatFromInt(c)) * (slot_size + gap);
             const y = start_y + @as(f32, @floatFromInt(r)) * (slot_size + gap);
 
+            ui.drawSlotFg(x, y, slot_size, game.inventory.slots[idx], &game.icon_atlas);
+
             const hover = mouse.x >= x and mouse.x <= x + slot_size and mouse.y >= y and mouse.y <= y + slot_size;
-            const bg: [4]f32 = if (hover) .{ 0.4, 0.4, 0.4, 1.0 } else .{ 0.2, 0.2, 0.2, 0.9 };
-            ui.drawRect(x, y, slot_size, slot_size, bg);
-
-            // 边框
-            const border: [4]f32 = .{ 0.3, 0.3, 0.3, 1.0 };
-            ui.drawRect(x, y, slot_size, 1, border);
-            ui.drawRect(x, y + slot_size - 1, slot_size, 1, border);
-            ui.drawRect(x, y, 1, slot_size, border);
-            ui.drawRect(x + slot_size - 1, y, 1, slot_size, border);
-
-            const item = game.inventory.slots[idx];
-            if (@intFromEnum(item.block_id) != air_id) {
-                if (game.icon_atlas.getOrLoad(@intFromEnum(item.block_id))) |slot_i| {
-                    game.icon_atlas.addQuad(IconAtlas.slotUV(slot_i), x + 4, y + 4, slot_size - 8);
-                }
-                var buf: [16]u8 = undefined;
-                if (item.count > 1) {
-                    const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch unreachable;
-                    ui.drawText(&game.gctx, x + slot_size - 20, y + slot_size - 22, count_str, 12, .{ 1, 1, 1, 1 });
-                }
-            }
-
-            // 点击处理
             if (hover and game.input.isMouseJustPressed(.mouse_left)) {
                 handleSlotClick(game, .inventory, idx);
             }
@@ -83,36 +86,38 @@ fn handleSlotClick(game: *Game, source: Game.SlotSource, slot_idx: usize) void {
     const hotbar = &game.hotbar;
     const inv = &game.inventory;
 
-    // 根据 source + slot_idx 获取目标物品
     const target_item = switch (source) {
         .hotbar => &hotbar.slots[slot_idx],
         .inventory => &inv.slots[slot_idx],
     };
 
     if (sel.* == null) {
-        // 未选中 → 选中（不能选空气）
-        if (@intFromEnum(target_item.block_id) == air_id) return;
-        sel.* = .{
-            .source = source,
-            .slot_idx = slot_idx,
-            .item = target_item.*,
-        };
+        if (target_item.item_id == 0) return;
+        sel.* = .{ .source = source, .slot_idx = slot_idx, .item = target_item.* };
     } else {
-        // 已选中 → 交换
         const selected = sel.*.?;
         if (selected.source == source and selected.slot_idx == slot_idx) {
-            // 点同一个格子 → 取消选中
             sel.* = null;
             return;
         }
 
-        // 获取来源物品
         const src_item = switch (selected.source) {
             .hotbar => &hotbar.slots[selected.slot_idx],
             .inventory => &inv.slots[selected.slot_idx],
         };
 
-        // 交换
+        if (target_item.item_id == selected.item.item_id and target_item.item_id != 0) {
+            const max = item_infos[@as(usize, @intCast(src_item.item_id))].max_stack;
+            const space = max - target_item.count;
+            if (space > 0) {
+                const move = @min(src_item.count, space);
+                target_item.count += move;
+                src_item.count -= move;
+                if (src_item.count == 0) { src_item.* = .{}; sel.* = null; }
+                return;
+            }
+        }
+
         const tmp = target_item.*;
         target_item.* = src_item.*;
         src_item.* = tmp;

@@ -176,11 +176,11 @@ pub const SaveManager = struct {
         }
         // 写入热键栏
         for (&hotbar.slots, 0..) |*item, i| {
-            if (@intFromEnum(item.block_id) == 0) continue;
+            if (item.item_id == 0) continue;
             var ins = try self.world_db.conn.prepare("INSERT INTO HotbarRow (slot, block_id, count) VALUES (?, ?, ?)", &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
-            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(@intFromEnum(item.block_id))) });
+            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(item.item_id)) });
             try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
             try ins.exec();
         }
@@ -192,11 +192,11 @@ pub const SaveManager = struct {
             try del.exec();
         }
         for (&inventory.slots, 0..) |*item, i| {
-            if (@intFromEnum(item.block_id) == 0) continue;
+            if (item.item_id == 0) continue;
             var ins = try self.world_db.conn.prepare("INSERT INTO InventoryRow (slot, block_id, count) VALUES (?, ?, ?)", &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
-            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(@intFromEnum(item.block_id))) });
+            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(item.item_id)) });
             try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
             try ins.exec();
         }
@@ -253,7 +253,7 @@ pub const SaveManager = struct {
             for (slots) |s| {
                 if (s.slot < 9) {
                     hotbar.slots[@as(usize, @intCast(s.slot))] = .{
-                        .block_id = BlockId.fromInt(s.block_id),
+                        .item_id = @as(u32, @intCast(s.block_id)),
                         .count = s.count,
                     };
                 }
@@ -266,7 +266,7 @@ pub const SaveManager = struct {
             for (slots) |s| {
                 if (s.slot < 27) {
                     inventory.slots[@as(usize, @intCast(s.slot))] = .{
-                        .block_id = BlockId.fromInt(s.block_id),
+                        .item_id = @as(u32, @intCast(s.block_id)),
                         .count = s.count,
                     };
                 }
