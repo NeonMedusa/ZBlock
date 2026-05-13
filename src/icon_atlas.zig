@@ -58,7 +58,8 @@ pub const IconPipeline = struct {
             .magFilter = Wgpu.WGPUFilterMode_Linear,
             .minFilter = Wgpu.WGPUFilterMode_Linear,
             .mipmapFilter = Wgpu.WGPUMipmapFilterMode_Nearest,
-            .lodMinClamp = 0, .lodMaxClamp = 32,
+            .lodMinClamp = 0,
+            .lodMaxClamp = 32,
             .compare = Wgpu.WGPUCompareFunction_Undefined,
             .maxAnisotropy = 1,
         });
@@ -69,7 +70,8 @@ pub const IconPipeline = struct {
         };
         const bgl = Wgpu.wgpuDeviceCreateBindGroupLayout(device, &.{ .entryCount = bgl_entries.len, .entries = &bgl_entries });
         const bg = Wgpu.wgpuDeviceCreateBindGroup(device, &.{
-            .layout = bgl, .entryCount = bgl_entries.len,
+            .layout = bgl,
+            .entryCount = bgl_entries.len,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .offset = 0, .size = Wgpu.wgpuBufferGetSize(uniform_buffer) },
                 .{ .binding = 1, .textureView = tex_view },
@@ -84,9 +86,15 @@ pub const IconPipeline = struct {
         };
         const ds = Wgpu.WGPUDepthStencilState{
             .format = Wgpu.WGPUTextureFormat_Depth24Plus,
-            .depthWriteEnabled = 0, .depthCompare = Wgpu.WGPUCompareFunction_Always,
-            .stencilFront = .{}, .stencilBack = .{}, .stencilReadMask = 0, .stencilWriteMask = 0,
-            .depthBias = 0, .depthBiasSlopeScale = 0, .depthBiasClamp = 0,
+            .depthWriteEnabled = 0,
+            .depthCompare = Wgpu.WGPUCompareFunction_Always,
+            .stencilFront = .{},
+            .stencilBack = .{},
+            .stencilReadMask = 0,
+            .stencilWriteMask = 0,
+            .depthBias = 0,
+            .depthBiasSlopeScale = 0,
+            .depthBiasClamp = 0,
         };
         const desc = Wgpu.WGPURenderPipelineDescriptor{
             .layout = pl,
@@ -95,18 +103,21 @@ pub const IconPipeline = struct {
                 .buffers = &Wgpu.WGPUVertexBufferLayout{
                     .arrayStride = @sizeOf(IconVertex),
                     .stepMode = Wgpu.WGPUVertexStepMode_Vertex,
-                    .attributeCount = attribs.len, .attributes = &attribs,
+                    .attributeCount = attribs.len,
+                    .attributes = &attribs,
                 },
                 .module = sm,
                 .entryPoint = .{ .data = "vs", .length = 2 },
             },
             .primitive = .{ .topology = Wgpu.WGPUPrimitiveTopology_TriangleList },
             .fragment = &Wgpu.WGPUFragmentState{
-                .module = sm, .entryPoint = .{ .data = "fs", .length = 2 },
+                .module = sm,
+                .entryPoint = .{ .data = "fs", .length = 2 },
                 .targetCount = 1,
                 .targets = &Wgpu.WGPUColorTargetState{
                     .format = Wgpu.WGPUTextureFormat_BGRA8UnormSrgb,
-                    .blend = &blend, .writeMask = Wgpu.WGPUColorWriteMask_All,
+                    .blend = &blend,
+                    .writeMask = Wgpu.WGPUColorWriteMask_All,
                 },
             },
             .multisample = .{ .count = 1, .mask = Wgpu.WGPUColorWriteMask_All },
@@ -114,8 +125,11 @@ pub const IconPipeline = struct {
         };
         return IconPipeline{
             .handle = Wgpu.wgpuDeviceCreateRenderPipeline(device, &desc),
-            .bind_group = bg, .bind_group_layout = bgl, .pipeline_layout = pl,
-            .shader_module = sm, .sampler = sampler,
+            .bind_group = bg,
+            .bind_group_layout = bgl,
+            .pipeline_layout = pl,
+            .shader_module = sm,
+            .sampler = sampler,
         };
     }
 
@@ -149,8 +163,10 @@ pub const IconAtlas = struct {
             .dimension = Wgpu.WGPUTextureDimension_2D,
             .size = .{ .width = ATLAS_W, .height = ATLAS_H, .depthOrArrayLayers = 1 },
             .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
-            .mipLevelCount = 1, .sampleCount = 1,
-            .viewFormatCount = 0, .viewFormats = null,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+            .viewFormatCount = 0,
+            .viewFormats = null,
         });
         const view = Wgpu.wgpuTextureCreateView(tex, null);
         // 初始化为全透明黑色
@@ -161,7 +177,8 @@ pub const IconAtlas = struct {
             Wgpu.wgpuQueueWriteTexture(
                 gctx.queue,
                 &.{ .texture = tex, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = 0 }, .aspect = Wgpu.WGPUTextureAspect_All },
-                buf.ptr, @sizeOf(u32) * ATLAS_W * ATLAS_H,
+                buf.ptr,
+                @sizeOf(u32) * ATLAS_W * ATLAS_H,
                 &.{ .offset = 0, .bytesPerRow = ATLAS_W * 4, .rowsPerImage = ATLAS_H },
                 &.{ .width = ATLAS_W, .height = ATLAS_H, .depthOrArrayLayers = 1 },
             );
@@ -200,7 +217,9 @@ pub const IconAtlas = struct {
     pub fn upload(self: *IconAtlas, queue: Wgpu.WGPUQueue) void {
         if (self.vertex_count > 0) {
             Wgpu.wgpuQueueWriteBuffer(
-                queue, self.vertex_buffer, 0,
+                queue,
+                self.vertex_buffer,
+                0,
                 &self.frame_vertices,
                 self.vertex_count * @sizeOf(IconVertex),
             );
@@ -230,7 +249,7 @@ pub const IconAtlas = struct {
         self.next_free = (self.next_free + 1) % MAX_SLOTS;
 
         const name = BlockId.fromInt(block_id).name();
-        const path = std.fmt.allocPrint(self.allocator, "resources/textures/{s}_0.png", .{name}) catch return null;
+        const path = std.fmt.allocPrint(self.allocator, "resources/textures/blocks/{s}_0.png", .{name}) catch return null;
         defer self.allocator.free(path);
         var rgba: [ICON_SLOT * ICON_SLOT * 4]u8 = .{0} ** (ICON_SLOT * ICON_SLOT * 4);
         loadAndScale(path, &rgba);
@@ -240,7 +259,8 @@ pub const IconAtlas = struct {
         Wgpu.wgpuQueueWriteTexture(
             self.gctx.queue,
             &.{ .texture = self.texture, .mipLevel = 0, .origin = .{ .x = sx, .y = sy, .z = 0 }, .aspect = Wgpu.WGPUTextureAspect_All },
-            &rgba, @sizeOf(u32) * ICON_SLOT * ICON_SLOT,
+            &rgba,
+            @sizeOf(u32) * ICON_SLOT * ICON_SLOT,
             &.{ .offset = 0, .bytesPerRow = ICON_SLOT * 4, .rowsPerImage = ICON_SLOT },
             &.{ .width = ICON_SLOT, .height = ICON_SLOT, .depthOrArrayLayers = 1 },
         );
@@ -276,8 +296,10 @@ fn loadAndScale(path: []const u8, dst: *[ICON_SLOT * ICON_SLOT * 4]u8) void {
             const sy = @min(dy * sh / ICON_SLOT, sh - 1);
             const src = rgba[sy * sw + sx];
             const d = (dy * ICON_SLOT + dx) * 4;
-            dst[d + 0] = src.r; dst[d + 1] = src.g;
-            dst[d + 2] = src.b; dst[d + 3] = src.a;
+            dst[d + 0] = src.r;
+            dst[d + 1] = src.g;
+            dst[d + 2] = src.b;
+            dst[d + 3] = src.a;
         }
     }
 }

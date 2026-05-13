@@ -59,7 +59,6 @@ pub const GlobalMaterial = struct {
 pub const ChunkMesh = struct {
     /// GPU 端顶点/索引缓冲区 + CPU 端待上传数据。
     /// 一个 ChunkMesh 对应一种材质。
-
     vertex_buffer: Wgpu.WGPUBuffer,
     index_buffer: Wgpu.WGPUBuffer,
     vertex_count: u32,
@@ -223,7 +222,7 @@ pub const MaterialRegistry = struct {
         const suffix = if (is_normal) "_n" else "";
         const full_path = try std.fmt.allocPrint(
             self.allocator,
-            "resources/textures/{s}_{d}{s}.png",
+            "resources/textures/blocks/{s}_{d}{s}.png",
             .{ base_name, variant, suffix },
         );
         return full_path;
