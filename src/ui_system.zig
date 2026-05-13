@@ -5,50 +5,37 @@ const UiSystem = @This();
 //  SDF 图集常量 — 调整以下参数平衡质量与容量
 // ═══════════════════════════════════════════════
 
-/// 每个字形在图集中占的像素尺寸（宽高一致）。
-/// - 64: 默认，适配 ASCII 及中等复杂字体。CJK需配合合适的 SDF_SCALE_HEIGHT
-/// - 96: CJK 笔画更清晰，总槽数降为 (2048/96)² ≈ 441
-/// - 128: CJK 笔画完整保留，总槽数降为 (2048/128)² = 256
+/// 每个字形在图集中占的像素尺寸 — 改此值则 SDF_PADDING 和 SDF_SCALE_HEIGHT 自动跟随。
+/// 64 → 槽位数 (2048/64)² = 1024，96 → 441，128 → 256
 const GLYPH_SIZE: u32 = 64;
 
-/// 图集纹理的单边像素尺寸（总大小 = ATLAS_SIZE² 字节，R8 单通道）。
-/// 必须为 GLYPH_SIZE 的整数倍。
+/// 图集纹理的单边像素尺寸，必须为 GLYPH_SIZE 的整数倍。
 const ATLAS_SIZE: u32 = 2048;
 
-/// 每行排列的字形数（由 ATLAS_SIZE ÷ GLYPH_SIZE 自动算出）。
+/// 每行排列的字形数 = ATLAS_SIZE / GLYPH_SIZE。
 const GLYPHS_PER_ROW: u32 = ATLAS_SIZE / GLYPH_SIZE;
 
-/// 图集总槽位数（总可缓存的不同字形数）。
-/// 超过此数时，新字形会覆盖最久未被使用的槽位。
+/// 图集总槽位数，超过此数时新字形覆盖最早槽位。
 const GLYPH_SLOTS: u32 = GLYPHS_PER_ROW * GLYPHS_PER_ROW;
 
-/// wgpuQueueWriteTexture 要求的源数据行对齐字节数。
-/// 部分 WGPU 后端要求 bytesPerRow≥256，设为此值兼容所有实现。
+/// wgpuQueueWriteTexture 要求的源数据行对齐最小值，256 兼容所有后端。
 const ATLAS_ROW_STRIDE: u32 = 256;
 
 // ═══════════════════════════════════════════════
-//  SDF 生成参数 — 调整以下参数影响渲染质量
+//  SDF 生成参数 — 全部自动化计算，无需手工调
 // ═══════════════════════════════════════════════
 
-/// SDF 位图在字形外额外保留的像素边距。
-/// 用于给 smoothstep 留出渐变过渡空间，防止边缘裁切。
-const SDF_PADDING: c_int = 4;
+/// SDF 位图在字形外的边距 = GLYPH_SIZE / 16，保证距离场有足够过渡空间。
+const SDF_PADDING: c_int = @intCast(GLYPH_SIZE / 16);
 
-/// SDF 中代表"轮廓边缘"的像素值（0-255）。
-/// 通常 128，即 0=远外部、128=边缘、255=深内部。
+/// 标准字号 = GLYPH_SIZE - SDF_PADDING × 2，使最大字形刚好填满槽位。
+const SDF_SCALE_HEIGHT: f32 = @floatFromInt(GLYPH_SIZE - @as(u32, @intCast(SDF_PADDING)) * 2);
+
+/// 轮廓边缘像素值，128 = 0=远外、128=边缘、255=深内。
 const SDF_ONEDGE: u8 = 128;
 
-/// 距离场精度系数：SDF 值变化多少单位对应 1 像素实际距离。
-/// - 64（默认）: 1px → 64 值单位，边缘±2px 范围内有渐变
-/// - 32: 1px → 32 值单位，渐变范围 ±4px，边缘更柔和
-/// - 128: 1px → 128 值单位，渐变范围 ±1px，边缘更锐利
-/// 增大可提升精度，但过大会使远距区域饱和（255）失去梯度。
+/// 距离场精度，越大 SDF 梯度变化越快，边缘更锐但描边可能断续。
 const SDF_PIXEL_DIST_SCALE: f32 = 64.0;
-
-/// 生成 SDF 时使用的标准字号（像素）。
-/// 建议值 = GLYPH_SIZE - (SDF_PADDING × 2) 左右，留出 padding 空间。
-/// 例如 GLYPH_SIZE=64 时取 56，glyph 最大约 56px + 8px padding = 64px。
-const SDF_SCALE_HEIGHT: f32 = 56;
 
 // 一个图集中的字形槽位
 const GlyphSlot = struct {
@@ -428,7 +415,7 @@ fn emitQuad(self: *UiSystem, x: f32, y: f32, w: f32, h: f32, color: [4]f32, uvs:
 
 /// 矩形绘制
 pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color: [4]f32) void {
-    const no_tex = [_][2]f32{ .{ -1, -1 } } ** 4;
+    const no_tex = [_][2]f32{.{ -1, -1 }} ** 4;
     self.emitQuad(x, y, width, height, color, no_tex);
 }
 
@@ -560,7 +547,9 @@ pub fn measureText(self: *UiSystem, gctx: *Gctx, text: []const u8, font_size: f3
     while (it.nextCodepoint()) |cp| {
         if (prev != 0) {
             pw += @as(f32, @floatFromInt(Stb.stbtt_GetCodepointKernAdvance(
-                &self.font_info, @intCast(prev), @intCast(cp),
+                &self.font_info,
+                @intCast(prev),
+                @intCast(cp),
             ))) * scale;
         }
         var adv: c_int = undefined;
@@ -695,6 +684,20 @@ pub fn drawSlotBg(self: *UiSystem, x: f32, y: f32, size: f32, selected: bool, ho
     }
 }
 
+/// 带 1px 黑色软描边的文字（8 方向偏移 + 白色填充）
+pub fn drawTextOutlined(self: *UiSystem, gctx: *Gctx, x: f32, y: f32, text: []const u8, font_size: f32) void {
+    const black = [4]f32{ 0, 0, 0, 1 };
+    self.drawText(gctx, x - 1, y - 1, text, font_size, black);
+    self.drawText(gctx, x, y - 1, text, font_size, black);
+    self.drawText(gctx, x + 1, y - 1, text, font_size, black);
+    self.drawText(gctx, x - 1, y, text, font_size, black);
+    self.drawText(gctx, x + 1, y, text, font_size, black);
+    self.drawText(gctx, x - 1, y + 1, text, font_size, black);
+    self.drawText(gctx, x, y + 1, text, font_size, black);
+    self.drawText(gctx, x + 1, y + 1, text, font_size, black);
+    self.drawText(gctx, x, y, text, font_size, .{ 1, 1, 1, 1 });
+}
+
 /// 槽位图标 + 数量文字（上层 UI）
 pub fn drawSlotFg(self: *UiSystem, x: f32, y: f32, size: f32, item: ItemStack, icon_atlas: *IconAtlas) void {
     if (item.item_id != 0) {
@@ -703,8 +706,8 @@ pub fn drawSlotFg(self: *UiSystem, x: f32, y: f32, size: f32, item: ItemStack, i
         }
         if (item.count > 1) {
             var buf: [16]u8 = undefined;
-            const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch return;
-            self.drawText(&self.game_ptr.gctx, x + 4, y + size - 18, count_str, 12, .{ 1, 1, 1, 1 });
+            const count_str = std.fmt.bufPrint(&buf, "{d}", .{item.count}) catch unreachable;
+            self.drawTextOutlined(&self.game_ptr.gctx, x + 4, y + size - 23, count_str, 20);
         }
     }
 }
@@ -918,16 +921,8 @@ const UiRenderPipeline = struct {
 pub const UiUniform = struct {
     ortho_matrix: Mat4,
     pub fn init(window: Window) @This() {
-        const ortho_matrix = Mat4.orthographic(
-            0,
-            window.width,
-            window.height,
-            0,
-            -1.0,
-            1.0,
-        );
         return @This(){
-            .ortho_matrix = ortho_matrix,
+            .ortho_matrix = Mat4.orthographic(0, window.width, window.height, 0, -1.0, 1.0),
         };
     }
 };

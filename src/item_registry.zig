@@ -15,7 +15,7 @@ pub const ItemCategory = enum {
 pub const ItemProtoType = struct {
     name: [:0]const u8,
     category: ItemCategory = .material,
-    max_stack: u32 = 64,
+    max_stack: u32 = 9999,
 };
 
 /// 掉落物配置（用于方块/实体掉落）
@@ -30,7 +30,10 @@ pub const ItemDrop = struct {
 pub const item_infos = blk: {
     const block_count = block_infos.len;
     const extras = .{
-        ItemProtoType{ .name = "apple", .category = .food, .max_stack = 64 },
+        ItemProtoType{
+            .name = "apple",
+            .category = .food,
+        },
     };
     var result: [block_count + extras.len]ItemProtoType = undefined;
     for (0..block_count) |i| {
@@ -66,5 +69,7 @@ pub const ItemId = enum(u32) {
 
 /// 快捷构造常用物品 ID
 pub const predefined = struct {
-    pub fn apple() ItemId { return ItemId.fromInt(block_infos.len + 0); }
+    pub fn apple() ItemId {
+        return ItemId.fromInt(block_infos.len + 0);
+    }
 };
