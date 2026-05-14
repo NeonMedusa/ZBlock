@@ -405,16 +405,10 @@ pub fn drawRect(self: *UiSystem, x: f32, y: f32, width: f32, height: f32, color:
     self.emitQuad(x, y, width, height, color, no_tex);
 }
 
-// 按 GLYPH_SIZE 计算最大整数倍率
-fn calcMult(font_size: f32) u32 {
-    const m = @as(u32, @intFromFloat(@floor(@as(f32, @floatFromInt(GLYPH_SIZE)) / font_size + 1e-6)));
-    return @max(1, m);
-}
-
-/// 获取或生成字形
+// 获取或生成字形（font_size < 32 用 2x 生成，否则 1x）
 fn getOrCreateGlyph(self: *UiSystem, gctx: *Gctx, codepoint: u21, font_size: f32) ?u32 {
-    const mult = calcMult(font_size);
-    const gen_size = @as(u32, @intFromFloat(font_size * @as(f32, @floatFromInt(mult))));
+    const mult: f32 = if (font_size < 32) 2 else 1;
+    const gen_size = @as(u32, @intFromFloat(font_size * mult));
     for (self.glyph_slots, 0..) |maybe_slot, i| {
         if (maybe_slot) |slot| {
             if (slot.codepoint == codepoint and slot.gen_size == gen_size) return @as(u32, @intCast(i));
@@ -530,23 +524,23 @@ pub fn measureText(self: *UiSystem, gctx: *Gctx, text: []const u8, font_size: f3
     var it = utf8.iterator();
     while (it.nextCodepoint()) |cp| {
         if (prev != 0) {
-            pw += @round(@as(f32, @floatFromInt(Stb.stbtt_GetCodepointKernAdvance(
+            pw += @as(f32, @floatFromInt(Stb.stbtt_GetCodepointKernAdvance(
                 &self.font_info,
                 @intCast(prev),
                 @intCast(cp),
-            ))) * font_scale);
+            ))) * font_scale;
         }
         var adv: c_int = undefined;
         Stb.stbtt_GetCodepointHMetrics(&self.font_info, @intCast(cp), &adv, null);
-        pw += @round(@as(f32, @floatFromInt(adv)) * font_scale);
+        pw += @as(f32, @floatFromInt(adv)) * font_scale;
         prev = cp;
         last_cp = cp;
     }
     if (last_cp == 0) return pw;
     const slot_idx = self.getOrCreateGlyph(gctx, last_cp, font_size) orelse return pw;
     const slot = self.glyph_slots[@as(usize, @intCast(slot_idx))] orelse return pw;
-    const mult = calcMult(font_size);
-    const rs = 1.0 / @as(f32, @floatFromInt(mult));
+    const mult: f32 = if (font_size < 32) 2 else 1;
+    const rs = 1.0 / mult;
     const visual_width = @round(@as(f32, @floatFromInt(slot.sdf_xoff)) * rs + @as(f32, @floatFromInt(slot.sdf_width)) * rs);
     return pw - (@round(@as(f32, @floatFromInt(slot.advance)) * font_scale) - visual_width);
 }
@@ -556,9 +550,9 @@ fn emitGlyph(self: *UiSystem, gctx: *Gctx, cp: u21, font_size: f32, color: [4]f3
     const slot_idx = self.getOrCreateGlyph(gctx, cp, font_size) orelse return null;
     const slot = self.glyph_slots[@as(usize, @intCast(slot_idx))] orelse unreachable;
 
-    const mult = calcMult(font_size);
-    const rs = 1.0 / @as(f32, @floatFromInt(mult));
-    const gen_scale = Stb.stbtt_ScaleForPixelHeight(&self.font_info, @as(f32, @floatFromInt(slot.gen_size)));
+    const mult: f32 = if (font_size < 32) 2 else 1;
+    const rs = 1.0 / mult;
+    const gen_scale = Stb.stbtt_ScaleForPixelHeight(&self.font_info, font_size * mult);
 
     if (prev_codepoint.* != 0) {
         const kern = Stb.stbtt_GetCodepointKernAdvance(

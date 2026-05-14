@@ -9,12 +9,18 @@ scroll: u32 = 0,
 entries: []SaveEntry = &.{},
 
 pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-    for (self.entries) |e| { allocator.free(e.name); allocator.free(e.last_played); }
+    for (self.entries) |e| {
+        allocator.free(e.name);
+        allocator.free(e.last_played);
+    }
     allocator.free(self.entries);
 }
 
 pub fn refresh(self: *@This(), allocator: std.mem.Allocator) void {
-    for (self.entries) |e| { allocator.free(e.name); allocator.free(e.last_played); }
+    for (self.entries) |e| {
+        allocator.free(e.name);
+        allocator.free(e.last_played);
+    }
     allocator.free(self.entries);
     self.entries = SaveManager.listSaves(allocator) catch &.{};
     self.scroll = 0;
@@ -55,7 +61,7 @@ pub fn update(self: *@This(), game: *Game) void {
             game.ui_system.drawText(&game.gctx, col_x + 14, y + 34, entry.last_played, 15, .{ 0.7, 0.7, 0.7, 1 });
         }
 
-        if (game.ui_system.textButton(col_x + col_w - 80, y + 12, 70, row_h - 24, "删除", 16)) {
+        if (game.ui_system.textButton(col_x + col_w - 80, y + 12, 70, row_h - 24, "删除", 18)) {
             SaveManager.deleteSave(entry.name) catch {};
             self.refresh(game.allocator);
             return;
