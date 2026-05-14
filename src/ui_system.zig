@@ -1,11 +1,10 @@
 // ui_system.zig — 基于 SDF（Signed Distance Field）的 UI 文字渲染系统
 const UiSystem = @This();
 
-const GLYPH_SIZE: u32 = 64;
-const ATLAS_SIZE: u32 = 2048;
+const GLYPH_SIZE: u32 = 128;
+const ATLAS_SIZE: u32 = 4096;
 const GLYPHS_PER_ROW: u32 = ATLAS_SIZE / GLYPH_SIZE;
 const GLYPH_SLOTS: u32 = GLYPHS_PER_ROW * GLYPHS_PER_ROW;
-const CPU_GEN_MAX: u32 = 128;
 
 /// 标准字号（覆盖位图生成的分辨率）
 const SCALE_HEIGHT: f32 = 64;
@@ -397,32 +396,21 @@ fn calcSlotMult(font_size: f32) u32 {
     return @max(1, m);
 }
 
-// 按 CPU_GEN_MAX 计算生成倍率（向下取整到 slot_mult 的倍数）
-fn calcGenMult(slot_mult: u32, font_size: f32) u32 {
-    const raw = @as(u32, @intFromFloat(@floor(@as(f32, @floatFromInt(CPU_GEN_MAX)) / font_size + 1e-6)));
-    const gen_mult = (raw / slot_mult) * slot_mult;
-    return @max(1, gen_mult);
-}
-
-/// 获取或生成字形（CPU 整数倍降采样）
+/// 获取或生成字形
 fn getOrCreateGlyph(self: *UiSystem, gctx: *Gctx, codepoint: u21, font_size: f32) ?u32 {
     const slot_mult = calcSlotMult(font_size);
-    const slot_size = @as(u32, @intFromFloat(font_size * @as(f32, @floatFromInt(slot_mult))));
+    const gen_size = @as(u32, @intFromFloat(font_size * @as(f32, @floatFromInt(slot_mult))));
 
     for (self.glyph_slots, 0..) |maybe_slot, i| {
         if (maybe_slot) |slot| {
-            if (slot.codepoint == codepoint and slot.gen_size == slot_size) return @as(u32, @intCast(i));
+            if (slot.codepoint == codepoint and slot.gen_size == gen_size) return @as(u32, @intCast(i));
         }
     }
 
     const slot_idx = self.next_slot;
     self.next_slot = (self.next_slot + 1) % GLYPH_SLOTS;
 
-    const gen_mult = calcGenMult(slot_mult, font_size);
-    const gen_source = font_size * @as(f32, @floatFromInt(gen_mult));
-    const scale_factor = gen_mult / slot_mult;
-
-    const gen_scale = Stb.stbtt_ScaleForPixelHeight(&self.font_info, gen_source);
+    const gen_scale = Stb.stbtt_ScaleForPixelHeight(&self.font_info, @as(f32, @floatFromInt(gen_size)));
 
     var bm_w: c_int = undefined;
     var bm_h: c_int = undefined;
@@ -445,32 +433,16 @@ fn getOrCreateGlyph(self: *UiSystem, gctx: *Gctx, codepoint: u21, font_size: f32
     var lsb_font: c_int = undefined;
     Stb.stbtt_GetCodepointHMetrics(&self.font_info, @as(c_int, @intCast(codepoint)), &adv_font, &lsb_font);
 
-    const bm_w_u = @as(u32, @intCast(bm_w));
-    const bm_h_u = @as(u32, @intCast(bm_h));
-    const sf = @as(u32, @intCast(scale_factor));
-    const slot_w = @min((bm_w_u + sf - 1) / sf, GLYPH_SIZE);
-    const slot_h = @min((bm_h_u + sf - 1) / sf, GLYPH_SIZE);
-    const slot_xoff = @divFloor(bm_xoff, @as(c_int, @intCast(sf)));
-    const slot_yoff = @divFloor(bm_yoff, @as(c_int, @intCast(sf)));
+    const cw = @min(@as(u32, @intCast(bm_w)), GLYPH_SIZE);
+    const ch = @min(@as(u32, @intCast(bm_h)), GLYPH_SIZE);
 
     const bm_ptr: [*]const u8 = @ptrCast(bm_data);
     var slot_buf: [GLYPH_SIZE * GLYPH_SIZE * 4]u8 = .{0} ** (GLYPH_SIZE * GLYPH_SIZE * 4);
-
-    for (0..slot_h) |row| {
-        for (0..slot_w) |col| {
-            var sum: u32 = 0;
-            for (0..sf) |sy| {
-                for (0..sf) |sx| {
-                    const src_x = col * sf + sx;
-                    const src_y = row * sf + sy;
-                    if (src_x < bm_w_u and src_y < bm_h_u) {
-                        sum += bm_ptr[src_y * bm_w_u + src_x];
-                    }
-                }
-            }
-            const avg: u8 = @intCast(sum / (sf * sf));
+    for (0..ch) |row| {
+        for (0..cw) |col| {
+            const src = bm_ptr[row * @as(u32, @intCast(bm_w)) + col];
             const dst = (row * GLYPH_SIZE + col) * 4;
-            @memset(slot_buf[dst .. dst + 4], avg);
+            @memset(slot_buf[dst .. dst + 4], src);
         }
     }
 
@@ -500,13 +472,13 @@ fn getOrCreateGlyph(self: *UiSystem, gctx: *Gctx, codepoint: u21, font_size: f32
 
     self.glyph_slots[@as(usize, @intCast(slot_idx))] = GlyphSlot{
         .codepoint = codepoint,
-        .gen_size = slot_size,
+        .gen_size = gen_size,
         .advance = adv_font,
         .lsb = lsb_font,
-        .sdf_width = @as(c_int, @intCast(slot_w)),
-        .sdf_height = @as(c_int, @intCast(slot_h)),
-        .sdf_xoff = slot_xoff,
-        .sdf_yoff = slot_yoff,
+        .sdf_width = @as(c_int, @intCast(cw)),
+        .sdf_height = @as(c_int, @intCast(ch)),
+        .sdf_xoff = bm_xoff,
+        .sdf_yoff = bm_yoff,
     };
 
     return slot_idx;
