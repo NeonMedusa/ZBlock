@@ -9,12 +9,13 @@ const BW = @import("block_world.zig");
 const BlockWorld = BW.BlockWorld;
 const Chunk = BW.Chunk;
 const Vec3 = @import("algebra.zig").Vec3;
-const Vec3i = @import("algebra.zig").Vec3i;
 const ECS = @import("zigecs");
 const Comps = @import("components.zig").Components;
 const Hotbar = @import("inventory.zig").Hotbar;
 const PlayerInventory = @import("inventory.zig").PlayerInventory;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
+const ItemId = @import("item_registry.zig").ItemId;
+const item_infos = @import("item_registry.zig").item_infos;
 
 pub const REGION_SIZE: i32 = 32; // 每个 region 包含 32×32 区块
 const CHUNK_SIZE_X: u32 = BW.CHUNK_SIZE_X;
@@ -22,60 +23,9 @@ const CHUNK_SIZE_Y: u32 = BW.CHUNK_SIZE_Y;
 const CHUNK_SIZE_Z: u32 = BW.CHUNK_SIZE_Z;
 const CHUNK_BLOCKS: usize = CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z;
 
-const BitWriter = struct {
-    buf: []u8,
-    byte_pos: usize = 0,
-    bit_pos: u4 = 0,
-
-    fn write(self: *BitWriter, value: u32, bits: u32) void {
-        var v = value;
-        var remaining = bits;
-        while (remaining > 0) {
-            const space = 8 - self.bit_pos;
-            const take = @min(space, remaining);
-            const mask = (@as(u32, 1) << take) - 1;
-            self.buf[self.byte_pos] |= @as(u8, @intCast((v & mask) << @as(u3, @intCast(self.bit_pos))));
-            v >>= take;
-            self.bit_pos += take;
-            remaining -= take;
-            if (self.bit_pos == 8) {
-                self.bit_pos = 0;
-                self.byte_pos += 1;
-            }
-        }
-    }
-
-    fn finish(self: *BitWriter) usize {
-        if (self.bit_pos > 0) self.byte_pos += 1;
-        return self.byte_pos;
-    }
-};
-
-const BitReader = struct {
-    buf: []const u8,
-    byte_pos: usize = 0,
-    bit_pos: u4 = 0,
-
-    fn read(self: *BitReader, bits: u32) u32 {
-        var result: u32 = 0;
-        var remaining = bits;
-        var shift: u32 = 0;
-        while (remaining > 0) {
-            const space = 8 - self.bit_pos;
-            const take = @min(space, remaining);
-            const mask = (@as(u32, 1) << take) - 1;
-            result |= (@as(u32, self.buf[self.byte_pos] >> @as(u3, @intCast(self.bit_pos))) & mask) << @as(u5, @intCast(shift));
-            shift += take;
-            self.bit_pos += take;
-            remaining -= take;
-            if (self.bit_pos == 8) {
-                self.bit_pos = 0;
-                self.byte_pos += 1;
-            }
-        }
-        return result;
-    }
-};
+const bitstream = @import("bitstream.zig");
+const BitWriter = bitstream.BitWriter;
+const BitReader = bitstream.BitReader;
 
 /// 按区块坐标计算所在的 region 坐标
 fn chunkToRegion(cx: i32, cz: i32) struct { i32, i32 } {
@@ -100,14 +50,14 @@ const WorldRow = struct {
 const HotbarRow = struct {
     id: ?i64 = null,
     slot: u32,
-    block_id: u32,
+    item_name: []const u8,
     count: u32,
 };
 
 const InventoryRow = struct {
     id: ?i64 = null,
     slot: u32,
-    block_id: u32,
+    item_name: []const u8,
     count: u32,
 };
 
@@ -156,21 +106,17 @@ pub const SaveManager = struct {
             \\  last_played TEXT NOT NULL DEFAULT (datetime('now')),
             \\  player_pos_x REAL NOT NULL, player_pos_y REAL NOT NULL, player_pos_z REAL NOT NULL,
             \\  player_health REAL NOT NULL,
-            \\  is_flying INTEGER NOT NULL DEFAULT 0
-            \\);
+            \\  is_flying INTEGER NOT NULL DEFAULT 0);
             \\CREATE TABLE IF NOT EXISTS "HotbarRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
-            \\  block_id INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 1
-            \\);
+            \\  item_name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1);
             \\CREATE TABLE IF NOT EXISTS "InventoryRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
-            \\  block_id INTEGER NOT NULL, count INTEGER NOT NULL DEFAULT 1
-            \\);
+            \\  item_name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1);
             \\CREATE TABLE IF NOT EXISTS "EntityRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, type_id TEXT NOT NULL,
             \\  pos_x REAL NOT NULL, pos_y REAL NOT NULL, pos_z REAL NOT NULL,
-            \\  health REAL NOT NULL DEFAULT 100.0
-            \\);
+            \\  health REAL NOT NULL DEFAULT 100.0);
             \\PRAGMA journal_mode=WAL;
             \\PRAGMA synchronous=NORMAL;
         );
@@ -203,10 +149,10 @@ pub const SaveManager = struct {
         // 写入热键栏
         for (&hotbar.slots, 0..) |*item, i| {
             if (item.item_id == 0) continue;
-            var ins = try self.world_db.conn.prepare("INSERT INTO HotbarRow (slot, block_id, count) VALUES (?, ?, ?)", &.{});
+            var ins = try self.world_db.conn.prepare("INSERT INTO HotbarRow (slot, item_name, count) VALUES (?, ?, ?)", &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
-            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(item.item_id)) });
+            try ins.bind(1, fr.Value{ .string = item_infos[item.item_id].name });
             try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
             try ins.exec();
         }
@@ -219,10 +165,10 @@ pub const SaveManager = struct {
         }
         for (&inventory.slots, 0..) |*item, i| {
             if (item.item_id == 0) continue;
-            var ins = try self.world_db.conn.prepare("INSERT INTO InventoryRow (slot, block_id, count) VALUES (?, ?, ?)", &.{});
+            var ins = try self.world_db.conn.prepare("INSERT INTO InventoryRow (slot, item_name, count) VALUES (?, ?, ?)", &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
-            try ins.bind(1, fr.Value{ .int = @as(i64, @intCast(item.item_id)) });
+            try ins.bind(1, fr.Value{ .string = item_infos[item.item_id].name });
             try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
             try ins.exec();
         }
@@ -278,8 +224,9 @@ pub const SaveManager = struct {
             const slots = try self.world_db.query(HotbarRow).findAll();
             for (slots) |s| {
                 if (s.slot < 9) {
+                    const id = if (ItemId.fromNameRuntime(s.item_name)) |iid| @intFromEnum(iid) else 0;
                     hotbar.slots[@as(usize, @intCast(s.slot))] = .{
-                        .item_id = @as(u32, @intCast(s.block_id)),
+                        .item_id = id,
                         .count = s.count,
                     };
                 }
@@ -291,8 +238,9 @@ pub const SaveManager = struct {
             const slots = try self.world_db.query(InventoryRow).findAll();
             for (slots) |s| {
                 if (s.slot < 27) {
+                    const id = if (ItemId.fromNameRuntime(s.item_name)) |iid| @intFromEnum(iid) else 0;
                     inventory.slots[@as(usize, @intCast(s.slot))] = .{
-                        .item_id = @as(u32, @intCast(s.block_id)),
+                        .item_id = id,
                         .count = s.count,
                     };
                 }

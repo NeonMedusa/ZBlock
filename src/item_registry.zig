@@ -56,4 +56,10 @@ pub const ItemId = enum(u32) {
     pub fn fromInt(i: anytype) ItemId {
         return @enumFromInt(i);
     }
+    pub fn fromNameRuntime(item_name: []const u8) ?ItemId {
+        for (&item_infos, 0..) |entry, i| {
+            if (std.mem.eql(u8, entry.name, item_name)) return @enumFromInt(i);
+        }
+        return null;
+    }
 };
