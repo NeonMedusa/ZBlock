@@ -14,8 +14,8 @@ const Comps = @import("components.zig").Components;
 const Hotbar = @import("inventory.zig").Hotbar;
 const PlayerInventory = @import("inventory.zig").PlayerInventory;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
-const ItemId = @import("item_registry.zig").ItemId;
 const item_infos = @import("item_registry.zig").item_infos;
+const registries = @import("registries.zig");
 
 pub const REGION_SIZE: i32 = 32; // 每个 region 包含 32×32 区块
 const CHUNK_SIZE_X: u32 = BW.CHUNK_SIZE_X;
@@ -224,7 +224,7 @@ pub const SaveManager = struct {
             const slots = try self.world_db.query(HotbarRow).findAll();
             for (slots) |s| {
                 if (s.slot < 9) {
-                    const id = if (ItemId.fromNameRuntime(s.item_name)) |iid| @intFromEnum(iid) else 0;
+                    const id = registries.item_name_to_id.get(s.item_name) orelse 0;
                     hotbar.slots[@as(usize, @intCast(s.slot))] = .{
                         .item_id = id,
                         .count = s.count,
@@ -238,7 +238,7 @@ pub const SaveManager = struct {
             const slots = try self.world_db.query(InventoryRow).findAll();
             for (slots) |s| {
                 if (s.slot < 27) {
-                    const id = if (ItemId.fromNameRuntime(s.item_name)) |iid| @intFromEnum(iid) else 0;
+                    const id = registries.item_name_to_id.get(s.item_name) orelse 0;
                     inventory.slots[@as(usize, @intCast(s.slot))] = .{
                         .item_id = id,
                         .count = s.count,
@@ -276,7 +276,7 @@ pub const SaveManager = struct {
     pub fn loadAllEntities(self: *SaveManager, registry: *ECS.Registry) !void {
         const rows = try self.world_db.query(EntityRow).findAll();
         for (rows) |row| {
-            const eid = EntityTypeId.fromNameRuntime(row.type_id) orelse continue;
+            const eid = EntityTypeId.fromInt(registries.entity_name_to_id.get(row.type_id) orelse continue);
             const info = eid.info();
             const pos = Vec3.new(row.pos_x, row.pos_y, row.pos_z);
             const entity = registry.create();
@@ -392,7 +392,7 @@ pub const SaveManager = struct {
         const runtime_ids = try self.allocator.alloc(u32, palette_size);
         defer self.allocator.free(runtime_ids);
         for (palette_names.items, 0..) |name, i| {
-            runtime_ids[i] = if (BlockId.fromNameRuntime(name)) |id| @intFromEnum(id) else 0;
+            runtime_ids[i] = registries.block_name_to_id.get(name) orelse 0;
         }
 
         // 2. 计算 bits_per_index

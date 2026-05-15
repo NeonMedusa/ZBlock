@@ -254,6 +254,9 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.keybinds = try Keybinds.load(allocator, "config/keybinds.json");
     self.menu_state = .MainMenu;
 
+    // 注册表哈希表（运行时名称查找用）
+    registries.init(allocator);
+
     // 图标缓存 + 图标管线（传入 uniform 缓冲）
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
@@ -298,6 +301,7 @@ pub fn deinit(self: *@This()) void {
         self.block_world.deinit();
         self.save_manager.deinit();
     }
+    registries.deinit(self.allocator);
 }
 
 /// 切换存档（由存档管理界面调用）
