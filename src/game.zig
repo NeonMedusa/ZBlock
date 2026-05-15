@@ -59,6 +59,7 @@ pub fn start(self: *Game) !void {
                 if (self.keybinds.isJustPressed(&self.input, .pause_menu) or self.keybinds.isJustPressed(&self.input, .toggle_inventory)) {
                     self.selected_item = null;
                     self.menu_state = .Gameplay;
+                    self.input.setCursorToCenter();
                 }
                 @import("ui/inventory_screen.zig").update(self);
                 @import("ui/inventory_screen.zig").drawBg(self);

@@ -4,6 +4,7 @@ const Game = @import("../game.zig");
 pub fn update(_: *@This(), game: *Game) void {
     if (game.keybinds.isJustPressed(&game.input, .pause_menu)) {
         game.menu_state = .Gameplay;
+        game.input.setCursorToCenter();
         return;
     }
 
