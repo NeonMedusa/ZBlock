@@ -1,7 +1,6 @@
 // entity_registry.zig
 const std = @import("std");
 const ModelId = @import("rend_ctx.zig").ModelId;
-const block_infos = @import("block_registry.zig").block_infos;
 const ItemDropVal = @import("block_registry.zig").ItemDropVal;
 
 pub const EntityTypeInfo = struct {
@@ -20,7 +19,7 @@ pub const EntityTypeInfo = struct {
     drops: []const ItemDropVal = &.{},
 };
 
-const entity_infos = [_]EntityTypeInfo{
+pub const entity_infos = [_]EntityTypeInfo{
     .{
         .name = "zombie",
         .model_id = ModelId.fromName("CesiumMan"),
@@ -34,7 +33,7 @@ const entity_infos = [_]EntityTypeInfo{
         .detect_range = 16.0,
         .collider_width = 0.5,
         .collider_height = 1.7,
-        .drops = &.{.{ .item_id = block_infos.len + 0, .max_count = 2 }}, // apple
+        .drops = &.{.{ .item_name = "apple", .min_count = 1, .max_count = 2 }},
     },
     .{
         .name = "wolf",

@@ -2,9 +2,9 @@
 const std = @import("std");
 const Direction = @import("direction.zig").Direction;
 
-/// 掉落物配置（原始值 u32 避免编译期循环依赖 item_registry）
+/// 掉落物配置（用字符串名避免循环依赖 item_registry）
 pub const ItemDropVal = struct {
-    item_id: u32,
+    item_name: [:0]const u8,
     min_count: u32 = 1,
     max_count: u32 = 1,
     probability: f32 = 1.0,
@@ -24,7 +24,7 @@ pub const BlockProtoType = struct {
     drops: []const ItemDropVal = &.{},
 };
 
-/// 方块注册表
+/// 方块注册表（每个方块手动指定掉落物）
 pub const block_infos = [_]BlockProtoType{
     .{
         .name = "air",
@@ -35,10 +35,22 @@ pub const block_infos = [_]BlockProtoType{
         .name = "grass",
         .face_variants = .{ 0, 1, 2, 2, 2, 2 },
         .is_directional = false,
+        .drops = &.{.{
+            .item_name = "grass",
+        }},
     },
-    .{ .name = "stone" },
-    .{ .name = "dirt" },
-    .{ .name = "sand" },
+    .{
+        .name = "stone",
+        .drops = &.{.{ .item_name = "stone" }},
+    },
+    .{
+        .name = "dirt",
+        .drops = &.{.{ .item_name = "dirt" }},
+    },
+    .{
+        .name = "sand",
+        .drops = &.{.{ .item_name = "sand" }},
+    },
     .{
         .name = "water",
         .occludes = false,
@@ -49,8 +61,9 @@ pub const block_infos = [_]BlockProtoType{
     },
     .{
         .name = "snow",
+        .drops = &.{.{ .item_name = "snow" }},
     },
-    .{ .name = "foo" },
+    .{ .name = "foo", .drops = &.{.{ .item_name = "foo" }} },
 };
 
 pub const MAX_BLOCKS = block_infos.len;
@@ -75,6 +88,13 @@ pub const BlockId = enum(u32) {
     pub fn fromName(comptime str: []const u8) BlockId {
         const block_name_val = @field(BlockNames, str);
         return @enumFromInt(@intFromEnum(block_name_val));
+    }
+    /// 运行时按名字查找（用于存档加载）
+    pub fn fromNameRuntime(block_name: []const u8) ?BlockId {
+        for (&block_infos, 0..) |info, i| {
+            if (std.mem.eql(u8, info.name, block_name)) return @enumFromInt(i);
+        }
+        return null;
     }
     pub fn prototype(self: BlockId) BlockProtoType {
         return block_infos[@intFromEnum(self)];

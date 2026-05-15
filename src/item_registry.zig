@@ -18,58 +18,42 @@ pub const ItemProtoType = struct {
     max_stack: u32 = 9999,
 };
 
-/// 掉落物配置（用于方块/实体掉落）
-pub const ItemDrop = struct {
-    item: u32, // ItemId 原始值，运行时通过 ItemId.fromInt 转换
-    min_count: u32 = 1,
-    max_count: u32 = 1,
-    probability: f32 = 1.0,
-};
-
 /// 物品注册表（前段 = 方块，后段 = 非方块物品）
 pub const item_infos = blk: {
     const block_count = block_infos.len;
     const extras = .{
-        ItemProtoType{
-            .name = "apple",
-            .category = .food,
-        },
+        ItemProtoType{ .name = "apple", .category = .food },
     };
     var result: [block_count + extras.len]ItemProtoType = undefined;
-    for (0..block_count) |i| {
-        result[i] = .{ .name = block_infos[i].name, .category = .block };
-    }
-    for (result[block_count..], extras) |*info, extra| {
-        info.* = extra;
-    }
+    for (0..block_count) |i| result[i] = .{ .name = block_infos[i].name, .category = .block };
+    for (result[block_count..], extras) |*r, e| r.* = e;
     break :blk result;
 };
 
 pub const MAX_ITEMS = item_infos.len;
 
-/// 物品 ID（不声明 variant，全部通过 fromInt 构造）
+/// 物品名称枚举（编译期查找用）
+pub const ItemNames = blk: {
+    var fields: [MAX_ITEMS]std.builtin.Type.EnumField = undefined;
+    for (&fields, item_infos, 0..) |*f, info, i|
+        f.* = .{ .name = info.name, .value = i };
+    break :blk @Type(.{ .@"enum" = .{
+        .tag_type = u32,
+        .fields = &fields,
+        .decls = &.{},
+        .is_exhaustive = true,
+    } });
+};
+
+/// 编译期物品名→ID
+pub fn itemFromName(comptime name: [:0]const u8) u32 {
+    return @intFromEnum(@field(ItemNames, name));
+}
+
+/// 物品 ID
 pub const ItemId = enum(u32) {
     _,
     pub fn fromInt(i: anytype) ItemId {
         return @enumFromInt(i);
-    }
-    pub fn info(self: ItemId) ItemProtoType {
-        return item_infos[@intFromEnum(self)];
-    }
-    pub fn name(self: ItemId) [:0]const u8 {
-        return self.info().name;
-    }
-    /// 如果 ID 对应一个方块，返回 BlockId
-    pub fn toBlockId(self: ItemId) ?@import("block_registry.zig").BlockId {
-        const v = @intFromEnum(self);
-        if (v < block_infos.len) return @import("block_registry.zig").BlockId.fromInt(v);
-        return null;
-    }
-};
-
-/// 快捷构造常用物品 ID
-pub const predefined = struct {
-    pub fn apple() ItemId {
-        return ItemId.fromInt(block_infos.len + 0);
     }
 };

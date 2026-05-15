@@ -514,10 +514,10 @@ fn handleLeftClick(self: *Game) !void {
                 if (health.current <= 0) {
                     if (self.registry.tryGet(Comps.AIAgent, entity_hit.entity)) |agent| {
                         const rng = std.crypto.random;
-                        for (agent.type_id.info().drops) |drop| {
-                            if (rng.float(f32) >= drop.probability) continue;
-                            const extra: u32 = @intFromFloat(rng.float(f32) * @as(f32, @floatFromInt(drop.max_count - drop.min_count + 1)));
-                            tryItemToInventory(self, drop.item_id, drop.min_count + extra);
+                        for (registries.getEntityDrops(@intFromEnum(agent.type_id))) |d| {
+                            if (rng.float(f32) >= d.probability) continue;
+                            const extra: u32 = @intFromFloat(rng.float(f32) * @as(f32, @floatFromInt(d.max_count - d.min_count + 1)));
+                            tryItemToInventory(self, d.item_id, d.min_count + extra);
                         }
                     }
                     self.block_world.cleanupEntity(&self.registry, entity_hit.entity);
@@ -526,7 +526,23 @@ fn handleLeftClick(self: *Game) !void {
             }
         }
     } else if (block_hit.hit) {
-        try self.block_world.setBlock(block_hit.block_pos, .fromName("air"));
+        const pos = Vec3.new(
+            @as(f32, @floatFromInt(block_hit.block_pos.x)) + 0.5,
+            @as(f32, @floatFromInt(block_hit.block_pos.y)) + 0.5,
+            @as(f32, @floatFromInt(block_hit.block_pos.z)) + 0.5,
+        );
+        const block = self.block_world.getBlockAt(pos);
+        const drops = registries.getBlockDrops(@intFromEnum(block));
+        for (drops) |d| {
+            if (std.crypto.random.float(f32) < d.probability) {
+                const extra: u32 = @intFromFloat(std.crypto.random.float(f32) * @as(f32, @floatFromInt(d.max_count - d.min_count + 1)));
+                tryItemToInventory(self, d.item_id, d.min_count + extra);
+            }
+        }
+        try self.block_world.setBlock(
+            block_hit.block_pos,
+            .fromName("air"),
+        );
     }
 }
 
@@ -867,7 +883,9 @@ const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
 const PlayerInventory = @import("inventory.zig").PlayerInventory;
 const ItemStack = @import("inventory.zig").ItemStack;
+const registries = @import("registries.zig");
 const item_infos = @import("item_registry.zig").item_infos;
+const ItemId = @import("item_registry.zig").ItemId;
 const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 const SaveManager = @import("save_manager.zig").SaveManager;
 const Keybinds = @import("keybinds.zig").Keybinds;

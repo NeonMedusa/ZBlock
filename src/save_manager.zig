@@ -22,38 +22,64 @@ const CHUNK_SIZE_Y: u32 = BW.CHUNK_SIZE_Y;
 const CHUNK_SIZE_Z: u32 = BW.CHUNK_SIZE_Z;
 const CHUNK_BLOCKS: usize = CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z;
 
+const BitWriter = struct {
+    buf: []u8,
+    byte_pos: usize = 0,
+    bit_pos: u4 = 0,
+
+    fn write(self: *BitWriter, value: u32, bits: u32) void {
+        var v = value;
+        var remaining = bits;
+        while (remaining > 0) {
+            const space = 8 - self.bit_pos;
+            const take = @min(space, remaining);
+            const mask = (@as(u32, 1) << take) - 1;
+            self.buf[self.byte_pos] |= @as(u8, @intCast((v & mask) << @as(u3, @intCast(self.bit_pos))));
+            v >>= take;
+            self.bit_pos += take;
+            remaining -= take;
+            if (self.bit_pos == 8) {
+                self.bit_pos = 0;
+                self.byte_pos += 1;
+            }
+        }
+    }
+
+    fn finish(self: *BitWriter) usize {
+        if (self.bit_pos > 0) self.byte_pos += 1;
+        return self.byte_pos;
+    }
+};
+
+const BitReader = struct {
+    buf: []const u8,
+    byte_pos: usize = 0,
+    bit_pos: u4 = 0,
+
+    fn read(self: *BitReader, bits: u32) u32 {
+        var result: u32 = 0;
+        var remaining = bits;
+        var shift: u32 = 0;
+        while (remaining > 0) {
+            const space = 8 - self.bit_pos;
+            const take = @min(space, remaining);
+            const mask = (@as(u32, 1) << take) - 1;
+            result |= (@as(u32, self.buf[self.byte_pos] >> @as(u3, @intCast(self.bit_pos))) & mask) << @as(u5, @intCast(shift));
+            shift += take;
+            self.bit_pos += take;
+            remaining -= take;
+            if (self.bit_pos == 8) {
+                self.bit_pos = 0;
+                self.byte_pos += 1;
+            }
+        }
+        return result;
+    }
+};
+
 /// 按区块坐标计算所在的 region 坐标
 fn chunkToRegion(cx: i32, cz: i32) struct { i32, i32 } {
     return .{ @divFloor(cx, REGION_SIZE), @divFloor(cz, REGION_SIZE) };
-}
-
-/// 将 256KB 区块方块数据打包为 blob（每方块 4 字节：低 28 位 block_id，高 4 位 facing）
-fn packBlocks(blocks: *const [CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockState, buf: []u8) void {
-    var i: usize = 0;
-    for (blocks) |*plane| {
-        for (plane) |*col| {
-            for (col) |bs| {
-                const v = @as(u32, @intCast(@intFromEnum(bs.block_id) & 0x0FFFFFFF)) |
-                    (@as(u32, @intCast(@intFromEnum(bs.facing))) << 28);
-                std.mem.writeInt(u32, buf[i..][0..4], v, .little);
-                i += 4;
-            }
-        }
-    }
-}
-
-fn unpackBlocks(buf: []const u8, blocks: *[CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockState) void {
-    var i: usize = 0;
-    for (blocks) |*plane| {
-        for (plane) |*col| {
-            for (col) |*bs| {
-                const v = std.mem.readInt(u32, buf[i..][0..4], .little);
-                bs.* = BlockState.init(BlockId.fromInt(v & 0x0FFFFFFF));
-                bs.facing = @enumFromInt((v >> 28) & 0xF);
-                i += 4;
-            }
-        }
-    }
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -320,19 +346,69 @@ pub const SaveManager = struct {
         }
     }
 
-    // ── 区块（经 region 分片） ──
+    // ── 区块（per-chunk palette + bit-packed data）──
 
     pub fn saveChunk(self: *SaveManager, cx: i32, cz: i32, chunk: *const Chunk) !void {
         const rx, const rz = chunkToRegion(cx, cz);
-        var buf: [CHUNK_BLOCKS * 4]u8 = undefined;
-        packBlocks(&chunk.blocks, &buf);
-
         var db = try self.getOrOpenRegion(rx, rz);
-        var stmt = try db.conn.prepare("INSERT OR REPLACE INTO Chunks (x,z,data) VALUES (?,?,?)", &.{});
+
+        // 1. 扫描 65536 个方块，构建 block_id → palette_index 映射
+        var palette_map = std.AutoHashMap(u32, u32).init(self.allocator);
+        defer palette_map.deinit();
+        for (chunk.blocks) |plane|
+            for (plane) |col|
+                for (col) |bs|
+                    if (!palette_map.contains(@intFromEnum(bs.block_id)))
+                        try palette_map.put(@intFromEnum(bs.block_id), @intCast(palette_map.count()));
+
+        const palette_count = palette_map.count();
+
+        // 2. 收集 palette 名字列表（临时数组按索引写入）
+        var name_ptrs = try self.allocator.alloc([]const u8, palette_count);
+        defer self.allocator.free(name_ptrs);
+        var iter = palette_map.iterator();
+        while (iter.next()) |entry|
+            name_ptrs[entry.value_ptr.*] = BlockRegistry.block_infos[entry.key_ptr.*].name;
+
+        // 序列化 palette: JSON 字符串数组
+        var json_parts = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, 256);
+        defer json_parts.deinit(self.allocator);
+        try json_parts.append(self.allocator, '[');
+        for (name_ptrs, 0..) |name, i| {
+            if (i > 0) try json_parts.append(self.allocator, ',');
+            try json_parts.append(self.allocator, '"');
+            try json_parts.appendSlice(self.allocator, name);
+            try json_parts.append(self.allocator, '"');
+        }
+        try json_parts.append(self.allocator, ']');
+        const palette_json = try json_parts.toOwnedSlice(self.allocator);
+        defer self.allocator.free(palette_json);
+
+        // 3. 计算 bits_per_index
+        const bpi = if (palette_count <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, palette_count - 1) + 1));
+        const total_bits = CHUNK_BLOCKS * (bpi + 4);
+        const buf_size = (total_bits + 7) / 8;
+
+        // 4. Bit-pack data
+        var buf = try self.allocator.alloc(u8, buf_size);
+        defer self.allocator.free(buf);
+        @memset(buf, 0);
+        var w = BitWriter{ .buf = buf };
+        for (chunk.blocks) |plane|
+            for (plane) |col|
+                for (col) |bs| {
+                    w.write(palette_map.get(@intFromEnum(bs.block_id)).?, bpi);
+                    w.write(@intFromEnum(bs.facing), 4);
+                };
+        const actual = w.finish();
+
+        // 5. 写入 DB
+        var stmt = try db.conn.prepare("INSERT OR REPLACE INTO Chunks (x,z,palette,data) VALUES (?,?,?,?)", &.{});
         defer stmt.deinit();
         try stmt.bind(0, fr.Value{ .int = cx });
         try stmt.bind(1, fr.Value{ .int = cz });
-        try stmt.bind(2, fr.Value{ .blob = buf[0..] });
+        try stmt.bind(2, fr.Value{ .string = palette_json });
+        try stmt.bind(3, fr.Value{ .blob = buf[0..actual] });
         try stmt.exec();
     }
 
@@ -340,18 +416,54 @@ pub const SaveManager = struct {
     pub fn loadChunk(self: *SaveManager, cx: i32, cz: i32, chunk: *Chunk) !bool {
         const rx, const rz = chunkToRegion(cx, cz);
         var db = try self.getOrOpenRegion(rx, rz);
-        var stmt = try db.conn.prepare("SELECT data FROM Chunks WHERE x=? AND z=?", &.{});
+        var stmt = try db.conn.prepare("SELECT palette, data FROM Chunks WHERE x=? AND z=?", &.{});
         defer stmt.deinit();
         try stmt.bind(0, fr.Value{ .int = cx });
         try stmt.bind(1, fr.Value{ .int = cz });
-        if (try stmt.step()) {
-            const col = try stmt.column(0);
-            if (col == .blob) {
-                unpackBlocks(col.blob, &chunk.blocks);
-                return true;
+        if (!try stmt.step()) return false;
+
+        // 1. 解析 palette（JSON 字符串数组：["grass","stone","dirt"]）
+        const col0 = try stmt.column(0);
+        const src = col0.string;
+        // 简单 JSON 数组解析：跳过 [ 和 "，按 "," 分割
+        var palette_names = std.ArrayListUnmanaged([]const u8){};
+        defer palette_names.deinit(self.allocator);
+        {
+            var i: usize = 1;
+            while (i < src.len and src[i] != ']') : (i += 1) {
+                if (src[i] == '"') {
+                    const start = i + 1;
+                    const end = std.mem.indexOfScalarPos(u8, src, start, '"') orelse break;
+                    try palette_names.append(self.allocator, src[start..end]);
+                    i = end;
+                }
             }
         }
-        return false;
+
+        const palette_size = palette_names.items.len;
+        const runtime_ids = try self.allocator.alloc(u32, palette_size);
+        defer self.allocator.free(runtime_ids);
+        for (palette_names.items, 0..) |name, i| {
+            runtime_ids[i] = if (BlockId.fromNameRuntime(name)) |id| @intFromEnum(id) else 0;
+        }
+
+        // 2. 计算 bits_per_index
+        const bpi = if (palette_size <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, palette_size - 1) + 1));
+
+        // 3. 解包 data
+        const col1 = try stmt.column(1);
+        var r = BitReader{ .buf = col1.blob };
+        for (&chunk.blocks) |*plane|
+            for (plane) |*col|
+                for (col) |*bs| {
+                    const pal_idx = r.read(bpi);
+                    const facing_val = r.read(4);
+                    const id = if (pal_idx < palette_size) runtime_ids[pal_idx] else 0;
+                    bs.* = BlockState.init(BlockId.fromInt(id));
+                    bs.facing = @enumFromInt(facing_val);
+                };
+
+        return true;
     }
 
     pub fn saveAllChunks(self: *SaveManager, world: *BlockWorld) !void {
@@ -382,6 +494,7 @@ pub const SaveManager = struct {
         try sess.conn.execAll(
             \\CREATE TABLE IF NOT EXISTS "Chunks" (
             \\  x INTEGER NOT NULL, z INTEGER NOT NULL,
+            \\  palette TEXT NOT NULL,
             \\  data BLOB NOT NULL,
             \\  PRIMARY KEY (x, z)
             \\);
