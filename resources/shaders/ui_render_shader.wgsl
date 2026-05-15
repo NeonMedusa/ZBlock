@@ -33,8 +33,8 @@ fn fs_main(in : VertexOutput) -> @location(0) vec4f {
     var alpha: f32 = 1.0;
     if (in.texcoord.x >= 0.0) {
         let sdf = textureSample(sdf_texture, sdf_sampler, in.texcoord).r;
-        let edge = 0.1 * fwidth(sdf);
-        alpha = smoothstep(0.5 - edge, 0.5 + edge, sdf);
+        let edge = 0.2 * fwidth(sdf);
+        alpha = smoothstep(0.25 - edge, 0.6 + edge, sdf);
     }
     let color = vec4f(in.color.rgb, in.color.a * alpha);
     let corrected = pow(color, vec4f(2.2));
