@@ -17,7 +17,9 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     );
 
     var chunk_instance_idx: u32 = 0;
+    const frustum = if (world) Frustum.fromViewProj(Mat4.mul(game.ubo.proj_matrix, game.ubo.view_matrix)) else undefined;
     if (world) {
+
         // ========== 单次遍历：收集实体/实例数据 + 构建DrawBatch ==========
         var entity_idx: u32 = 0;
         var ins_idx: u32 = 0;
@@ -29,6 +31,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             const entity_pos = view.getConst(Comps.Position, entity);
             const alpha = game.accumulator / TICK_DT;
             const render_pos = Vec3.lerp(entity_pos.prev, entity_pos.vec, alpha);
+            if (!frustum.containsPoint(render_pos)) continue; // 视锥体剔除
             game.res_manager.entities_data[entity_idx] = EntityData{
                 .transform = Mat4.fromTranslate(render_pos),
             };
@@ -135,12 +138,17 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         }
 
         // 绘制所有区块
-        var chunk_it = game.block_world.chunks.valueIterator();
-        while (chunk_it.next()) |loaded| {
+        var chunk_it = game.block_world.chunks.iterator();
+        while (chunk_it.next()) |entry| {
+            const loaded = &entry.value_ptr.*;
+            const origin = entry.key_ptr.*;
+            const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
+            const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 256, @as(f32, @floatFromInt(origin.z + 16)));
+            if (!frustum.intersectsAABB(min, max)) continue; // 视锥体裁剪
             var mesh_it = loaded.mesh_cache.meshes.iterator();
-            while (mesh_it.next()) |entry| {
-                const mat_idx = entry.key_ptr.*;
-                const mesh = entry.value_ptr;
+            while (mesh_it.next()) |mesh_entry| {
+                const mat_idx = mesh_entry.key_ptr.*;
+                const mesh = mesh_entry.value_ptr;
                 if (mesh.vertex_count == 0) continue;
 
                 if (game.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
@@ -209,6 +217,7 @@ const RendCTX = Imports.RendCTX;
 const EntityData = RendCTX.EntityData;
 const InstanceData = RendCTX.InstanceData;
 
+const Frustum = @import("frustum.zig").Frustum;
 const Game = Imports.Game;
 
 const Comps = Imports.Comps;
