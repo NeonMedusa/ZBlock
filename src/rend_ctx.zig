@@ -359,7 +359,10 @@ pub const Model = struct {
                 parents[i] = if (parent_node) |p| blk: {
                     var found: i32 = -1;
                     for (gltf_skin.joints, 0..) |j, idx| {
-                        if (j == p) { found = @intCast(idx); break; }
+                        if (j == p) {
+                            found = @intCast(idx);
+                            break;
+                        }
                     }
                     break :blk found;
                 } else -1;
@@ -545,77 +548,12 @@ pub const Model = struct {
                 model.meshes[mesh_idx].primitives[prim_idx].index_buffer = index_buffer;
                 model.meshes[mesh_idx].primitives[prim_idx].index_count = @intCast(index_data.items.len);
                 // 顶点
-                var vertex_data = std.ArrayList(VertexAttribute){};
-                defer vertex_data.deinit(allocator);
-                for (gltf_prim.attributes) |attribute| {
-                    switch (attribute) {
-                        .position => |idx| {
-                            const accessor = gltf.data.accessors[idx];
-                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                            while (it.next()) |v| {
-                                try vertex_data.append(allocator, .{
-                                    .position = .new(v[0], v[1], v[2]),
-                                    .texcoord = .new(0.1, 0.9),
-                                    .joint_indices = .{ 0, 0, 0, 0 }, // 骨骼矩阵索引
-                                    .joint_weights = .{ 0, 0, 0, 0 }, // 骨骼矩阵权重
-                                });
-                            }
-                        },
-                        .normal => |idx| {
-                            const accessor = gltf.data.accessors[idx];
-                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                            var i: u32 = 0;
-                            while (it.next()) |n| : (i += 1) {
-                                vertex_data.items[i].normal = .new(n[0], n[1], n[2]);
-                            }
-                        },
-                        .texcoord => |idx| {
-                            const accessor = gltf.data.accessors[idx];
-                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                            var i: u32 = 0;
-                            while (it.next()) |t| : (i += 1)
-                                vertex_data.items[i].texcoord = .new(t[0], t[1]);
-                        },
-                        .joints => |idx| {
-                            const accessor = gltf.data.accessors[idx];
-                            inline for (.{ u8, u16, u32 }) |J| {
-                                if (accessor.component_type == Gltf.ComponentType.fromType(J)) {
-                                    var it = accessor.iterator(J, &gltf, gltf.glb_binary.?);
-                                    var i: usize = 0;
-                                    while (it.next()) |j| : (i += 1)
-                                        vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
-                                    break;
-                                }
-                            }
-                        },
-                        .weights => |idx| {
-                            const accessor = gltf.data.accessors[idx];
-                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
-                            var i: usize = 0;
-                            while (it.next()) |w| : (i += 1) {
-                                // normalize weights
-                                const sum: f32 = w[0] + w[1] + w[2] + w[3];
-                                if (sum > 0) {
-                                    vertex_data.items[i].joint_weights = .{ w[0] / sum, w[1] / sum, w[2] / sum, w[3] / sum };
-                                }
-                            }
-                        },
-                        else => {},
-                    }
+                const has_skin = gltf.data.skins.len > 0;
+                if (has_skin) {
+                    try loadPrimitiveVertices(SkinnedVertex, allocator, gctx, &gltf, gltf_prim, &model.meshes[mesh_idx].primitives[prim_idx]);
+                } else {
+                    try loadPrimitiveVertices(StaticVertex, allocator, gctx, &gltf, gltf_prim, &model.meshes[mesh_idx].primitives[prim_idx]);
                 }
-                const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-                    .size = @sizeOf(VertexAttribute) * vertex_data.items.len,
-                    .usage = Wgpu.WGPUBufferUsage_CopyDst | Wgpu.WGPUBufferUsage_Vertex,
-                    .mappedAtCreation = 0,
-                });
-                Wgpu.wgpuQueueWriteBuffer(
-                    gctx.queue,
-                    vertex_buffer,
-                    0,
-                    vertex_data.items.ptr,
-                    Wgpu.wgpuBufferGetSize(vertex_buffer),
-                );
-                model.meshes[mesh_idx].primitives[prim_idx].vertex_buffer = vertex_buffer;
                 // 绑定材质
                 if (gltf_prim.material) |material_idx|
                     model.meshes[mesh_idx].primitives[prim_idx].material = model.materials[material_idx];
@@ -624,6 +562,77 @@ pub const Model = struct {
 
         // 返回
         return model;
+    }
+
+    fn loadPrimitiveVertices(comptime V: type, allocator: std.mem.Allocator, gctx: *Gctx, gltf: *Gltf, gltf_prim: anytype, prim: *Primitive) !void {
+        var vertex_data = std.ArrayList(V){};
+        defer vertex_data.deinit(allocator);
+        for (gltf_prim.attributes) |attribute| {
+            switch (attribute) {
+                .position => |idx| {
+                    const accessor = gltf.data.accessors[idx];
+                    var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                    while (it.next()) |v| {
+                        try vertex_data.append(allocator, .{ .position = .new(v[0], v[1], v[2]) });
+                    }
+                },
+                .normal => |idx| {
+                    const accessor = gltf.data.accessors[idx];
+                    var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                    var i: u32 = 0;
+                    while (it.next()) |n| : (i += 1)
+                        vertex_data.items[i].normal = .new(n[0], n[1], n[2]);
+                },
+                .texcoord => |idx| {
+                    const accessor = gltf.data.accessors[idx];
+                    var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                    var i: u32 = 0;
+                    while (it.next()) |t| : (i += 1)
+                        vertex_data.items[i].texcoord = .new(t[0], t[1]);
+                },
+                .joints => |idx| {
+                    if (V != StaticVertex) {
+                        const accessor = gltf.data.accessors[idx];
+                        inline for (.{ u8, u16, u32 }) |J| {
+                            if (accessor.component_type == Gltf.ComponentType.fromType(J)) {
+                                var it = accessor.iterator(J, gltf, gltf.glb_binary.?);
+                                var i: usize = 0;
+                                while (it.next()) |j| : (i += 1)
+                                    vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                break;
+                            }
+                        }
+                    }
+                },
+                .weights => |idx| {
+                    if (V != StaticVertex) {
+                        const accessor = gltf.data.accessors[idx];
+                        var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                        var i: usize = 0;
+                        while (it.next()) |w| : (i += 1) {
+                            const sum: f32 = w[0] + w[1] + w[2] + w[3];
+                            if (sum > 0) {
+                                vertex_data.items[i].joint_weights = .{ w[0] / sum, w[1] / sum, w[2] / sum, w[3] / sum };
+                            }
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+        const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = @sizeOf(V) * vertex_data.items.len,
+            .usage = Wgpu.WGPUBufferUsage_CopyDst | Wgpu.WGPUBufferUsage_Vertex,
+            .mappedAtCreation = 0,
+        });
+        Wgpu.wgpuQueueWriteBuffer(
+            gctx.queue,
+            vertex_buffer,
+            0,
+            vertex_data.items.ptr,
+            Wgpu.wgpuBufferGetSize(vertex_buffer),
+        );
+        prim.vertex_buffer = vertex_buffer;
     }
 
     pub fn deinit(self: *Model, allocator: std.mem.Allocator) void {
@@ -724,6 +733,7 @@ pub const DrawBatch = struct {
     index_count: u32,
     bind_group: Wgpu.WGPUBindGroup,
     instance_idx: u32,
+    vertex_format: VertexFormat,
 };
 
 pub const ResManager = struct {
@@ -850,12 +860,23 @@ pub const SceneUniform = struct {
     }
 };
 
-pub const VertexAttribute = struct {
+pub const VertexFormat = enum { static_model, skinned_model };
+
+// 静态顶点：32 字节，用于方块/chunk。
+// 没有关节信息，只能用 pipeline_static 渲染。
+pub const StaticVertex = struct {
     position: Vec3 = Vec3.zero,
     normal: Vec3 = Vec3.new(0, 1, 0),
-    tangent: Vec4 = Vec4.new(1, 0, 0, 1),
     texcoord: Vec2 = Vec2.zero,
-    color: Vec4 = Vec4.new(1, 1, 1, 1),
+};
+
+// 蒙皮顶点：64 字节，用于带骨骼动画的模型。
+// 前三个字段与 StaticVertex 完全一致，所以共用同一个 vertex buffer 时
+// static pipeline 能正确读取前 32 字节（忽略后 32 字节）。
+pub const SkinnedVertex = struct {
+    position: Vec3 = Vec3.zero,
+    normal: Vec3 = Vec3.new(0, 1, 0),
+    texcoord: Vec2 = Vec2.zero,
     joint_indices: [4]u32 = .{ 0, 0, 0, 0 },
     joint_weights: [4]f32 = .{ 1, 0, 0, 0 },
 };

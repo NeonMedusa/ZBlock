@@ -4,15 +4,14 @@ const Imports = @import("imports.zig");
 const Vec2 = Imports.Vec2;
 const Vec3 = Imports.Vec3;
 const Vec3i = Imports.Vec3i;
-const Vec4 = Imports.Vec4;
 const Quat = Imports.Quat;
 const Wgpu = Imports.Wgpu;
 const Material = Imports.RendCTX.Material;
 const TextureRes = Imports.RendCTX.TextureRes;
 const Gctx = Imports.Gctx;
 const RenderPipeline = @import("render_pipeline.zig");
+const StaticVertex = Imports.RendCTX.StaticVertex;
 const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
-const VertexAttribute = Imports.RendCTX.VertexAttribute;
 const BlockRegistry = @import("block_registry.zig");
 const BlockId = BlockRegistry.BlockId;
 const block_infos = BlockRegistry.block_infos;
@@ -64,7 +63,7 @@ pub const ChunkMesh = struct {
     vertex_count: u32,
     index_count: u32,
 
-    cpu_vertices: std.ArrayListUnmanaged(VertexAttribute) = .{},
+    cpu_vertices: std.ArrayListUnmanaged(StaticVertex) = .{},
     cpu_indices: std.ArrayListUnmanaged(u32) = .{},
 
     pub fn init(gctx: *Gctx) !ChunkMesh {
@@ -105,7 +104,7 @@ pub const ChunkMesh = struct {
         const vertices = self.cpu_vertices.items;
         const indices = self.cpu_indices.items;
 
-        const vtx_size = @sizeOf(VertexAttribute) * vertices.len;
+        const vtx_size = @sizeOf(StaticVertex) * vertices.len;
         self.vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = vtx_size,
             .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
@@ -285,7 +284,7 @@ pub const ChunkMeshCache = struct {
 pub const MeshBuildResult = struct {
     origin: Vec3i,
     allocator: std.mem.Allocator,
-    vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(VertexAttribute) = [_]std.ArrayListUnmanaged(VertexAttribute){.{}} ** MAX_MATERIALS,
+    vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(StaticVertex) = [_]std.ArrayListUnmanaged(StaticVertex){.{}} ** MAX_MATERIALS,
     indices: [MAX_MATERIALS]std.ArrayListUnmanaged(u32) = [_]std.ArrayListUnmanaged(u32){.{}} ** MAX_MATERIALS,
 
     pub fn deinit(self: *MeshBuildResult) void {
@@ -389,14 +388,10 @@ pub fn buildChunkMeshCPU(
                     for (face_data.positions, face_data.uvs) |local_pos, uv| {
                         const world_pos = rot.rotate(local_pos).add(center);
                         const world_normal = rot.rotate(local_dir.normal());
-                        try result.vertices[mat_idx].append(allocator, VertexAttribute{
+                        try result.vertices[mat_idx].append(allocator, StaticVertex{
                             .position = world_pos,
                             .normal = world_normal,
                             .texcoord = uv,
-                            .tangent = Vec4.new(1, 0, 0, 1),
-                            .color = Vec4.new(1, 1, 1, 1),
-                            .joint_indices = .{ 0, 0, 0, 0 },
-                            .joint_weights = .{ 1, 0, 0, 0 },
                         });
                     }
                     try result.indices[mat_idx].appendSlice(allocator, &[_]u32{

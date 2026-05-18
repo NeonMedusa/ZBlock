@@ -1,14 +1,6 @@
-# 渲染管线
+# UI 渲染
 
-## 着色器颜色校正
-
-SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正确显示。
-
----
-
-## UI 系统
-
-### 文字渲染演进
+## 文字渲染演进
 
 文字渲染经历了三次迭代：
 
@@ -114,28 +106,3 @@ pub const UiVertex = struct {
 4. 继续添加前景层（图标、文字描边等）
 5. `endFrame()` → `wgpuQueueWriteBuffer` 上传顶点/索引/uniform
 6. `render.zig`：先 draw 背景层（0 到 bg_index_count），再 draw 图标，最后 draw 前景层
-
----
-
-## 3D 渲染
-
-- 使用 wgpu-native + GLFW
-- 固定光照方向 + Blinn-Phong 光照模型
-- 支持 glTF/glb 模型
-- 区块使用 greedy mesh 合并同材质面
-
-### 视锥体裁剪
-
-`render.zig` 每帧从 view-projection 矩阵提取 6 个视锥平面，在渲染循环中剔除不可见对象：
-
-```
-左平面: clip.x + clip.w ≥ 0    右平面:  clip.w - clip.x ≥ 0
-底平面: clip.y + clip.w ≥ 0    顶平面:  clip.w - clip.y ≥ 0
-近平面: clip.z ≥ 0            远平面:  clip.w - clip.z ≥ 0
-```
-
-- **实体**：检查 AABB（碰撞箱 `width`×`height`）与视锥的相交性 `intersectsAABB(min, max)`，不可见则跳过 draw batch
-- **区块**：检查 chunk AABB（16×256×16）与视锥的相交性 `intersectsAABB(min, max)`，不相交则跳过 mesh 遍历
-- 模型和 mesh 缓存不因剔除而卸载——视角转回时零延迟
-
-实现见 `src/frustum.zig`（约 100 行）。

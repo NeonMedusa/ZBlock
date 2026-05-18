@@ -1,11 +1,14 @@
 // render_shader.wgsl
-// group0全局绑定，这些都是每帧更新的
+// 主渲染管线：两个 vertex entry point (vs_static/vs_skinned) 共享同一个 fs_main 片段着色器。
+// 所有模型/方块共用这一个 shader module，两条 pipeline 仅 vertex attribute layout 不同。
+
+// --- 全局绑定 (group 0, 每帧更新) ---
 @group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;
 @group(0) @binding(1) var<storage, read> entities_data : array<EntitiesData>;
 @group(0) @binding(2) var<storage, read> ins_data : array<InstanceData>;
 @group(0) @binding(3) var<storage, read> bone_matrices : array<mat4x4f>;
 
-// group1纹理绑定
+// --- 材质绑定 (group 1, 纹理) ---
 @group(1) @binding(0) var<uniform> material_uniform : MaterialConstants;
 @group(1) @binding(1) var color_texture : texture_2d<f32>;
 @group(1) @binding(2) var normal_texture : texture_2d<f32>;
@@ -35,14 +38,22 @@ struct InstanceData {
     _padding: array<i32, 2>,
 };
 
-struct VertexInput {
+// --- 顶点格式 ---
+// StaticVertex: chunk + 无骨骼模型，32 字节 (pos 12 + normal 12 + texcoord 8)
+struct StaticVertex {
     @location(0) position: vec3f,
     @location(1) normal: vec3f,
-    @location(2) tangent: vec4f,
-    @location(3) texcoord: vec2f,
-    @location(4) color: vec4f,
-    @location(5) joint_indices: vec4u,
-    @location(6) joint_weights: vec4f,
+    @location(2) texcoord: vec2f,
+};
+
+// SkinnedVertex: 蒙皮模型用，64 字节；
+// 前三个字段与 StaticVertex 一致，static pipeline 读前 32 字节也能正确工作。
+struct SkinnedVertex {
+    @location(0) position: vec3f,
+    @location(1) normal: vec3f,
+    @location(2) texcoord: vec2f,
+    @location(3) joint_indices: vec4u,
+    @location(4) joint_weights: vec4f,
 };
 
 struct VertexOutput {
@@ -53,6 +64,7 @@ struct VertexOutput {
     @location(3) color: vec4f,
 };
 
+// --- 骨骼蒙皮 (CPU 计算变换矩阵后写入 storage buffer, GPU 按 bone_offset 索引) ---
 fn skinPosition(input_position: vec3f, bone_offset: i32, joint_indices: vec4u, joint_weights: vec4f) -> vec3f {
     var skin_matrix: mat4x4f;
     for (var i = 0u; i < 4u; i++) {
@@ -77,6 +89,7 @@ fn skinNormal(input_normal: vec3f, bone_offset: i32, joint_indices: vec4u, joint
     return (skin_matrix * vec4f(input_normal, 0.0)).xyz;
 }
 
+// --- 光照参数 (硬编码) ---
 const LIGHT_DIRECTION = vec3f(1.0, 2.0, 1.0);
 const LIGHT_COLOR = vec3f(1.0, 1.0, 0.95);
 const AMBIENT_STRENGTH = 0.3;
@@ -97,18 +110,32 @@ fn calculateLighting(normal: vec3f, position: vec3f, camera_pos: vec3f, base_col
     return vec4f(final_color, base_color.a);
 }
 
+// --- vs_static: 静态物体 (方块/chunk, 无骨骼动画) ---
 @vertex
-fn vs_main(in: VertexInput, @builtin(instance_index) ins_idx: u32) -> VertexOutput {
+fn vs_static(in: StaticVertex, @builtin(instance_index) ins_idx: u32) -> VertexOutput {
     let ins = ins_data[ins_idx];
     let entity = entities_data[ins.entity_idx];
-    let is_skinned = ins.bone_offset >= 0;
-    var skinned_pos = in.position;
-    var skinned_normal = in.normal;
-    if (is_skinned) {
-        skinned_pos = skinPosition(in.position, ins.bone_offset, in.joint_indices, in.joint_weights);
-        skinned_normal = skinNormal(in.normal, ins.bone_offset, in.joint_indices, in.joint_weights);
-    }
+    let model_matrix = entity.transform * ins.transform;
+    let world_pos = model_matrix * vec4f(in.position, 1.0);
+    let out_position = scene_uniform.proj_matrix * scene_uniform.view_matrix * world_pos;
+    let world_normal = normalize((model_matrix * vec4f(in.normal, 0.0)).xyz);
 
+    var out: VertexOutput;
+    out.position = out_position;
+    out.texcoord = in.texcoord;
+    out.world_normal = world_normal;
+    out.world_position = world_pos.xyz;
+    out.color = vec4f(1.0, 1.0, 1.0, 1.0);
+    return out;
+}
+
+// --- vs_skinned: 蒙皮模型 (带骨骼动画的实体) ---
+@vertex
+fn vs_skinned(in: SkinnedVertex, @builtin(instance_index) ins_idx: u32) -> VertexOutput {
+    let ins = ins_data[ins_idx];
+    let entity = entities_data[ins.entity_idx];
+    let skinned_pos = skinPosition(in.position, ins.bone_offset, in.joint_indices, in.joint_weights);
+    let skinned_normal = skinNormal(in.normal, ins.bone_offset, in.joint_indices, in.joint_weights);
     let model_matrix = entity.transform * ins.transform;
     let world_pos = model_matrix * vec4f(skinned_pos, 1.0);
     let out_position = scene_uniform.proj_matrix * scene_uniform.view_matrix * world_pos;
@@ -119,17 +146,15 @@ fn vs_main(in: VertexInput, @builtin(instance_index) ins_idx: u32) -> VertexOutp
     out.texcoord = in.texcoord;
     out.world_normal = world_normal;
     out.world_position = world_pos.xyz;
-    out.color = in.color;
+    out.color = vec4f(1.0, 1.0, 1.0, 1.0);
     return out;
 }
 
+// --- 片段着色器 (static/skinned 共用) ---
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    // 获取基础颜色
     var base_color: vec4f;
-    
     if (material_uniform.has_base_color != 0u) {
-        // 从纹理采样基础颜色
         let texture_dims = textureDimensions(color_texture);
         let texel_coords = vec2i(
             i32(in.texcoord.x * f32(texture_dims.x)),
@@ -137,18 +162,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         );
         base_color = textureLoad(color_texture, texel_coords, 0);
     } else {
-        // 使用顶点颜色
-        base_color = in.color;
+        base_color = vec4f(1.0, 1.0, 1.0, 1.0);
     }
-    
-    // 获取法线（暂时只使用顶点法线）
     let normal = normalize(in.world_normal);
-    
-    // 应用光照
     let lit_color = calculateLighting(normal, in.world_position, scene_uniform.camera_position, base_color);
-    
-    // 简单的伽玛校正
-    let final_color = pow(lit_color, vec4f(2.2));
-    
-    return final_color;
+    return pow(lit_color, vec4f(2.2));
 }

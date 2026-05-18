@@ -74,6 +74,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
                             .index_count = primitive.index_count,
                             .bind_group = primitive.material.bind_group,
                             .instance_idx = ins_idx,
+                            .vertex_format = if (model.skeleton != null) .skinned_model else .static_model,
                         };
                         game.res_manager.draw_batch_count += 1;
                         ins_idx += 1;
@@ -146,18 +147,23 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
 
     if (world) {
-        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.handle);
         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
 
         // 绘制所有模型实体
         for (game.res_manager.draw_batches[0..game.res_manager.draw_batch_count]) |batch| {
+            const pipe = switch (batch.vertex_format) {
+                .static_model => game.render_pipeline.pipeline_static,
+                .skinned_model => game.render_pipeline.pipeline_skinned,
+            };
+            Wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipe);
             Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, batch.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(batch.vertex_buffer));
             Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, batch.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(batch.index_buffer));
             Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, batch.bind_group, 0, null);
             Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, batch.index_count, 1, 0, 0, batch.instance_idx);
         }
 
-        // 绘制所有区块
+        // 绘制所有区块（使用 static pipeline）
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_static);
         var chunk_it = game.block_world.chunks.iterator();
         while (chunk_it.next()) |entry| {
             const loaded = &entry.value_ptr.*;

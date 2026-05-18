@@ -2,7 +2,7 @@
 const std = @import("std");
 const Wgpu = @import("imports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
-const VertexAttribute = @import("rend_ctx.zig").VertexAttribute;
+const SkinnedVertex = @import("rend_ctx.zig").SkinnedVertex;
 const Game = @import("game.zig");
 
 pub const WireframePipeline = struct {
@@ -56,13 +56,13 @@ pub const WireframePipeline = struct {
             },
         );
 
-        const attributes = Gctx.generateVertexAttributes(VertexAttribute);
+        const attributes = Gctx.generateVertexAttributes(SkinnedVertex);
         const pipeline_desc = Wgpu.WGPURenderPipelineDescriptor{
             .layout = pipeline_layout,
             .vertex = .{
                 .bufferCount = 1,
                 .buffers = &Wgpu.WGPUVertexBufferLayout{
-                    .arrayStride = @sizeOf(VertexAttribute),
+                    .arrayStride = @sizeOf(SkinnedVertex),
                     .stepMode = Wgpu.WGPUVertexStepMode_Vertex,
                     .attributeCount = attributes.len,
                     .attributes = &attributes,

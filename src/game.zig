@@ -317,6 +317,7 @@ pub fn deinit(self: *@This()) void {
 
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
+    self.wireframe_pipeline.deinit();
     self.ui_system.deinit();
     self.icon_atlas.deinit();
 
