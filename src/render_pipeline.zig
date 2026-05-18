@@ -34,6 +34,14 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
                 .hasDynamicOffset = 0,
             },
         },
+        .{ // bone_matrices
+            .binding = 3,
+            .visibility = Wgpu.WGPUShaderStage_Vertex,
+            .buffer = .{
+                .type = Wgpu.WGPUBufferBindingType_ReadOnlyStorage,
+                .hasDynamicOffset = 0,
+            },
+        },
     };
     const global_bgl = Wgpu.wgpuDeviceCreateBindGroupLayout(
         game.gctx.device,
@@ -64,8 +72,15 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
                 .offset = 0,
                 .size = Wgpu.wgpuBufferGetSize(game.res_manager.instances_data_buffer),
             },
+            .{ // bone_matrices（占位，动画系统初始化后通过 setBoneBuffer 更新）
+                .binding = 3,
+                .buffer = game.res_manager.instances_data_buffer,
+                .offset = 0,
+                .size = Wgpu.wgpuBufferGetSize(game.res_manager.instances_data_buffer),
+            },
         },
     });
+    // ... after creating the pipeline, add setBoneBuffer method
 
     const material_bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
         .{ // texture_uniform
@@ -174,7 +189,21 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
     };
 }
 
-pub fn deinit(self: @This()) void {
+    pub fn setBoneBuffer(self: *@This(), game: *Game, bone_buffer: Wgpu.WGPUBuffer) void {
+        if (self.global_bind_group) |old| Wgpu.wgpuBindGroupRelease(old);
+        self.global_bind_group = Wgpu.wgpuDeviceCreateBindGroup(game.gctx.device, &.{
+            .layout = self.global_bgl,
+            .entryCount = 4,
+            .entries = &[_]Wgpu.WGPUBindGroupEntry{
+                .{ .binding = 0, .buffer = game.res_manager.scene_uniform_buffer, .offset = 0, .size = Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer) },
+                .{ .binding = 1, .buffer = game.res_manager.entities_data_buffer, .offset = 0, .size = Wgpu.wgpuBufferGetSize(game.res_manager.entities_data_buffer) },
+                .{ .binding = 2, .buffer = game.res_manager.instances_data_buffer, .offset = 0, .size = Wgpu.wgpuBufferGetSize(game.res_manager.instances_data_buffer) },
+                .{ .binding = 3, .buffer = bone_buffer, .offset = 0, .size = Wgpu.wgpuBufferGetSize(bone_buffer) },
+            },
+        });
+    }
+
+    pub fn deinit(self: @This()) void {
     Wgpu.wgpuRenderPipelineRelease(self.handle);
     Wgpu.wgpuBindGroupLayoutRelease(self.global_bgl);
     Wgpu.wgpuBindGroupRelease(self.global_bind_group);

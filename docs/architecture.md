@@ -5,8 +5,8 @@
 ```
 src/
 ├── main.zig            — 入口
-├── game.zig            — 核心循环、状态机、掉落逻辑
-├── registries.zig      — 注册表聚合层（编译期解析掉落物）
+├── game.zig            — 核心循环、状态机、掉落逻辑、动画集成
+├── registries.zig      — 注册表聚合层（编译期解析掉落物 + 运行时哈希表）
 ├── block_registry.zig   — 方块注册表 & BlockId
 ├── item_registry.zig    — 物品注册表 & ItemId
 ├── entity_registry.zig  — 实体注册表 & EntityTypeId
@@ -29,14 +29,17 @@ src/
 ├── render_pipeline.zig — 3D 渲染管线
 ├── gctx.zig            — WGPU 上下文
 │
+├── animation.zig       — 骨骼动画系统（CPU 更新 + storage buffer 蒙皮）
+├── frustum.zig         — 视锥体裁剪
+├── bitstream.zig       — 位读写工具（存档调色板编码用）
+│
 ├── block_world.zig     — 方块世界（chunk 管理、物理、AI 寻路）
 ├── chunk_mesh.zig      — chunk 网格生成
 ├── raycast.zig         — 射线检测（方块 + 实体）
 │
 ├── inventory.zig       — 物品栏数据结构
 ├── keybinds.zig        — 按键绑定（JSON 配置）
-├── save_manager.zig    — 存档引擎
-└── ...
+└── components.zig      — ECS 组件定义
 ```
 
 ## 核心架构设计

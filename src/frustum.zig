@@ -67,15 +67,7 @@ pub const Frustum = struct {
         return Frustum{ .left = left, .right = right, .bottom = bottom, .top = top, .near = near, .far = far };
     }
 
-    pub fn containsPoint(self: Frustum, p: Vec3) bool {
-        return self.left.dot(p) >= 0 and
-            self.right.dot(p) >= 0 and
-            self.bottom.dot(p) >= 0 and
-            self.top.dot(p) >= 0 and
-            self.near.dot(p) >= 0 and
-            self.far.dot(p) >= 0;
-    }
-
+    /// 测试 AABB 是否与视锥相交（8 顶点对 6 平面的排除测试）
     pub fn intersectsAABB(self: Frustum, min: Vec3, max: Vec3) bool {
         const corners = [_]Vec3{
             Vec3.new(min.x, min.y, min.z),

@@ -54,4 +54,12 @@ pub const Components = struct {
 
     // ---- 玩法 ----
     pub const SpawnPos = struct { pos: Vec3 }; // 重生点
+
+    // ---- 动画 ----
+    pub const AnimationState = struct {
+        clip_name: []const u8 = "idle",
+        time: f32 = 0,
+        speed: f32 = 1.0,
+        bone_offset: u32 = 0,
+    };
 };

@@ -731,6 +731,16 @@ pub const Mat4 = struct {
         return mul(scale_mat, self); // 注意顺序: scale * self
     }
 
+    pub fn lerp(a: Mat4, b: Mat4, t: f32) Mat4 {
+        var result: Mat4 = undefined;
+        for (0..4) |col| {
+            for (0..4) |row| {
+                result.m[col][row] = a.m[col][row] + (b.m[col][row] - a.m[col][row]) * t;
+            }
+        }
+        return result;
+    }
+
     pub fn perspective(fovy: f32, aspect: f32, near: f32, far: f32) Mat4 {
         const f = 1.0 / @tan(fovy * 0.5 * PI / 180.0);
         const nf = 1.0 / (near - far);

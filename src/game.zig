@@ -23,6 +23,7 @@ last_space_press: f64 = 0.0,
 accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
 sprint_toggled: bool = false, // 冲刺开关，渲染层触发，tick 层读取
 keybinds: Keybinds,
+animation_system: AnimationSystem,
 save_initialized: bool = false, // 延迟初始化：选存档后才加载游戏
 game_cleaned: bool = false, // returnToMenu 已清理 gameplay 资源，阻止 deinit 重复释放
 menu_state: MenuState = .MainMenu,
@@ -73,12 +74,17 @@ pub fn start(self: *Game) !void {
             if (self.accumulator > TICK_DT * 5) self.accumulator = TICK_DT * 5;
 
             if (self.accumulator >= TICK_DT) {
-                var pv = self.registry.view(.{Comps.Position}, .{});
-                var pi = pv.entityIterator();
-                while (pi.next()) |e| {
-                    var p = pv.get(e);
-                    p.prev = p.vec;
+                // 保存上一帧的位置用于渲染插值
+                {
+                    var pv = self.registry.view(.{Comps.Position}, .{});
+                    var pi = pv.entityIterator();
+                    while (pi.next()) |e| {
+                        var p = pv.get(e);
+                        p.prev = p.vec;
+                    }
                 }
+                // 骨骼矩阵 double buffer 交换
+                self.animation_system.swapBuffers();
             }
 
             while (self.accumulator >= TICK_DT) {
@@ -100,10 +106,15 @@ pub fn start(self: *Game) !void {
                     }
                     self.block_world.updateAI(&self.registry, TICK_DT);
                     try updateEntities(self);
+                    // 动画更新（物理 tick 层）
+                    self.animation_system.update(&self.registry, &self.res_manager, TICK_DT);
                 }
             }
 
             if (self.menu_state == .Gameplay) {
+                // 骨骼矩阵插值并上传到 GPU
+                self.animation_system.upload(self.gctx.queue, self.accumulator / TICK_DT);
+
                 handleFlightToggle(self);
                 if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
                     self.sprint_toggled = !self.sprint_toggled;
@@ -193,6 +204,23 @@ fn initGame(self: *Game) !void {
     }
 
     self.save_manager.loadAllEntities(&self.registry) catch |err| std.debug.print("loadEntities error: {}\n", .{err});
+
+    // 为存档加载的实体补加动画状态（不持久化到存档）
+    {
+        var anim_view = self.registry.view(.{ Comps.ModelName }, .{});
+        var anim_iter = anim_view.entityIterator();
+        while (anim_iter.next()) |ent| {
+            if (!self.registry.has(Comps.AnimationState, ent)) {
+                if (self.animation_system.allocBoneSlot()) |bone_offset| {
+                    self.registry.add(ent, Comps.AnimationState{
+                        .clip_name = @import("rend_ctx.zig").ClipName.walk,
+                        .bone_offset = bone_offset,
+                    });
+                }
+            }
+        }
+    }
+
     self.save_initialized = true;
 }
 
@@ -257,6 +285,14 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 注册表哈希表（运行时名称查找用）
     registries.init(allocator);
 
+    // 初始化动画系统
+    self.animation_system = try AnimationSystem.init(allocator, self.gctx.device);
+
+    // 为渲染管线设置骨骼矩阵缓冲
+
+    // 为渲染管线设置骨骼矩阵缓冲
+    self.render_pipeline.setBoneBuffer(self, self.animation_system.bone_pool_buffer);
+
     // 图标缓存 + 图标管线（传入 uniform 缓冲）
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
@@ -302,6 +338,7 @@ pub fn deinit(self: *@This()) void {
         self.save_manager.deinit();
     }
     registries.deinit(self.allocator);
+    self.animation_system.deinit();
 }
 
 /// 切换存档（由存档管理界面调用）
@@ -775,6 +812,12 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     self.registry.add(entity, Comps.MoveIntent{});
     self.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
     self.registry.add(entity, Comps.AttackCooldown{ .interval = info.attack_interval });
+    if (self.animation_system.allocBoneSlot()) |bone_offset| {
+        self.registry.add(entity, Comps.AnimationState{
+            .clip_name = @import("rend_ctx.zig").ClipName.walk,
+            .bone_offset = bone_offset,
+        });
+    }
 }
 
 fn updateChunks(self: *Game) !void {
@@ -894,6 +937,7 @@ const IconAtlas = @import("icon_atlas.zig").IconAtlas;
 const SaveManager = @import("save_manager.zig").SaveManager;
 const Keybinds = @import("keybinds.zig").Keybinds;
 const KeyAction = @import("keybinds.zig").Action;
+const AnimationSystem = @import("animation.zig").AnimationSystem;
 
 /// 构建 ChunkIO 回调，使区块加载/卸载时自动读写存档
 fn chunkIO(mgr: *SaveManager) BlockWorld.ChunkIO {

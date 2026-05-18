@@ -205,6 +205,43 @@ const Node = struct {
     mesh: ?usize,
 };
 
+pub const Interpolation = enum { linear, step, cubic };
+
+pub const AnimChannel = struct {
+    joint_index: u32,
+    interpolation: Interpolation,
+    property: TargetProperty,
+    times: []f32,
+    values: []f32,
+    stride: u32,
+};
+
+pub const TargetProperty = enum { translation, rotation, scale };
+
+pub const AnimClip = struct {
+    name: []const u8,
+    duration: f32,
+    channels: []AnimChannel,
+};
+
+pub const ClipName = struct {
+    pub const idle = "idle";
+    pub const walk = "walk";
+    pub const run = "run";
+    pub const death = "death";
+    pub const attack = "attack";
+};
+
+pub const Skeleton = struct {
+    joint_count: u32,
+    inverse_bind_matrices: []Mat4,
+    parent_indices: []i32,
+};
+
+pub const MAX_BONES: u32 = 128;
+pub const MAX_ANIM_ENTITIES: u32 = 1000;
+pub const TOTAL_BONES: usize = MAX_ANIM_ENTITIES * MAX_BONES;
+
 pub const ModelInfo = struct {
     name: [:0]const u8,
     path: [:0]const u8,
@@ -253,9 +290,12 @@ pub const ModelId = enum(u32) {
 pub const Model = struct {
     meshes: []Mesh, // 对应gltf.data.meshes
     textures_res: []TextureRes, //对应gltf.data.textures
-    anim_textures: []TextureRes, //对应gltf.data.animations
     materials: []Material, //对应gltf.data.materials
     nodes: []Node, //简化的nodes结构，对应gltf.data.nodes
+    skeleton: ?Skeleton = null,
+    animations: []AnimClip = &.{},
+    anim_mapping: std.StringHashMapUnmanaged([]const u8) = .{},
+    anim_mapping_loaded: bool = false,
     pub fn load(
         allocator: std.mem.Allocator,
         gctx: *Gctx,
@@ -295,11 +335,144 @@ pub const Model = struct {
             };
         }
 
-        // 动画纹理，暂时不处理，先实现基础渲染
-        model.anim_textures = try allocator.alloc(TextureRes, gltf.data.animations.len);
-        for (model.anim_textures) |*anim_texture| {
-            anim_texture.texture = null;
-            anim_texture.view = null;
+        // 提取骨骼（skins）
+        if (gltf.data.skins.len > 0) {
+            const gltf_skin = &gltf.data.skins[0];
+            const joint_count = gltf_skin.joints.len;
+            var ibms = try allocator.alloc(Mat4, joint_count);
+            var parents = try allocator.alloc(i32, joint_count);
+
+            // 提取逆绑定矩阵
+            if (gltf_skin.inverse_bind_matrices) |ibm_idx| {
+                const accessor = gltf.data.accessors[ibm_idx];
+                var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                var i: usize = 0;
+                while (it.next()) |arr| : (i += 1)
+                    ibms[i] = Mat4.fromSlice(arr[0..16]);
+            } else {
+                @memset(ibms, Mat4.identity);
+            }
+
+            // 计算骨骼的 parent_indices
+            for (gltf_skin.joints, 0..) |node_idx, i| {
+                const parent_node = gltf.data.nodes[node_idx].parent;
+                parents[i] = if (parent_node) |p| blk: {
+                    var found: i32 = -1;
+                    for (gltf_skin.joints, 0..) |j, idx| {
+                        if (j == p) { found = @intCast(idx); break; }
+                    }
+                    break :blk found;
+                } else -1;
+            }
+
+            model.skeleton = Skeleton{
+                .joint_count = @intCast(joint_count),
+                .inverse_bind_matrices = ibms,
+                .parent_indices = parents,
+            };
+        }
+
+        // 提取动画
+        model.animations = try allocator.alloc(AnimClip, gltf.data.animations.len);
+        for (gltf.data.animations, 0..) |gltf_anim, anim_idx| {
+            const anim_name = gltf_anim.name orelse "<unnamed>";
+            const clip_name = try allocator.dupe(u8, anim_name);
+            var clip = AnimClip{
+                .name = clip_name,
+                .duration = 0,
+                .channels = &.{},
+            };
+
+            // 计算动画总时长
+            for (gltf_anim.samplers) |s| {
+                const input_acc = gltf.data.accessors[s.input];
+                var it = input_acc.iterator(f32, &gltf, gltf.glb_binary.?);
+                while (it.next()) |v| {
+                    if (v[0] > clip.duration) clip.duration = v[0];
+                }
+            }
+
+            // 构建 channels
+            var channels = try allocator.alloc(AnimChannel, gltf_anim.channels.len);
+            for (gltf_anim.channels, 0..) |gltf_chan, ch_idx| {
+                const sampler = &gltf_anim.samplers[gltf_chan.sampler];
+                const input_acc = gltf.data.accessors[sampler.input];
+                const output_acc = gltf.data.accessors[sampler.output];
+
+                // 读 keyframe times
+                var times = try allocator.alloc(f32, @as(usize, @intCast(input_acc.count)));
+                {
+                    var it = input_acc.iterator(f32, &gltf, gltf.glb_binary.?);
+                    var i: usize = 0;
+                    while (it.next()) |v| : (i += 1) times[i] = v[0];
+                }
+
+                // 读 keyframe values
+                const num_keyframes = @as(usize, @intCast(input_acc.count));
+                const component_count: u32 = switch (gltf_chan.target.property) {
+                    .translation, .scale => 3,
+                    .rotation => 4,
+                    else => 0,
+                };
+                // CUBICSPLINE 时每个关键帧有 3 分量（in/value/out），取中间 value
+                const cubic_factor: u32 = if (sampler.interpolation == .cubicspline) 3 else 1;
+                const values_per_frame = component_count * cubic_factor;
+                const total_values = num_keyframes * values_per_frame;
+                var values = try allocator.alloc(f32, total_values);
+                {
+                    var it = output_acc.iterator(f32, &gltf, gltf.glb_binary.?);
+                    var i: usize = 0;
+                    while (it.next()) |v| {
+                        for (v) |comp| {
+                            if (i < total_values) {
+                                values[i] = comp;
+                                i += 1;
+                            }
+                        }
+                    }
+                }
+
+                // 对于 CUBICSPLINE，跳过 in/out tangent，只取 value
+                // LINEAR/STEP 直接使用
+                channels[ch_idx] = .{
+                    .joint_index = blk: {
+                        const global_node = gltf_chan.target.node;
+                        if (gltf.data.skins.len > 0) {
+                            const gs = &gltf.data.skins[0];
+                            for (gs.joints, 0..) |n, j| {
+                                if (n == global_node) break :blk @as(u32, @intCast(j));
+                            }
+                        }
+                        break :blk @as(u32, @intCast(global_node));
+                    },
+                    .property = switch (gltf_chan.target.property) {
+                        .translation => .translation,
+                        .rotation => .rotation,
+                        .scale => .scale,
+                        else => .translation,
+                    },
+                    .interpolation = switch (sampler.interpolation) {
+                        .linear => .linear,
+                        .step => .step,
+                        .cubicspline => .cubic,
+                    },
+                    .times = times,
+                    .values = values,
+                    .stride = if (sampler.interpolation == .cubicspline) component_count else values_per_frame,
+                };
+            }
+            clip.channels = channels;
+            model.animations[anim_idx] = clip;
+        }
+
+        // 加载动画映射 JSON（可选）
+        {
+            const json_path = try std.fmt.allocPrint(allocator, "resources/models/{s}.anim.json", .{name});
+            defer allocator.free(json_path);
+            if (loadAnimMapping(allocator, json_path)) |mapping| {
+                model.anim_mapping = mapping;
+                model.anim_mapping_loaded = true;
+            } else |_| {}
         }
 
         // 加载纹理
@@ -403,6 +576,30 @@ pub const Model = struct {
                             while (it.next()) |t| : (i += 1)
                                 vertex_data.items[i].texcoord = .new(t[0], t[1]);
                         },
+                        .joints => |idx| {
+                            const accessor = gltf.data.accessors[idx];
+                            inline for (.{ u8, u16, u32 }) |J| {
+                                if (accessor.component_type == Gltf.ComponentType.fromType(J)) {
+                                    var it = accessor.iterator(J, &gltf, gltf.glb_binary.?);
+                                    var i: usize = 0;
+                                    while (it.next()) |j| : (i += 1)
+                                        vertex_data.items[i].joint_indices = .{ j[0], j[1], j[2], j[3] };
+                                    break;
+                                }
+                            }
+                        },
+                        .weights => |idx| {
+                            const accessor = gltf.data.accessors[idx];
+                            var it = accessor.iterator(f32, &gltf, gltf.glb_binary.?);
+                            var i: usize = 0;
+                            while (it.next()) |w| : (i += 1) {
+                                // normalize weights
+                                const sum: f32 = w[0] + w[1] + w[2] + w[3];
+                                if (sum > 0) {
+                                    vertex_data.items[i].joint_weights = .{ w[0] / sum, w[1] / sum, w[2] / sum, w[3] / sum };
+                                }
+                            }
+                        },
                         else => {},
                     }
                 }
@@ -433,32 +630,51 @@ pub const Model = struct {
         // 1. 释放所有纹理资源
         for (self.textures_res) |*tex| tex.deinit();
         allocator.free(self.textures_res);
-        // 2. 释放动画纹理
-        for (self.anim_textures) |*tex| tex.deinit();
-        allocator.free(self.anim_textures);
-        // 3. 释放材质资源
+        // 2. 释放材质资源
         for (self.materials) |*material| material.deinit();
         allocator.free(self.materials);
 
-        // 4. 释放网格和 primitive 资源
+        // 3. 释放网格和 primitive 资源
         for (self.meshes) |mesh| {
             for (mesh.primitives) |primitive| {
-                // 释放顶点缓冲区
                 if (primitive.vertex_buffer) |buffer|
                     Wgpu.wgpuBufferRelease(buffer);
-
-                // 释放索引缓冲区
                 if (primitive.index_buffer) |buffer|
                     Wgpu.wgpuBufferRelease(buffer);
-                // 注意：primitive.material 是引用，不在这里释放
-                // 它指向 materials 数组，会在步骤3中释放
             }
             allocator.free(mesh.primitives);
         }
         allocator.free(self.meshes);
 
-        // 5. 释放节点数据
+        // 4. 释放节点数据
         allocator.free(self.nodes);
+
+        // 5. 释放骨骼数据
+        if (self.skeleton) |skel| {
+            allocator.free(skel.inverse_bind_matrices);
+            allocator.free(skel.parent_indices);
+        }
+
+        // 6. 释放动画数据
+        for (self.animations) |clip| {
+            allocator.free(clip.name);
+            for (clip.channels) |ch| {
+                allocator.free(ch.times);
+                allocator.free(ch.values);
+            }
+            allocator.free(clip.channels);
+        }
+        allocator.free(self.animations);
+
+        // 7. 释放动画映射
+        if (self.anim_mapping_loaded) {
+            var it = self.anim_mapping.iterator();
+            while (it.next()) |entry| {
+                allocator.free(entry.key_ptr.*);
+                allocator.free(entry.value_ptr.*);
+            }
+            self.anim_mapping.deinit(allocator);
+        }
     }
 };
 
@@ -473,6 +689,33 @@ fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
         current_idx = node.parent orelse break;
     }
     return world_matrix;
+}
+
+fn loadAnimMapping(allocator: std.mem.Allocator, path: []const u8) !std.StringHashMapUnmanaged([]const u8) {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    var file = std.fs.cwd().openFile(path_z, .{}) catch |err| switch (err) {
+        error.FileNotFound => return error.FileNotFound,
+        else => return err,
+    };
+    defer file.close();
+    const data = try file.readToEndAlloc(allocator, 8192);
+    defer allocator.free(data);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{ .ignore_unknown_fields = true });
+    defer parsed.deinit();
+
+    var map = std.StringHashMapUnmanaged([]const u8){};
+    const obj = parsed.value.object;
+    var it = obj.iterator();
+    while (it.next()) |entry| {
+        if (entry.value_ptr.* == .string) {
+            const key = try allocator.dupe(u8, entry.key_ptr.*);
+            const val = try allocator.dupe(u8, entry.value_ptr.*.string);
+            map.put(allocator, key, val) catch {};
+        }
+    }
+    return map;
 }
 
 pub const DrawBatch = struct {
@@ -618,13 +861,16 @@ pub const VertexAttribute = struct {
 };
 
 pub const EntityData = struct {
-    transform: Mat4, //实体的世界变换
+    transform: Mat4,
+    bone_offset: i32 = -1,
+    _padding: [3]i32 = undefined,
 };
 
 pub const InstanceData = struct {
-    transform: Mat4, //渲染实例的变换
-    entity_idx: u32, // 该渲染实例属于哪个游戏实体
-    _padding: [3]f32 = undefined,
+    transform: Mat4,
+    entity_idx: u32,
+    bone_offset: i32 = -1,
+    _padding: [2]i32 = undefined,
 };
 
 const Imports = @import("imports.zig");

@@ -25,16 +25,35 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         var ins_idx: u32 = 0;
         game.res_manager.draw_batch_count = 0;
 
-        var view = game.registry.view(.{ Comps.ModelName, Comps.Position }, .{});
+        // 在实体遍历前，收集所有有 AnimationState 的实体
+        var anim_map = std.AutoHashMap(u32, i32).init(game.allocator);
+        defer anim_map.deinit();
+        {
+            var view = game.registry.view(.{ Comps.AnimationState }, .{});
+            var it = view.entityIterator();
+            while (it.next()) |e| {
+                const state = view.get(e);
+                anim_map.put(@as(u32, @intCast(e.index)), @as(i32, @intCast(state.bone_offset))) catch {};
+            }
+        }
+
+        var view = game.registry.view(.{ Comps.ModelName, Comps.Position, Comps.Collider }, .{});
         var iter = view.entityIterator();
         while (iter.next()) |entity| {
             const entity_pos = view.getConst(Comps.Position, entity);
             const alpha = game.accumulator / TICK_DT;
             const render_pos = Vec3.lerp(entity_pos.prev, entity_pos.vec, alpha);
-            if (!frustum.containsPoint(render_pos)) continue; // 视锥体剔除
+            const col = view.get(Comps.Collider, entity);
+            const half_w = col.width / 2;
+            const aabb_min = Vec3.new(render_pos.x - half_w, render_pos.y, render_pos.z - half_w);
+            const aabb_max = Vec3.new(render_pos.x + half_w, render_pos.y + col.height, render_pos.z + half_w);
+            if (!frustum.intersectsAABB(aabb_min, aabb_max)) continue;
+            const bone_off = anim_map.get(@as(u32, @intCast(entity.index))) orelse -1;
             game.res_manager.entities_data[entity_idx] = EntityData{
                 .transform = Mat4.fromTranslate(render_pos),
+                .bone_offset = bone_off,
             };
+
 
             const model_name = view.getConst(Comps.ModelName, entity);
             const model = game.res_manager.getOrLoadModel(model_name.id);
@@ -46,6 +65,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
                         game.res_manager.instances_data[ins_idx] = .{
                             .transform = node.matrix,
                             .entity_idx = entity_idx,
+                            .bone_offset = bone_off,
                         };
 
                         game.res_manager.draw_batches[game.res_manager.draw_batch_count] = .{
@@ -219,6 +239,7 @@ const InstanceData = RendCTX.InstanceData;
 
 const Frustum = @import("frustum.zig").Frustum;
 const Game = Imports.Game;
+const std = @import("std");
 
 const Comps = Imports.Comps;
 

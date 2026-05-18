@@ -3,6 +3,7 @@
 @group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;
 @group(0) @binding(1) var<storage, read> entities_data : array<EntitiesData>;
 @group(0) @binding(2) var<storage, read> ins_data : array<InstanceData>;
+@group(0) @binding(3) var<storage, read> bone_matrices : array<mat4x4f>;
 
 // group1纹理绑定
 @group(1) @binding(0) var<uniform> material_uniform : MaterialConstants;
@@ -23,11 +24,15 @@ struct MaterialConstants {
 
 struct EntitiesData {
     transform: mat4x4f,
+    bone_offset: i32,
+    _padding: array<i32, 3>,
 };
 
 struct InstanceData {
     transform: mat4x4f,
     entity_idx: u32,
+    bone_offset: i32,
+    _padding: array<i32, 2>,
 };
 
 struct VertexInput {
@@ -46,67 +51,75 @@ struct VertexOutput {
     @location(1) world_normal: vec3f,
     @location(2) world_position: vec3f,
     @location(3) color: vec4f,
+};
+
+fn skinPosition(input_position: vec3f, bone_offset: i32, joint_indices: vec4u, joint_weights: vec4f) -> vec3f {
+    var skin_matrix: mat4x4f;
+    for (var i = 0u; i < 4u; i++) {
+        let w = joint_weights[i];
+        if (w > 0.0) {
+            let mat = bone_matrices[bone_offset + i32(joint_indices[i])];
+            if (i == 0u) { skin_matrix = mat * w; } else { skin_matrix = skin_matrix + mat * w; }
+        }
+    }
+    return (skin_matrix * vec4f(input_position, 1.0)).xyz;
 }
 
-// 硬编码的光照参数（方便调试）
-const LIGHT_DIRECTION = vec3f(1.0, 2.0, 1.0);  // 光源方向
-const LIGHT_COLOR = vec3f(1.0, 1.0, 0.95);     // 暖白色光
-const AMBIENT_STRENGTH = 0.3;                  // 环境光强度
-const SPECULAR_STRENGTH = 0.5;                 // 高光强度
-const SPECULAR_SHININESS = 32.0;               // 高光光泽度
-
-// 辅助函数：计算世界法线
-fn calculateWorldNormal(model_matrix: mat4x4f, local_normal: vec3f) -> vec3f {
-    let world_normal = (model_matrix * vec4f(local_normal, 0.0)).xyz;
-    return normalize(world_normal);
+fn skinNormal(input_normal: vec3f, bone_offset: i32, joint_indices: vec4u, joint_weights: vec4f) -> vec3f {
+    var skin_matrix: mat4x4f;
+    for (var i = 0u; i < 4u; i++) {
+        let w = joint_weights[i];
+        if (w > 0.0) {
+            let mat = bone_matrices[bone_offset + i32(joint_indices[i])];
+            if (i == 0u) { skin_matrix = mat * w; } else { skin_matrix = skin_matrix + mat * w; }
+        }
+    }
+    return (skin_matrix * vec4f(input_normal, 0.0)).xyz;
 }
 
-// 简单的光照计算
+const LIGHT_DIRECTION = vec3f(1.0, 2.0, 1.0);
+const LIGHT_COLOR = vec3f(1.0, 1.0, 0.95);
+const AMBIENT_STRENGTH = 0.3;
+const SPECULAR_STRENGTH = 0.5;
+const SPECULAR_SHININESS = 32.0;
+
 fn calculateLighting(normal: vec3f, position: vec3f, camera_pos: vec3f, base_color: vec4f) -> vec4f {
     let n = normalize(normal);
-    
     let light_dir = normalize(LIGHT_DIRECTION);
-    
     let ambient = AMBIENT_STRENGTH * base_color.rgb;
-    
     let diffuse_factor = max(dot(n, light_dir), 0.0);
     let diffuse = diffuse_factor * LIGHT_COLOR * base_color.rgb;
-    
     let view_dir = normalize(camera_pos - position);
     let reflect_dir = reflect(-light_dir, n);
     let specular_factor = pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS);
     let specular = specular_factor * SPECULAR_STRENGTH * LIGHT_COLOR;
-    
     let final_color = ambient + diffuse + specular;
     return vec4f(final_color, base_color.a);
 }
 
 @vertex
 fn vs_main(in: VertexInput, @builtin(instance_index) ins_idx: u32) -> VertexOutput {
-    // 获取实例数据
     let ins = ins_data[ins_idx];
-    // 通过entity_idx获取游戏实体数据
     let entity = entities_data[ins.entity_idx];
-    
-    // 计算完整的模型矩阵：实体变换 * 实例变换
+    let is_skinned = ins.bone_offset >= 0;
+    var skinned_pos = in.position;
+    var skinned_normal = in.normal;
+    if (is_skinned) {
+        skinned_pos = skinPosition(in.position, ins.bone_offset, in.joint_indices, in.joint_weights);
+        skinned_normal = skinNormal(in.normal, ins.bone_offset, in.joint_indices, in.joint_weights);
+    }
+
     let model_matrix = entity.transform * ins.transform;
-    
-    // 计算世界坐标
-    let world_pos = model_matrix * vec4f(in.position, 1.0);
-    
-    // 计算裁剪空间坐标
+    let world_pos = model_matrix * vec4f(skinned_pos, 1.0);
     let out_position = scene_uniform.proj_matrix * scene_uniform.view_matrix * world_pos;
-    
-    // 计算世界法线
-    let world_normal = calculateWorldNormal(model_matrix, in.normal);
-    
-    // 输出
+    let world_normal = normalize((model_matrix * vec4f(skinned_normal, 0.0)).xyz);
+
     var out: VertexOutput;
     out.position = out_position;
     out.texcoord = in.texcoord;
     out.world_normal = world_normal;
     out.world_position = world_pos.xyz;
-    out.color = in.color;   // 传递顶点颜色
+    out.color = in.color;
     return out;
 }
 

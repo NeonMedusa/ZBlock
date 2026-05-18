@@ -63,3 +63,35 @@
 3. 现行消费代码**不需要任何修改**（接口不变）
 
 目前 JSON 迁移没有实施的必要。
+
+---
+
+## 运行时哈希表
+
+为解决大规模存档加载时 `fromNameRuntime` 的线性扫描性能问题，`registries.zig` 在 `Game.init()` 时构建三张 `StringHashMapUnmanaged`：
+
+```zig
+// registries.zig（运行时）
+pub var block_name_to_id: std.StringHashMapUnmanaged(u32) = .{};
+pub var item_name_to_id: std.StringHashMapUnmanaged(u32) = .{};
+pub var entity_name_to_id: std.StringHashMapUnmanaged(u32) = .{};
+
+pub fn init(allocator: Allocator) void;
+pub fn deinit(allocator: Allocator) void;
+```
+
+| 哈希表 | 用于 | 替代的对象 |
+|--------|------|-----------|
+| `block_name_to_id` | chunk palette 加载时 name→ID | `BlockId.fromNameRuntime` |
+| `item_name_to_id` | 背包/热栏加载时 name→ID | `ItemId.fromNameRuntime` |
+| `entity_name_to_id` | 实体加载时 type→ID | `EntityTypeId.fromNameRuntime` |
+
+调用端将线性扫描的 `fromNameRuntime` 替换为 O(1) 哈希表查询：
+
+```zig
+// 旧（线性扫描）
+const id = BlockId.fromNameRuntime(name) orelse 0;
+
+// 新（O(1) 哈希表）
+const id = registries.block_name_to_id.get(name) orelse 0;
+```

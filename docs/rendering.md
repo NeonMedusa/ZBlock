@@ -134,7 +134,7 @@ pub const UiVertex = struct {
 近平面: clip.z ≥ 0            远平面:  clip.w - clip.z ≥ 0
 ```
 
-- **实体**：检查插值后位置 `containsPoint(render_pos)`，不在视锥内则跳过 draw batch 收集
+- **实体**：检查 AABB（碰撞箱 `width`×`height`）与视锥的相交性 `intersectsAABB(min, max)`，不可见则跳过 draw batch
 - **区块**：检查 chunk AABB（16×256×16）与视锥的相交性 `intersectsAABB(min, max)`，不相交则跳过 mesh 遍历
 - 模型和 mesh 缓存不因剔除而卸载——视角转回时零延迟
 
