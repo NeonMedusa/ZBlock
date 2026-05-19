@@ -34,8 +34,6 @@ pub fn updateFromMouse(self: *@This(), game: *Game) void {
     if (self.pitch > 89.0) self.pitch = 89.0;
     if (self.pitch < -89.0) self.pitch = -89.0;
     self.updateVectors();
-    // 更新视图矩阵
-    self.game.ubo.view_matrix = Mat4.lookAt(self.position, self.position.add(self.front), self.up);
 }
 
 /// 通过键盘输入更新位置（保留用于调试，自由飞行模式）

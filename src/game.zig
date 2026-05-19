@@ -96,8 +96,8 @@ pub fn start(self: *Game) !void {
 
             while (self.accumulator >= TICK_DT) {
                 self.accumulator -= TICK_DT;
-                self.tick_count += 1;
                 if (self.menu_state != .Pause) {
+                    self.tick_count += 1;
                     produceMoveIntent(self);
                     self.block_world.updatePhysics(&self.registry, TICK_DT);
                     {
@@ -119,16 +119,18 @@ pub fn start(self: *Game) !void {
                 }
             }
 
-            if (self.menu_state == .Gameplay) {
+            if (self.menu_state == .Gameplay or self.menu_state == .Inventory) {
                 // 骨骼矩阵插值并上传到 GPU
                 self.animation_system.upload(self.gctx.queue, self.accumulator / TICK_DT);
-
-                handleFlightToggle(self);
-                if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
-                    self.sprint_toggled = !self.sprint_toggled;
                 syncCameraFromPlayer(self);
                 try updateChunks(self);
+            }
 
+            if (self.menu_state == .Gameplay) {
+                handleFlightToggle(self);
+                self.camera.updateFromMouse(self);
+                if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
+                    self.sprint_toggled = !self.sprint_toggled;
                 if (self.keybinds.isJustPressed(&self.input, .break_block))
                     try handleLeftClick(self);
                 if (self.keybinds.isJustPressed(&self.input, .place_block))
@@ -551,8 +553,8 @@ fn syncCameraFromPlayer(self: *Game) void {
             const alpha = self.accumulator / TICK_DT;
             const eye = Vec3.lerp(pos.prev, pos.vec, alpha).add(eye_offset);
             self.camera.position = eye;
-            self.camera.updateFromMouse(self);
             self.ubo.camera_pos = self.camera.position;
+            self.ubo.view_matrix = Mat4.lookAt(self.camera.position, self.camera.position.add(self.camera.front), self.camera.up);
             break;
         }
     }
