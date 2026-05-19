@@ -52,7 +52,7 @@ pub const AnimationSystem = struct {
     }
 
     /// 分配一个骨骼槽位（每实体一个，内含 MAX_BONES 个矩阵）
-pub fn allocBoneSlot(self: *AnimationSystem) ?u32 {
+    pub fn allocBoneSlot(self: *AnimationSystem) ?u32 {
         const slot = self.next_bone_offset;
         if (slot >= MAX_ANIM_ENTITIES) return null;
         self.next_bone_offset += 1;
@@ -167,18 +167,40 @@ fn evaluateClip(sys: *AnimationSystem, skel: Skeleton, clip: *AnimClip, bone_off
                 }
             },
             .cubic => {
+                // TODO: 未用 CUBICSPLINE 资产实测，如有动画异常请排查此处
                 const prev, const next, const t = findKeyframe(ch.times, time);
                 const ofs = ch.stride;
                 if (ofs == 3) {
-                    const p0 = ch.values[prev * ofs * 3 + ofs .. prev * ofs * 3 + ofs + 3];
-                    const p1 = ch.values[next * ofs * 3 + ofs .. next * ofs * 3 + ofs + 3];
-                    const val = Vec3.lerp(Vec3.new(p0[0], p0[1], p0[2]), Vec3.new(p1[0], p1[1], p1[2]), t);
+                    // Hermite 插值：p(t) = h00×v0 + h10×m0 + h01×v1 + h11×m1
+                    const v0 = ch.values[prev * ofs * 3 + ofs .. prev * ofs * 3 + ofs + 3];
+                    const v1 = ch.values[next * ofs * 3 + ofs .. next * ofs * 3 + ofs + 3];
+                    const m0 = ch.values[prev * ofs * 3 + 2 * ofs .. prev * ofs * 3 + 2 * ofs + 3];
+                    const m1 = ch.values[next * ofs * 3 .. next * ofs * 3 + ofs];
+
+                    const t2 = t * t;
+                    const t3 = t2 * t;
+                    const h00 = 2 * t3 - 3 * t2 + 1;
+                    const h10 = t3 - 2 * t2 + t;
+                    const h01 = -2 * t3 + 3 * t2;
+                    const h11 = t3 - t2;
+
+                    const va = Vec3.new(v0[0], v0[1], v0[2]);
+                    const vb = Vec3.new(v1[0], v1[1], v1[2]);
+                    const ta = Vec3.new(m0[0], m0[1], m0[2]);
+                    const tb = Vec3.new(m1[0], m1[1], m1[2]);
+
+                    var val = Vec3.scale(va, h00);
+                    val = Vec3.add(val, Vec3.scale(ta, h10));
+                    val = Vec3.add(val, Vec3.scale(vb, h01));
+                    val = Vec3.add(val, Vec3.scale(tb, h11));
+
                     switch (ch.property) {
                         .translation => joint_trans[joint] = val,
                         .scale => joint_scale[joint] = val,
                         else => {},
                     }
                 } else if (ofs == 4) {
+                    // 四元数 CUBICSPLINE 暂用 slerp 回退，待 Squad 实现
                     const p0 = ch.values[prev * ofs * 3 + ofs .. prev * ofs * 3 + ofs + 4];
                     const p1 = ch.values[next * ofs * 3 + ofs .. next * ofs * 3 + ofs + 4];
                     const q0 = Quat.init(p0[0], p0[1], p0[2], p0[3]);

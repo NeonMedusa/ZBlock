@@ -699,6 +699,16 @@ pub const Mat4 = struct {
         );
     }
 
+    pub fn transpose(self: Mat4) Mat4 {
+        var result: Mat4 = undefined;
+        for (0..4) |col| {
+            for (0..4) |row| {
+                result.m[col][row] = self.m[row][col];
+            }
+        }
+        return result;
+    }
+
     pub fn fromTranslate(t: Vec3) Mat4 {
         return Mat4{
             .m = .{

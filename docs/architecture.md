@@ -65,4 +65,4 @@ block_registry.zig   ────  registries.zig  ────  item_registry.z
 
 ### 渲染管线
 
-详见 [rendering_3d.md](rendering_3d.md) 和 [rendering_ui.md](rendering_ui.md)
+详见 [rendering_3d.md](rendering_3d.md)、[rendering_sky.md](rendering_sky.md) 和 [rendering_ui.md](rendering_ui.md)

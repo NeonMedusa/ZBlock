@@ -8,6 +8,7 @@ ui_system: UiSystem,
 res_manager: ResManager,
 wireframe_pipeline: WireframePipeline,
 render_pipeline: RenderPipeline,
+sky_pipeline: SkyPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
@@ -157,6 +158,13 @@ pub fn start(self: *Game) !void {
     save_menu.deinit(self.allocator);
 }
 
+/// 重建投影矩阵和天空盒缓存。窗口缩放或参数变更后统一调用。
+pub fn rebuildProjMatrix(self: *Game) void {
+    const aspect = self.window.width / self.window.height;
+    self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.1, 500);
+    self.sky_pipeline.cached_inv_proj = self.ubo.proj_matrix.inverse();
+}
+
 /// 选存档后初始化游戏世界（玩家实体、区块、存档数据）
 fn initGame(self: *Game) !void {
     const player_entity = self.registry.create();
@@ -259,10 +267,14 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
         "resources/shaders/wireframe_shader.wgsl",
     );
 
+    // 程序化天空
+    self.sky_pipeline = try SkyPipeline.init(&self.gctx, 42);
+
     // 初始化摄像头
     self.camera = Camera3D.init(self);
     // 初始化ubo
     self.ubo = SceneUniform.init(self.window);
+    rebuildProjMatrix(self);
     // 初始化世界
     const registry = ECS.Registry.init(allocator);
     self.registry = registry;
@@ -317,6 +329,7 @@ pub fn deinit(self: *@This()) void {
 
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
+    self.sky_pipeline.deinit();
     self.wireframe_pipeline.deinit();
     self.ui_system.deinit();
     self.icon_atlas.deinit();
@@ -922,6 +935,7 @@ const Comps = Imports.Comps;
 const Raycast = @import("raycast.zig");
 
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
+const SkyPipeline = @import("sky.zig").SkyPipeline;
 
 const BlockWorld = @import("block_world.zig");
 const TICK_DT = BlockWorld.TICK_DT;

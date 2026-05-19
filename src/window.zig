@@ -111,15 +111,8 @@ fn windowSizeCallback(glfw_window: ?*Glfw.GLFWwindow, width: i32, height: i32) c
             game.window.center_y = @as(f32, @floatFromInt(@divTrunc(height, 2)));
             // 重建game.gctx的交换链
             game.gctx.resizeSwapChain(game.window.width_u, game.window.height_u);
-            // 更新SceneUniform
-            const aspect_ratio: f32 = game.window.width / game.window.height;
-            // game.ubo.proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 500);
-            game.ubo.proj_matrix = Mat4.perspectiveReversedZ(
-                70,
-                aspect_ratio,
-                0.1,
-                500,
-            );
+            // 更新投影矩阵和天空缓存
+            game.rebuildProjMatrix();
             // 更新UiUniform
             game.ui_system.ubo.ortho_matrix = Mat4.orthographic(
                 0,

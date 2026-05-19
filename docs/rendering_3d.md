@@ -92,3 +92,9 @@ group 切换代价。
 独立于主渲染管线的 `WireframePipeline`，使用 `wireframe_shader.wgsl`：
 `LineList` 拓扑、`Cull_None`、禁深度写入。vertex 只读 `position`，不读取纹理/光照。
 当前已创建但未接入绘制循环，留待调试选中高亮用。
+
+---
+
+## 程序化天空盒
+
+详见 [rendering_sky.md](rendering_sky.md)

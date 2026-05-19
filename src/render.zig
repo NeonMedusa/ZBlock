@@ -16,6 +16,17 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
     );
 
+    if (world) {
+        // 天空方向矩阵：去掉 view 的平移（保留纯旋转），乘以缓存的 inv(proj)。
+        // 比每帧全量求逆 inv(proj * view) 更稳定。
+        var view_rot = game.ubo.view_matrix;
+        view_rot.m[3][0] = 0;
+        view_rot.m[3][1] = 0;
+        view_rot.m[3][2] = 0;
+        const sky_mat = Mat4.mul(view_rot.transpose(), game.sky_pipeline.cached_inv_proj);
+        game.sky_pipeline.updateUniform(&game.gctx, sky_mat, game.window.time);
+    }
+
     var chunk_instance_idx: u32 = 0;
     const frustum = if (world) Frustum.fromViewProj(Mat4.mul(game.ubo.proj_matrix, game.ubo.view_matrix)) else undefined;
     if (world) {
@@ -147,6 +158,11 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
 
     if (world) {
+        // 绘制天空（独立 pipeline/bind group，不写 depth）
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.sky_pipeline.handle);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.sky_pipeline.bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+
         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
 
         // 绘制所有模型实体
