@@ -22,6 +22,8 @@ load_range: i32,
 flying: bool = false,
 last_space_press: f64 = 0.0,
 accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
+frame_timer: std.time.Instant, // 帧计时器，独立于 GLFW
+tick_count: u64 = 0, // 逻辑 tick 计数，1 tick = 1/30s
 sprint_toggled: bool = false, // 冲刺开关，渲染层触发，tick 层读取
 keybinds: Keybinds,
 animation_system: AnimationSystem,
@@ -71,7 +73,11 @@ pub fn start(self: *Game) !void {
 
         // 游戏初始化后才运行物理和渲染
         if (self.save_initialized) {
-            self.accumulator += self.window.delta_time;
+            const now = try std.time.Instant.now();
+            const dt_ns = now.since(self.frame_timer);
+            self.frame_timer = now;
+            const dt = @as(f32, @floatFromInt(dt_ns)) / 1_000_000_000.0;
+            self.accumulator += dt;
             if (self.accumulator > TICK_DT * 5) self.accumulator = TICK_DT * 5;
 
             if (self.accumulator >= TICK_DT) {
@@ -90,6 +96,7 @@ pub fn start(self: *Game) !void {
 
             while (self.accumulator >= TICK_DT) {
                 self.accumulator -= TICK_DT;
+                self.tick_count += 1;
                 if (self.menu_state != .Pause) {
                     produceMoveIntent(self);
                     self.block_world.updatePhysics(&self.registry, TICK_DT);
@@ -235,6 +242,7 @@ fn initGame(self: *Game) !void {
 pub fn init(allocator: std.mem.Allocator) !*@This() {
     var self = try allocator.create(@This());
     self.allocator = allocator;
+    self.tick_count = 0;
     // 创建窗口
     const window = try Window.init(self, "ZigGame", 1280, 720);
     self.window = window;
@@ -242,6 +250,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 初始化输入系统
     const input = Input.init(self);
     self.input = input;
+    self.frame_timer = try std.time.Instant.now();
 
     // 初始化wgpu
     const gctx = try Gctx.init(self.window);

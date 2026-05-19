@@ -31,8 +31,8 @@ struct VertexOutput {
 fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
     let pos = array<vec2f, 3>(
         vec2f(-1.0, -1.0),
-        vec2f( 3.0, -1.0),
-        vec2f(-1.0,  3.0),
+        vec2f(3.0, -1.0),
+        vec2f(-1.0, 3.0),
     );
     var out: VertexOutput;
     out.position = vec4f(pos[vi], 1.0, 1.0);
@@ -96,19 +96,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // 太阳：两层（外层光晕 + 内层亮盘）
     // 可调：pow( ,64) 和 pow( ,512) 分别控制光晕和亮盘大小，指数越大盘越小
     let sun_dot = max(dot(dir, normalize(sky.sun_direction.xyz)), 0.0);
-    let sun_glow = pow(sun_dot, 64.0) * sky.sun_intensity * 2.0;
-    let sun_disk = pow(sun_dot, 512.0) * sky.sun_intensity * 4.0;
+    let sun_glow = pow(sun_dot, 256.0) * sky.sun_intensity * 2.0;
+    let sun_disk = pow(sun_dot, 2048.0) * sky.sun_intensity * 4.0;
     let sun = (sun_glow + sun_disk) * sky.sun_color.rgb;
 
     // 月亮：硬切圆盘（位于太阳的正对面）
     // 可调：step(0.995, ) 的 0.995 为月亮半径，越小月亮越大
     let moon_dir = normalize(-sky.sun_direction.xyz);
     let moon_dot = max(dot(dir, moon_dir), 0.0);
-    let moon_disk = step(0.995, moon_dot);
+    let moon_disk = step(0.998, moon_dot);
     let moon = moon_disk * sky.moon_brightness * 3.0 * vec3f(0.9, 0.92, 1.0);
 
     // 星星：夜间亮度翻倍
-    let star = stars(dir) * (1.0 - day_factor) * 2.0;
+    let star = stars(dir) * (1.0 - day_factor) * 2.0 * (1.0 - moon_disk);
 
     let final_color = sky_gradient.rgb + sun + moon + star;
     return vec4f(final_color, 1.0);

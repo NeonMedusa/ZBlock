@@ -16,8 +16,10 @@
 struct SceneUniform {
     proj_matrix: mat4x4f,
     view_matrix: mat4x4f,
-    camera_position: vec3f,
-    time: f32,
+    camera_pos: vec4f,        // xyz = pos, w = time
+    sun_direction: vec4f,     // xyz = dir, w = intensity
+    sun_color: vec4f,         // xyz = color, w = moon_brightness
+    horizon_color: vec4f,     // xyz = horizon, w = unused
 };
 
 struct MaterialConstants {
@@ -89,23 +91,43 @@ fn skinNormal(input_normal: vec3f, bone_offset: i32, joint_indices: vec4u, joint
     return (skin_matrix * vec4f(input_normal, 0.0)).xyz;
 }
 
-// --- 光照参数 (硬编码) ---
-const LIGHT_DIRECTION = vec3f(1.0, 2.0, 1.0);
-const LIGHT_COLOR = vec3f(1.0, 1.0, 0.95);
+// --- 光照参数 ---
 const AMBIENT_STRENGTH = 0.3;
 const SPECULAR_STRENGTH = 0.5;
 const SPECULAR_SHININESS = 32.0;
 
-fn calculateLighting(normal: vec3f, position: vec3f, camera_pos: vec3f, base_color: vec4f) -> vec4f {
+fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f {
     let n = normalize(normal);
-    let light_dir = normalize(LIGHT_DIRECTION);
-    let ambient = AMBIENT_STRENGTH * base_color.rgb;
-    let diffuse_factor = max(dot(n, light_dir), 0.0);
-    let diffuse = diffuse_factor * LIGHT_COLOR * base_color.rgb;
+
+    // 太阳光
+    let sun_dir = normalize(scene_uniform.sun_direction.xyz);
+    let sun_intensity = scene_uniform.sun_direction.w;
+    let sun_col = scene_uniform.sun_color.xyz * sun_intensity;
+
+    // 月光（方向相反、偏蓝、更弱）
+    let moon_dir = -sun_dir;
+    let moon_intensity = scene_uniform.sun_color.w;
+    let moon_col = vec3f(0.5, 0.55, 0.8) * moon_intensity * 2.0;
+
+    // 昼夜因子（与天空盒一致）
+    let day = smoothstep(-0.15, 0.25, scene_uniform.sun_direction.y);
+    let night = 1.0 - day;
+
+    // 环境光：白天用地平线色，夜晚深空
+    let ambient_color = mix(vec3f(0.02, 0.02, 0.08), scene_uniform.horizon_color.xyz, day);
+    let ambient = ambient_color * AMBIENT_STRENGTH * base_color.rgb;
+
+    // 漫反射
+    let sun_diffuse = day * max(dot(n, sun_dir), 0.0) * sun_col * base_color.rgb;
+    let moon_diffuse = night * max(dot(n, moon_dir), 0.0) * moon_col * base_color.rgb;
+    let diffuse = sun_diffuse + moon_diffuse;
+
+    // 高光（仅太阳）
+    let camera_pos = scene_uniform.camera_pos.xyz;
     let view_dir = normalize(camera_pos - position);
-    let reflect_dir = reflect(-light_dir, n);
-    let specular_factor = pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS);
-    let specular = specular_factor * SPECULAR_STRENGTH * LIGHT_COLOR;
+    let reflect_dir = reflect(-sun_dir, n);
+    let specular = day * pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS) * SPECULAR_STRENGTH * sun_col;
+
     let final_color = ambient + diffuse + specular;
     return vec4f(final_color, base_color.a);
 }
@@ -165,6 +187,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         base_color = vec4f(1.0, 1.0, 1.0, 1.0);
     }
     let normal = normalize(in.world_normal);
-    let lit_color = calculateLighting(normal, in.world_position, scene_uniform.camera_position, base_color);
+    let lit_color = calculateLighting(normal, in.world_position, base_color);
     return pow(lit_color, vec4f(2.2));
 }

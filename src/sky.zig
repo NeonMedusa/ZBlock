@@ -66,7 +66,7 @@ pub const SkyState = struct {
             .sun_color = hslToRgb(sun_hue, sat, 0.85 + r.float(f32) * 0.15),
             .sun_intensity = 0.6 + r.float(f32) * 0.6,
             .moon_phase = r.float(f32),
-            .moon_brightness = 0.1 + r.float(f32) * 0.3,
+            .moon_brightness = 0.3 + r.float(f32) * 0.6,
             .horizon_color = Vec3.new(0.60, 0.72, 0.90),
             .zenith_color = Vec3.new(0.20, 0.35, 0.70),
             .star_density = 0.03 + r.float(f32) * 0.07,
@@ -175,7 +175,7 @@ pub const SkyPipeline = struct {
             .uniform_buffer = uniform_buffer,
             .shader_module = shader_module,
             .state = state,
-            .day_length = 10.0,
+            .day_length = 60.0, // 1 分钟
             .cached_inv_proj = Mat4.identity,
         };
     }

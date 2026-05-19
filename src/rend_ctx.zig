@@ -839,10 +839,14 @@ pub const SceneUniform = struct {
     view_matrix: Mat4 = undefined, // 视图矩阵
     camera_pos: Vec3 = undefined, // 摄像机世界坐标
     time: f32 = undefined, // 当前时间
-    _padding: [4]f32 = undefined, // 结构体对齐到 16 字节
+    sun_direction: Vec3 = undefined, // 太阳方向
+    sun_intensity: f32 = undefined, // 太阳强度
+    sun_color: Vec3 = undefined, // 太阳颜色
+    moon_brightness: f32 = undefined, // 月亮强度
+    horizon_color: Vec3 = undefined, // 地平线色（环境光）
+    _pad: f32 = undefined,
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
-        // const proj_matrix = Mat4.perspective(70, aspect_ratio, 0.001, 500);
         const proj_matrix = Mat4.perspectiveReversedZ(
             70,
             aspect_ratio,
@@ -855,7 +859,12 @@ pub const SceneUniform = struct {
             .view_matrix = view_matrix,
             .camera_pos = Vec3.zero,
             .time = window.time,
-            ._padding = undefined,
+            .sun_direction = Vec3.new(0, 1, 0),
+            .sun_intensity = 1.0,
+            .sun_color = Vec3.new(1, 1, 1),
+            .moon_brightness = 0.3,
+            .horizon_color = Vec3.new(0.6, 0.72, 0.9),
+            ._pad = undefined,
         };
     }
 };

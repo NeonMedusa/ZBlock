@@ -8,6 +8,15 @@ fn drawFrame(game: *Game, comptime world: bool) void {
 
     const encoder = Wgpu.wgpuDeviceCreateCommandEncoder(game.gctx.device, null);
 
+    const sky_time = @as(f32, @floatFromInt(game.tick_count)) * TICK_DT + game.accumulator;
+    // 从天空状态同步光照数据到 ubo
+    game.ubo.sun_direction = game.sky_pipeline.state.sun_direction;
+    game.ubo.sun_intensity = game.sky_pipeline.state.sun_intensity;
+    game.ubo.sun_color = game.sky_pipeline.state.sun_color;
+    game.ubo.moon_brightness = game.sky_pipeline.state.moon_brightness;
+    game.ubo.horizon_color = game.sky_pipeline.state.horizon_color;
+    game.ubo.time = sky_time;
+
     Wgpu.wgpuQueueWriteBuffer(
         game.gctx.queue,
         game.res_manager.scene_uniform_buffer,
@@ -24,7 +33,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         view_rot.m[3][1] = 0;
         view_rot.m[3][2] = 0;
         const sky_mat = Mat4.mul(view_rot.transpose(), game.sky_pipeline.cached_inv_proj);
-        game.sky_pipeline.updateUniform(&game.gctx, sky_mat, game.window.time);
+        game.sky_pipeline.updateUniform(&game.gctx, sky_mat, sky_time);
     }
 
     var chunk_instance_idx: u32 = 0;
