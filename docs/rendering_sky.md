@@ -38,12 +38,12 @@ dir = normalize(sky_mat × ndc)
 
 两层 pow 函数叠加：
 
-- 外层光晕：`pow(sun_dot, 64)` × intensity × 2
-- 内层亮盘：`pow(sun_dot, 512)` × intensity × 4
+- 外层光晕：`pow(sun_dot, 256)` × intensity × 2
+- 内层亮盘：`pow(sun_dot, 2048)` × intensity × 4
 
 ### 月亮
 
-硬切圆盘：`step(0.995, moon_dot)` × brightness × 3。
+硬切圆盘：`step(0.998, moon_dot)` × brightness × 3。
 位于太阳正对面（`moon_dir = -sun_dir`），不需要独立位置计算。
 未来可用贴图替代。
 
@@ -55,6 +55,7 @@ dir = normalize(sky_mat × ndc)
 - 每格用 `hash3d` 判定是否有星；格内随机位置产生圆盘
 - 半径 `smoothstep(0.3, 0.0, dist)`，夜间亮度翻倍
 - 每颗星有独立的 twinkle 相位，由 `time + hash(cell)` 驱动
+- `star_color_strength`：0=全白，>0 时部分星带随机色偏（未来可随季节/日期变化）
 
 ---
 
@@ -65,7 +66,7 @@ angle = (time / day_length) × 2π
 sun_direction = normalize(sin(angle)×0.8, cos(angle)×0.6 + tilt, cos(angle)×0.3)
 ```
 
-- `day_length` = 10 秒
+- `day_length` = 60 秒（可在 `SkyPipeline` 的 `.day_length` 中调整）
 - `seasonal_tilt`：0=春秋分（默认），+0.3=夏至（昼长），-0.3=冬至（昼短）
 - `tilt` 未来可从季节系统获取
 

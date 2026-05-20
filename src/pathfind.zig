@@ -13,7 +13,7 @@
 const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
 const BlockWorld = @import("block_world.zig").BlockWorld;
-const CHUNK_SIZE_Y = @import("block_world.zig").CHUNK_SIZE_Y;
+const CHUNK_HEIGHT = @import("block_world.zig").CHUNK_HEIGHT;
 
 // 移动成本：轴向 10，对角线 14（≈10×√2，与 1.41 对应）
 const G_CARDINAL = 10;
@@ -39,7 +39,7 @@ pub fn findGroundBelow(world: *BlockWorld, x: i32, z: i32, from_y: i32, entity_h
     while (y >= 0) : (y -= 1) {
         if (world.isSolidOrSwimmable(x, y, z)) {
             const foot = y + 1;
-            if (foot + entity_height_blocks >= CHUNK_SIZE_Y) return null;
+            if (foot + entity_height_blocks >= CHUNK_HEIGHT) return null;
             var fy: i32 = foot;
             while (fy < foot + entity_height_blocks) : (fy += 1) {
                 if (world.isSolidAt(x, fy, z)) return null;
@@ -246,7 +246,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                 // 向下：只取第一个（最高的落点，避免生成过多低处节点）
                 if (height_diff < 0 and found_down) continue;
 
-                if (foot + state.entity_height_blocks >= CHUNK_SIZE_Y) continue;
+                if (foot + state.entity_height_blocks >= CHUNK_HEIGHT) continue;
 
                 // 落脚空间验证：foot 开始的 entity_height_blocks 格全部是空气
                 var valid: bool = true;

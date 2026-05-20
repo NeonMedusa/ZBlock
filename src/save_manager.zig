@@ -18,10 +18,9 @@ const item_infos = @import("item_registry.zig").item_infos;
 const registries = @import("registries.zig");
 
 pub const REGION_SIZE: i32 = 32; // 每个 region 包含 32×32 区块
-const CHUNK_SIZE_X: u32 = BW.CHUNK_SIZE_X;
-const CHUNK_SIZE_Y: u32 = BW.CHUNK_SIZE_Y;
-const CHUNK_SIZE_Z: u32 = BW.CHUNK_SIZE_Z;
-const CHUNK_BLOCKS: usize = CHUNK_SIZE_X * CHUNK_SIZE_Y * CHUNK_SIZE_Z;
+const CHUNK_WIDTH: u32 = BW.CHUNK_WIDTH;
+const CHUNK_HEIGHT: u32 = BW.CHUNK_HEIGHT;
+const CHUNK_BLOCKS: usize = CHUNK_WIDTH * CHUNK_WIDTH * CHUNK_HEIGHT;
 
 const bitstream = @import("bitstream.zig");
 const BitWriter = bitstream.BitWriter;

@@ -9,7 +9,8 @@ SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正�
 ## 概述
 
 - 使用 wgpu-native + GLFW
-- 固定光照方向 + Blinn-Phong 光照模型
+- 动态太阳/月光照（方向/强度/颜色由天空系统提供）+ Blinn-Phong 高光
+- 半球环境光：白天用地平线色，夜晚用深空色，昼夜平滑过渡
 - 支持 glTF/glb 模型
 - 区块使用 greedy mesh 合并同材质面
 
@@ -28,6 +29,38 @@ SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正�
 - 模型和 mesh 缓存不因剔除而卸载——视角转回时零延迟
 
 实现见 `src/frustum.zig`（约 100 行）。
+
+---
+
+## 动态光照
+
+光照由 `SceneUniform`（`src/rend_ctx.zig`）携带，每帧从天空系统同步：
+
+| 字段 | 来源 | 作用 |
+|---|---|---|
+| `sun_direction` / `sun_intensity` | `SkyState.sun_direction` / `.sun_intensity` | 太阳光照方向与强度 |
+| `sun_color` / `moon_brightness` | `SkyState.sun_color` / `.moon_brightness` | 太阳颜色 / 月亮亮度 |
+| `horizon_color` | `SkyState.horizon_color` | 环境光颜色（屋顶层） |
+
+### 光照模型（`render_shader.wgsl:calculateLighting`）
+
+```
+环境光 = mix(深空夜, horizon_color, day) × AMBIENT_STRENGTH
+阳光   = day × max(dot(n, sun_dir), 0) × sun_color × intensity
+月光   = night × max(dot(n, -sun_dir), 0) × moon_color × moon_intensity
+高光   = day × Blinn-Phong 高光（仅太阳贡献）
+```
+
+- `day = smoothstep(-0.15, 0.25, sun_direction.y)`，与天空盒的昼夜过渡一致
+- 太阳在地平线以上时阳光为主、地平线以下时月光为主
+- 月光方向永远在太阳正对面（`-sun_dir`），颜色偏蓝
+
+### 渲染流程
+
+1. `sky.zig:updateUniform` 从角度计算 `sun_direction`，写入天空 uniform
+2. `render.zig` 将 `sky_pipeline.state` 的以上字段拷贝到 `game.ubo`
+3. `render.zig` 写 `scene_uniform_buffer` 到 GPU
+4. shader 从 `SceneUniform` 读取光照参数，逐像素计算
 
 ---
 

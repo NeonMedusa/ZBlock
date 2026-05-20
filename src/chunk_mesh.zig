@@ -21,9 +21,8 @@ const FaceData = @import("direction.zig").FaceData;
 const getStandardFaceData = @import("direction.zig").getStandardFaceData;
 const Chunk = @import("block_world.zig").Chunk;
 const BlockWorld = @import("block_world.zig").BlockWorld;
-const CHUNK_SIZE_X = @import("block_world.zig").CHUNK_SIZE_X;
-const CHUNK_SIZE_Y = @import("block_world.zig").CHUNK_SIZE_Y;
-const CHUNK_SIZE_Z = @import("block_world.zig").CHUNK_SIZE_Z;
+const CHUNK_WIDTH = @import("block_world.zig").CHUNK_WIDTH;
+const CHUNK_HEIGHT = @import("block_world.zig").CHUNK_HEIGHT;
 
 pub const MAX_VARIANTS = 8;
 
@@ -312,9 +311,9 @@ pub fn buildChunkMeshCPU(
     };
     errdefer result.deinit();
 
-    for (0..CHUNK_SIZE_X) |x| {
-        for (0..CHUNK_SIZE_Z) |z| {
-            for (0..CHUNK_SIZE_Y) |y| {
+    for (0..CHUNK_WIDTH) |x| {
+        for (0..CHUNK_WIDTH) |z| {
+            for (0..CHUNK_HEIGHT) |y| {
                 const block_state = chunk.blocks[x][y][z];
                 const block_id = block_state.block_id;
                 if (block_id == BlockId.fromName("air")) continue;
@@ -332,9 +331,9 @@ pub fn buildChunkMeshCPU(
                     const nz = @as(i32, @intCast(z)) + offset.z;
 
                     var neighbor: BlockId = .fromName("air");
-                    if (ny >= 0 and ny < CHUNK_SIZE_Y) {
-                        if (nx >= 0 and nx < CHUNK_SIZE_X and
-                            nz >= 0 and nz < CHUNK_SIZE_Z)
+                    if (ny >= 0 and ny < CHUNK_HEIGHT) {
+                        if (nx >= 0 and nx < CHUNK_WIDTH and
+                            nz >= 0 and nz < CHUNK_WIDTH)
                         {
                             neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
                         } else {
@@ -351,8 +350,8 @@ pub fn buildChunkMeshCPU(
                                 const nb_origin = BlockWorld.chunkOrigin(wn_x, wn_z);
                                 const local_nx = wn_x - nb_origin.x;
                                 const local_nz = wn_z - nb_origin.z;
-                                if (local_nx >= 0 and local_nx < CHUNK_SIZE_X and
-                                    local_nz >= 0 and local_nz < CHUNK_SIZE_Z)
+                                if (local_nx >= 0 and local_nx < CHUNK_WIDTH and
+                                    local_nz >= 0 and local_nz < CHUNK_WIDTH)
                                 {
                                     neighbor = nb.blocks[@intCast(local_nx)][@intCast(ny)][@intCast(local_nz)].block_id;
                                 }

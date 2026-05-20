@@ -17,14 +17,12 @@ const BlockId = @import("block_registry.zig").BlockId;
 const BlockState = @import("block_registry.zig").BlockState;
 const Pathfind = @import("pathfind.zig");
 
-pub const CHUNK_SIZE_X: u32 = 16;
-pub const CHUNK_SIZE_Y: u32 = 256;
-pub const CHUNK_SIZE_Z: u32 = 16;
-pub const CHUNK_SIZE_X_I32: i32 = CHUNK_SIZE_X;
-pub const CHUNK_SIZE_Z_I32: i32 = CHUNK_SIZE_Z;
+pub const CHUNK_WIDTH: u32 = 16;
+pub const CHUNK_HEIGHT: u32 = 256;
+pub const CHUNK_WIDTH_I32: i32 = CHUNK_WIDTH;
 
 pub const Chunk = struct {
-    blocks: [CHUNK_SIZE_X][CHUNK_SIZE_Y][CHUNK_SIZE_Z]BlockState,
+    blocks: [CHUNK_WIDTH][CHUNK_HEIGHT][CHUNK_WIDTH]BlockState,
 
     pub fn generate(world_origin: Vec3i, out_chunk: *Chunk) void {
         // === 噪声生成 ===
@@ -51,8 +49,8 @@ pub const Chunk = struct {
         const biome_snow_range: f32 = 9.0; // 雪线偏移半振幅 ±9 格
         const biome_stone_range: f32 = 7.0; // 裸岩线偏移半振幅 ±7 格
 
-        for (0..CHUNK_SIZE_X) |x| {
-            for (0..CHUNK_SIZE_Z) |z| {
+        for (0..CHUNK_WIDTH) |x| {
+            for (0..CHUNK_WIDTH) |z| {
                 const world_x = world_origin.x + @as(i32, @intCast(x));
                 const world_z = world_origin.z + @as(i32, @intCast(z));
                 const noise_val = Perlin.octavePerlin2d(
@@ -77,7 +75,7 @@ pub const Chunk = struct {
                 const local_snow_line = snow_line + @as(i32, @intFromFloat(biome_noise * biome_snow_range * 2.0 - biome_snow_range));
                 const local_stone_line = stone_line + @as(i32, @intFromFloat(biome_noise * biome_stone_range * 2.0 - biome_stone_range));
 
-                for (0..CHUNK_SIZE_Y) |y| {
+                for (0..CHUNK_HEIGHT) |y| {
                     const y_i32: i32 = @intCast(y);
                     const block_id: BlockId = blk: {
                         if (y_i32 > ground_position) {
@@ -183,9 +181,12 @@ pub const BlockWorld = struct {
     astar_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     astar_worker: ?std.Thread = null,
 
-    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, max_chunks: usize) !BlockWorld {
+    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, chunk_radius: i32) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
         errdefer material_registry.deinit();
+
+        const count = (2 * chunk_radius + 1) * (2 * chunk_radius + 1);
+        const max_chunks = count * 2; // 2x 预分配余量
 
         var chunks = std.AutoHashMap(Vec3i, LoadedChunk).init(allocator);
         errdefer chunks.deinit();
@@ -279,9 +280,9 @@ pub const BlockWorld = struct {
     /// 世界坐标 → chunk origin
     pub fn chunkOrigin(world_x: i32, world_z: i32) Vec3i {
         return Vec3i.new(
-            @divFloor(world_x, CHUNK_SIZE_X_I32) * CHUNK_SIZE_X_I32,
+            @divFloor(world_x, CHUNK_WIDTH_I32) * CHUNK_WIDTH_I32,
             0,
-            @divFloor(world_z, CHUNK_SIZE_Z_I32) * CHUNK_SIZE_Z_I32,
+            @divFloor(world_z, CHUNK_WIDTH_I32) * CHUNK_WIDTH_I32,
         );
     }
 
@@ -345,9 +346,9 @@ pub const BlockWorld = struct {
 
             for (NEIGHBOR_OFFSETS[1..]) |noff| {
                 const nb_origin = Vec3i.new(
-                    origin.x + noff.x * CHUNK_SIZE_X_I32,
+                    origin.x + noff.x * CHUNK_WIDTH_I32,
                     0,
-                    origin.z + noff.z * CHUNK_SIZE_Z_I32,
+                    origin.z + noff.z * CHUNK_WIDTH_I32,
                 );
                 if (self.chunks.getPtr(nb_origin)) |nb_loaded| {
                     if (nb_loaded.chunk != chunk) {
@@ -374,9 +375,9 @@ pub const BlockWorld = struct {
 
             for (NEIGHBOR_OFFSETS[1..]) |noff| {
                 const nb_origin = Vec3i.new(
-                    origin.x + noff.x * CHUNK_SIZE_X_I32,
+                    origin.x + noff.x * CHUNK_WIDTH_I32,
                     0,
-                    origin.z + noff.z * CHUNK_SIZE_Z_I32,
+                    origin.z + noff.z * CHUNK_WIDTH_I32,
                 );
                 if (self.chunks.getPtr(nb_origin)) |nb_loaded| {
                     if (nb_loaded.build_lock.load(.acquire)) return;
@@ -1043,9 +1044,9 @@ pub const BlockWorld = struct {
         const local_x = world_x - origin.x;
         const local_y = world_y - origin.y;
         const local_z = world_z - origin.z;
-        if (local_x >= 0 and local_x < CHUNK_SIZE_X and
-            local_y >= 0 and local_y < CHUNK_SIZE_Y and
-            local_z >= 0 and local_z < CHUNK_SIZE_Z)
+        if (local_x >= 0 and local_x < CHUNK_WIDTH and
+            local_y >= 0 and local_y < CHUNK_HEIGHT and
+            local_z >= 0 and local_z < CHUNK_WIDTH)
         {
             return chunk.blocks[@intCast(local_x)][@intCast(local_y)][@intCast(local_z)].block_id;
         }
@@ -1136,7 +1137,7 @@ fn meshWorkerFn(world: *BlockWorld) void {
                 if (loaded_ptr_chunks[0] != null) {
                     loaded_ptr_chunks[0].?.build_lock.store(true, .release);
                     for (NEIGHBOR_OFFSETS[1..], 1..) |noff, i| {
-                        const nb = Vec3i.new(o.x + noff.x * CHUNK_SIZE_X_I32, 0, o.z + noff.z * CHUNK_SIZE_Z_I32);
+                        const nb = Vec3i.new(o.x + noff.x * CHUNK_WIDTH_I32, 0, o.z + noff.z * CHUNK_WIDTH_I32);
                         loaded_ptr_chunks[i] = world.chunks.getPtr(nb);
                         if (loaded_ptr_chunks[i]) |l| {
                             l.build_lock.store(true, .release);

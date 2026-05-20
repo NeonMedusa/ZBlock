@@ -18,7 +18,7 @@ selected_item: ?SelectedItem = null,
 save_manager: SaveManager,
 icon_atlas: IconAtlas,
 block_world: BlockWorld.BlockWorld,
-load_range: i32,
+chunk_radius: i32, // 加载区块半径（chunk 数），实际加载 (2*radius+1)² 个
 flying: bool = false,
 last_space_press: f64 = 0.0,
 accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
@@ -201,9 +201,9 @@ fn initGame(self: *Game) !void {
             var dz: i32 = -range;
             while (dz <= range) : (dz += 1) {
                 try self.block_world.loadChunk(.new(
-                    player_origin.x + dx * BlockWorld.CHUNK_SIZE_X_I32,
+                    player_origin.x + dx * BlockWorld.CHUNK_WIDTH_I32,
                     0,
-                    player_origin.z + dz * BlockWorld.CHUNK_SIZE_Z_I32,
+                    player_origin.z + dz * BlockWorld.CHUNK_WIDTH_I32,
                 ), &chunk_io);
             }
         }
@@ -224,7 +224,7 @@ fn initGame(self: *Game) !void {
 
     // 为存档加载的实体补加动画状态（不持久化到存档）
     {
-        var anim_view = self.registry.view(.{ Comps.ModelName }, .{});
+        var anim_view = self.registry.view(.{Comps.ModelName}, .{});
         var anim_iter = anim_view.entityIterator();
         while (anim_iter.next()) |ent| {
             if (!self.registry.has(Comps.AnimationState, ent)) {
@@ -320,10 +320,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
     // 测试方块世界
-    self.load_range = 16;
-    const load_range: i32 = self.load_range;
-    const max_chunks: usize = @intCast((2 * load_range + 1) * (2 * load_range + 1) * 4);
-    self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
+    self.chunk_radius = 16;
+    self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
     try self.block_world.spawnWorker(); // mesh 生成线程
     try self.block_world.spawnAStarWorker(); // 寻路线程
 
@@ -371,10 +369,8 @@ pub fn startSave(self: *Game, name: []const u8) !void {
     if (!self.game_cleaned) self.save_manager.deinit();
     self.save_manager = try SaveManager.init(self.allocator, name);
     if (self.game_cleaned) {
-        const range: i32 = self.load_range;
-        const max_chunks: usize = @intCast((2 * range + 1) * (2 * range + 1) * 4);
         self.registry = ECS.Registry.init(self.allocator);
-        self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, max_chunks);
+        self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
         try self.block_world.spawnWorker();
         try self.block_world.spawnAStarWorker();
     }
@@ -719,7 +715,35 @@ fn tryItemToInventory(self: *Game, item_id: u32, count: u32) void {
 }
 
 fn updateEntities(self: *Game) !void {
-    const DESPAWN_DISTANCE: f32 = @as(f32, @floatFromInt(self.load_range)) * 16.0 - 32.0;
+    // 实体销毁距离：比区块加载距离少 1 个 chunk，防止站在卸载边缘时区块先被卸载导致实体跌落
+    const DESPAWN_DISTANCE: f32 = @as(f32, @floatFromInt(self.chunk_radius - 1)) * @as(f32, @floatFromInt(BlockWorld.CHUNK_WIDTH));
+
+    // 0. 销毁掉出世界的实体（Y 坐标过低）
+    {
+        const VOID_Y: f32 = -64.0;
+        var view = self.registry.view(.{ Comps.Position }, .{});
+        var iter = view.entityIterator();
+        while (iter.next()) |entity| {
+            const pos = view.get(entity);
+            if (pos.vec.y >= VOID_Y) continue;
+            // 玩家掉出世界则复活
+            if (self.registry.tryGet(Comps.Player, entity)) |player| {
+                if (player.id == self.player_id) {
+                    if (self.registry.tryGet(Comps.SpawnPos, entity)) |spawn| {
+                        if (self.registry.tryGet(Comps.Health, entity)) |hp| {
+                            hp.current = hp.max;
+                        }
+                        pos.vec = spawn.pos;
+                        pos.prev = spawn.pos;
+                    }
+                    continue;
+                }
+            }
+            // 非玩家实体直接销毁
+            self.block_world.cleanupEntity(&self.registry, entity);
+            self.registry.destroy(entity);
+        }
+    }
 
     // 1. 销毁远离所有玩家的 AI 实体
     {
@@ -857,19 +881,19 @@ fn updateChunks(self: *Game) !void {
             @intFromFloat(@floor(pos.vec.x)),
             @intFromFloat(@floor(pos.vec.z)),
         );
-        const pcx = @divFloor(player_origin.x, BlockWorld.CHUNK_SIZE_X_I32);
-        const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_SIZE_Z_I32);
+        const pcx = @divFloor(player_origin.x, BlockWorld.CHUNK_WIDTH_I32);
+        const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_WIDTH_I32);
 
-        const load_range: i32 = self.load_range;
+        const load_range: i32 = self.chunk_radius;
         var io = chunkIO(&self.save_manager);
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;
             while (dz <= load_range) : (dz += 1) {
                 try self.block_world.loadChunk(.new(
-                    player_origin.x + dx * BlockWorld.CHUNK_SIZE_X_I32,
+                    player_origin.x + dx * BlockWorld.CHUNK_WIDTH_I32,
                     0,
-                    player_origin.z + dz * BlockWorld.CHUNK_SIZE_Z_I32,
+                    player_origin.z + dz * BlockWorld.CHUNK_WIDTH_I32,
                 ), &io);
             }
         }
@@ -879,8 +903,8 @@ fn updateChunks(self: *Game) !void {
         defer to_unload.deinit(self.allocator);
         var chunk_it = self.block_world.chunks.keyIterator();
         while (chunk_it.next()) |key| {
-            const kcx = @divFloor(key.x, BlockWorld.CHUNK_SIZE_X_I32);
-            const kcz = @divFloor(key.z, BlockWorld.CHUNK_SIZE_Z_I32);
+            const kcx = @divFloor(key.x, BlockWorld.CHUNK_WIDTH_I32);
+            const kcz = @divFloor(key.z, BlockWorld.CHUNK_WIDTH_I32);
             const dist = @max(@abs(pcx - kcx), @abs(pcz - kcz));
             if (dist > load_range + 2) {
                 to_unload.append(self.allocator, key.*) catch continue;
@@ -989,13 +1013,13 @@ fn chunkIO(mgr: *SaveManager) BlockWorld.ChunkIO {
 }
 
 fn getSurfaceY(world: *BlockWorld.BlockWorld, x: i32, z: i32) ?i32 {
-    var y: i32 = @intCast(BlockWorld.CHUNK_SIZE_Y - 1);
+    var y: i32 = @intCast(BlockWorld.CHUNK_HEIGHT - 1);
     while (y >= 0) : (y -= 1) {
         const pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
         const block = world.getBlockAt(pos);
         if (block.prototype().is_solid) {
             const above: i32 = y + 1;
-            if (above >= BlockWorld.CHUNK_SIZE_Y) return null;
+            if (above >= BlockWorld.CHUNK_HEIGHT) return null;
             const above_pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(above)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
             const above_block = world.getBlockAt(above_pos);
             if (!above_block.prototype().is_solid) return above;
