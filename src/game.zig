@@ -119,6 +119,20 @@ pub fn start(self: *Game) !void {
                 }
             }
 
+            // 根据水平速度更新实体朝向
+            {
+                var fv = self.registry.view(.{ Comps.Velocity, Comps.Facing }, .{});
+                var fi = fv.entityIterator();
+                while (fi.next()) |entity| {
+                    const vel = fv.get(Comps.Velocity, entity);
+                    const facing = fv.get(Comps.Facing, entity);
+                    const h_speed = @sqrt(vel.vec.x * vel.vec.x + vel.vec.z * vel.vec.z);
+                    if (h_speed > 0.01) {
+                        facing.yaw = std.math.atan2(vel.vec.x, vel.vec.z);
+                    }
+                }
+            }
+
             if (self.menu_state == .Gameplay or self.menu_state == .Inventory) {
                 // 骨骼矩阵插值并上传到 GPU
                 self.animation_system.upload(self.gctx.queue, self.accumulator / TICK_DT);
@@ -184,6 +198,7 @@ fn initGame(self: *Game) !void {
     self.registry.add(player_entity, Comps.MoveSpeed{ .value = 4.0 });
     self.registry.add(player_entity, Comps.JumpVelocity{ .value = 14.0 });
     self.registry.add(player_entity, Comps.OnGround{ .value = false });
+    self.registry.add(player_entity, Comps.Facing{});
     self.registry.add(player_entity, Comps.MoveIntent{});
     self.registry.add(player_entity, Comps.Health{ .current = 100, .max = 100 });
     self.registry.add(player_entity, Comps.SpawnPos{ .pos = Vec3.new(8, 130, 8) });
@@ -209,7 +224,9 @@ fn initGame(self: *Game) !void {
         }
     }
 
-    self.save_manager.loadPlayer(&self.hotbar, &self.inventory, &self.registry) catch {};
+    if (try self.save_manager.loadPlayer(&self.hotbar, &self.inventory, &self.registry)) |tc| {
+        self.tick_count = tc;
+    }
 
     var view = self.registry.view(.{ Comps.Player, Comps.Flying }, .{});
     var iter = view.entityIterator();
@@ -345,7 +362,7 @@ pub fn deinit(self: *@This()) void {
 
     if (!self.game_cleaned) {
         // 退出前保存
-        self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+        self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
         self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
         self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
         // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
@@ -381,7 +398,7 @@ pub fn startSave(self: *Game, name: []const u8) !void {
 /// 返回主菜单（由暂停菜单调用）
 pub fn returnToMenu(self: *Game) void {
     // 保存当前游戏状态
-    self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+    self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
     self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
     self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
     // 清理 AI 实体的寻路状态和路径内存
@@ -721,7 +738,7 @@ fn updateEntities(self: *Game) !void {
     // 0. 销毁掉出世界的实体（Y 坐标过低）
     {
         const VOID_Y: f32 = -64.0;
-        var view = self.registry.view(.{ Comps.Position }, .{});
+        var view = self.registry.view(.{Comps.Position}, .{});
         var iter = view.entityIterator();
         while (iter.next()) |entity| {
             const pos = view.get(entity);
@@ -858,6 +875,7 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     self.registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });
     self.registry.add(entity, Comps.JumpVelocity{ .value = info.jump_vel });
     self.registry.add(entity, Comps.OnGround{ .value = false });
+    self.registry.add(entity, Comps.Facing{});
     self.registry.add(entity, Comps.MoveIntent{});
     self.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
     self.registry.add(entity, Comps.AttackCooldown{ .interval = info.attack_interval });

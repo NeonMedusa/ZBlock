@@ -186,10 +186,13 @@ pub const BlockWorld = struct {
         errdefer material_registry.deinit();
 
         const count = (2 * chunk_radius + 1) * (2 * chunk_radius + 1);
-        const max_chunks = count * 2; // 2x 预分配余量
+        const max_chunks = count * 2; // 2x 预分配余量，覆盖加载 + 异步排队等场景
 
         var chunks = std.AutoHashMap(Vec3i, LoadedChunk).init(allocator);
         errdefer chunks.deinit();
+        // 一次性分配，运行期永不扩容。原因:多线程通过 getPtr 取 chunk 指针，
+        // 若扩容则整张表重排、旧指针全部失效→ mesh/A* worker 段错误。
+        // 预分配容量 = max_chunks × 80% 负载因子 ≈ 可用槽数，足够装下所有实际 chunk。
         try chunks.ensureTotalCapacity(@intCast(max_chunks));
 
         var pending = std.AutoHashMap(Vec3i, void).init(allocator);
@@ -1059,20 +1062,20 @@ pub const BlockWorld = struct {
         const z = @as(i32, @intFromFloat(@floor(world_pos.z)));
 
         const origin = chunkOrigin(x, z);
+        const loaded = self.chunks.getPtr(origin) orelse return .fromName("air");
+        return getBlockAtFromChunk(loaded.chunk, origin, x, y, z);
+    }
 
-        if (self.chunks.getPtr(origin)) |loaded| {
-            return getBlockAtFromChunk(loaded.chunk, origin, x, y, z);
-        }
-        return .fromName("air");
+    /// 整数坐标版，跳过 Vec3 构造（热点路径优化）
+    fn peekBlockAt(self: *BlockWorld, x: i32, y: i32, z: i32) BlockId {
+        const origin = chunkOrigin(x, z);
+        const loaded = self.chunks.getPtr(origin) orelse return .fromName("air");
+        return getBlockAtFromChunk(loaded.chunk, origin, x, y, z);
     }
 
     /// 判断指定整数坐标是否为固体方块
     pub fn isSolidAt(self: *BlockWorld, x: i32, y: i32, z: i32) bool {
-        return self.getBlockAt(Vec3.new(
-            @as(f32, @floatFromInt(x)) + 0.5,
-            @as(f32, @floatFromInt(y)) + 0.5,
-            @as(f32, @floatFromInt(z)) + 0.5,
-        )).prototype().is_solid;
+        return self.peekBlockAt(x, y, z).prototype().is_solid;
     }
 
     fn hasGroundUnder(self: *BlockWorld, pos: Vec3, collider: *Comps.Collider) bool {
@@ -1094,20 +1097,12 @@ pub const BlockWorld = struct {
 
     /// 判断指定整数坐标是否为可游泳方块（水）
     pub fn isSwimmableBlock(self: *BlockWorld, x: i32, y: i32, z: i32) bool {
-        return self.getBlockAt(Vec3.new(
-            @as(f32, @floatFromInt(x)) + 0.5,
-            @as(f32, @floatFromInt(y)) + 0.5,
-            @as(f32, @floatFromInt(z)) + 0.5,
-        )).prototype().is_swimmable;
+        return self.peekBlockAt(x, y, z).prototype().is_swimmable;
     }
 
-    /// 一次方块查询同时判断实心或可游泳，避免双次 getBlockAt（热点优化）
+    /// 一次方块查询同时判断实心或可游泳，避免双次 peekBlockAt（热点优化）
     pub fn isSolidOrSwimmable(self: *BlockWorld, x: i32, y: i32, z: i32) bool {
-        const proto = self.getBlockAt(Vec3.new(
-            @as(f32, @floatFromInt(x)) + 0.5,
-            @as(f32, @floatFromInt(y)) + 0.5,
-            @as(f32, @floatFromInt(z)) + 0.5,
-        )).prototype();
+        const proto = self.peekBlockAt(x, y, z).prototype();
         return proto.is_solid or proto.is_swimmable;
     }
 };

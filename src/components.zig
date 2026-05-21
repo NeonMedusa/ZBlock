@@ -55,7 +55,11 @@ pub const Components = struct {
     // ---- 玩法 ----
     pub const SpawnPos = struct { pos: Vec3 }; // 重生点
 
-    // ---- 动画 ----
+    pub const Facing = struct {
+        yaw: f32 = 0,   // 弧度，0=+Z，顺时针递增
+        pitch: f32 = 0, // 弧度，0=水平，正=朝下（未来用于 AI 视野检测）
+    };
+
     pub const AnimationState = struct {
         clip_name: []const u8 = "idle",
         time: f32 = 0,

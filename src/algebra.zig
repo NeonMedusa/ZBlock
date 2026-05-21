@@ -712,10 +712,23 @@ pub const Mat4 = struct {
     pub fn fromTranslate(t: Vec3) Mat4 {
         return Mat4{
             .m = .{
-                .{ 1, 0, 0, 0 }, // 列0
-                .{ 0, 1, 0, 0 }, // 列1
-                .{ 0, 0, 1, 0 }, // 列2
-                .{ t.x, t.y, t.z, 1 }, // 列3（平移列）
+                .{ 1, 0, 0, 0 },
+                .{ 0, 1, 0, 0 },
+                .{ 0, 0, 1, 0 },
+                .{ t.x, t.y, t.z, 1 },
+            },
+        };
+    }
+
+    pub fn fromRotationY(angle: f32) Mat4 {
+        const c = @cos(angle);
+        const s = @sin(angle);
+        return Mat4{
+            .m = .{
+                .{ c,  0, -s, 0 },
+                .{ 0,  1,  0, 0 },
+                .{ s,  0,  c, 0 },
+                .{ 0,  0,  0, 1 },
             },
         };
     }

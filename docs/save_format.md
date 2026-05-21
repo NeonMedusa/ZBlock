@@ -24,7 +24,10 @@ CREATE TABLE "WorldRow" (
     player_pos_y  REAL NOT NULL,
     player_pos_z  REAL NOT NULL,
     player_health REAL NOT NULL,
-    is_flying   INTEGER NOT NULL DEFAULT 0
+    is_flying   INTEGER NOT NULL DEFAULT 0,
+    tick_count  INTEGER NOT NULL DEFAULT 0,
+    player_facing_yaw   REAL NOT NULL DEFAULT 0,
+    player_facing_pitch REAL NOT NULL DEFAULT 0
 );
 ```
 
@@ -66,11 +69,14 @@ CREATE TABLE "EntityRow" (
     pos_x    REAL NOT NULL,
     pos_y    REAL NOT NULL,
     pos_z    REAL NOT NULL,
-    health   REAL NOT NULL DEFAULT 100.0
+    health   REAL NOT NULL DEFAULT 100.0,
+    facing_yaw   REAL NOT NULL DEFAULT 0,
+    facing_pitch REAL NOT NULL DEFAULT 0
 );
 ```
 
 - `type_name`: 实体类型字符串名称（如 `"zombie"`、`"wolf"`），非整数 ID
+- `facing_yaw` / `facing_pitch`: 实体朝向（弧度），`DEFAULT 0` 兼容旧存档
 
 ### 版本兼容
 

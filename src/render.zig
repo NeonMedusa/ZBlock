@@ -69,8 +69,12 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             const aabb_max = Vec3.new(render_pos.x + half_w, render_pos.y + col.height, render_pos.z + half_w);
             if (!frustum.intersectsAABB(aabb_min, aabb_max)) continue;
             const bone_off = anim_map.get(@as(u32, @intCast(entity.index))) orelse -1;
+            var entity_transform = Mat4.fromTranslate(render_pos);
+            if (game.registry.tryGet(Comps.Facing, entity)) |facing| {
+                entity_transform = Mat4.mul(entity_transform, Mat4.fromRotationY(facing.yaw));
+            }
             game.res_manager.entities_data[entity_idx] = EntityData{
-                .transform = Mat4.fromTranslate(render_pos),
+                .transform = entity_transform,
                 .bone_offset = bone_off,
             };
 

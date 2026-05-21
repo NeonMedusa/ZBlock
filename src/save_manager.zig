@@ -44,6 +44,9 @@ const WorldRow = struct {
     player_pos_z: f32,
     player_health: f32,
     is_flying: i64,
+    tick_count: i64 = 0,
+    player_facing_yaw: f32 = 0,
+    player_facing_pitch: f32 = 0,
 };
 
 const HotbarRow = struct {
@@ -67,6 +70,8 @@ const EntityRow = struct {
     pos_y: f32,
     pos_z: f32,
     health: f32,
+    facing_yaw: f32 = 0,
+    facing_pitch: f32 = 0,
 };
 
 /// 存档列表条目
@@ -105,7 +110,9 @@ pub const SaveManager = struct {
             \\  last_played TEXT NOT NULL DEFAULT (datetime('now')),
             \\  player_pos_x REAL NOT NULL, player_pos_y REAL NOT NULL, player_pos_z REAL NOT NULL,
             \\  player_health REAL NOT NULL,
-            \\  is_flying INTEGER NOT NULL DEFAULT 0);
+            \\  is_flying INTEGER NOT NULL DEFAULT 0,
+            \\  tick_count INTEGER NOT NULL DEFAULT 0,
+            \\  player_facing_yaw REAL NOT NULL DEFAULT 0, player_facing_pitch REAL NOT NULL DEFAULT 0);
             \\CREATE TABLE IF NOT EXISTS "HotbarRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
             \\  item_name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1);
@@ -115,7 +122,8 @@ pub const SaveManager = struct {
             \\CREATE TABLE IF NOT EXISTS "EntityRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, type_id TEXT NOT NULL,
             \\  pos_x REAL NOT NULL, pos_y REAL NOT NULL, pos_z REAL NOT NULL,
-            \\  health REAL NOT NULL DEFAULT 100.0);
+            \\  health REAL NOT NULL DEFAULT 100.0,
+            \\  facing_yaw REAL NOT NULL DEFAULT 0, facing_pitch REAL NOT NULL DEFAULT 0);
             \\PRAGMA journal_mode=WAL;
             \\PRAGMA synchronous=NORMAL;
         );
@@ -138,7 +146,7 @@ pub const SaveManager = struct {
 
     // ── 玩家 ──
 
-    pub fn savePlayer(self: *SaveManager, hotbar: *const Hotbar, inventory: *const PlayerInventory, registry: *ECS.Registry) !void {
+    pub fn savePlayer(self: *SaveManager, hotbar: *const Hotbar, inventory: *const PlayerInventory, registry: *ECS.Registry, tick_count: u64) !void {
         // 清空旧的 Hotbar
         {
             var stmt = try self.world_db.conn.prepare("DELETE FROM HotbarRow", &.{});
@@ -184,10 +192,13 @@ pub const SaveManager = struct {
             const pos = view.get(Comps.Position, entity);
             const hp = view.get(Comps.Health, entity);
             const flying: i64 = @intFromBool(registry.has(Comps.Flying, entity));
+            const facing_yaw: f64 = if (registry.tryGet(Comps.Facing, entity)) |f| @floatCast(f.yaw) else 0.0;
+            const facing_pitch: f64 = if (registry.tryGet(Comps.Facing, entity)) |f| @floatCast(f.pitch) else 0.0;
             var ins = try self.world_db.conn.prepare(
                 \\INSERT INTO WorldRow (created_at, last_played,
-                \\  player_pos_x, player_pos_y, player_pos_z, player_health, is_flying)
-                \\  VALUES (datetime('now'), datetime('now'), ?, ?, ?, ?, ?)
+                \\  player_pos_x, player_pos_y, player_pos_z, player_health, is_flying,
+                \\  tick_count, player_facing_yaw, player_facing_pitch)
+                \\  VALUES (datetime('now'), datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)
             , &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .float = @as(f64, @floatCast(pos.vec.x)) });
@@ -195,11 +206,15 @@ pub const SaveManager = struct {
             try ins.bind(2, fr.Value{ .float = @as(f64, @floatCast(pos.vec.z)) });
             try ins.bind(3, fr.Value{ .float = @as(f64, @floatCast(hp.current)) });
             try ins.bind(4, fr.Value{ .int = flying });
+            try ins.bind(5, fr.Value{ .int = @as(i64, @intCast(tick_count)) });
+            try ins.bind(6, fr.Value{ .float = facing_yaw });
+            try ins.bind(7, fr.Value{ .float = facing_pitch });
             try ins.exec();
         }
     }
 
-    pub fn loadPlayer(self: *SaveManager, hotbar: *Hotbar, inventory: *PlayerInventory, registry: *ECS.Registry) !void {
+    /// 加载玩家数据，返回 tick_count（如果存档有记录）
+    pub fn loadPlayer(self: *SaveManager, hotbar: *Hotbar, inventory: *PlayerInventory, registry: *ECS.Registry) !?u64 {
         // WorldInfo — 恢复位置、血量、飞行、物理状态
         const rows = try self.world_db.query(WorldRow).findAll();
         if (rows.len > 0) {
@@ -209,11 +224,14 @@ pub const SaveManager = struct {
             if (iter.next()) |entity| {
                 var pos = view.get(Comps.Position, entity);
                 pos.vec = Vec3.new(info.player_pos_x, info.player_pos_y + 0.01, info.player_pos_z);
-                // +0.01 避免浮点舍入使玩家刚好嵌在方块表面，第一帧被重力拉进方块
                 var health = view.get(Comps.Health, entity);
                 health.current = info.player_health;
                 if (registry.tryGet(Comps.Velocity, entity)) |vel| vel.vec = Vec3.zero;
                 if (registry.tryGet(Comps.OnGround, entity)) |og| og.value = true;
+                if (registry.tryGet(Comps.Facing, entity)) |facing| {
+                    facing.yaw = info.player_facing_yaw;
+                    facing.pitch = info.player_facing_pitch;
+                }
                 if (info.is_flying != 0) registry.add(entity, Comps.Flying{});
             }
         }
@@ -245,6 +263,10 @@ pub const SaveManager = struct {
                 }
             }
         }
+
+        // 返回 tick_count（如果有）
+        if (rows.len > 0) return @as(u64, @intCast(rows[0].tick_count));
+        return null;
     }
 
     // ── 实体 ──
@@ -255,19 +277,25 @@ pub const SaveManager = struct {
             defer stmt.deinit();
             try stmt.exec();
         }
-        var view = registry.view(.{ Comps.AIAgent, Comps.Position, Comps.Health }, .{});
+        var view = registry.view(.{ Comps.AIAgent, Comps.Position, Comps.Health, Comps.Facing }, .{});
         var iter = view.entityIterator();
         while (iter.next()) |entity| {
             const agent = view.get(Comps.AIAgent, entity);
             const pos = view.get(Comps.Position, entity);
             const hp = view.get(Comps.Health, entity);
-            var ins = try self.world_db.conn.prepare("INSERT INTO EntityRow (type_id, pos_x, pos_y, pos_z, health) VALUES (?, ?, ?, ?, ?)", &.{});
+            const facing = view.get(Comps.Facing, entity);
+            var ins = try self.world_db.conn.prepare(
+                \\INSERT INTO EntityRow (type_id, pos_x, pos_y, pos_z, health, facing_yaw, facing_pitch)
+                \\  VALUES (?, ?, ?, ?, ?, ?, ?)
+            , &.{});
             defer ins.deinit();
             try ins.bind(0, fr.Value{ .string = agent.type_id.info().name });
             try ins.bind(1, fr.Value{ .float = @as(f64, @floatCast(pos.vec.x)) });
             try ins.bind(2, fr.Value{ .float = @as(f64, @floatCast(pos.vec.y)) });
             try ins.bind(3, fr.Value{ .float = @as(f64, @floatCast(pos.vec.z)) });
             try ins.bind(4, fr.Value{ .float = @as(f64, @floatCast(hp.current)) });
+            try ins.bind(5, fr.Value{ .float = @as(f64, @floatCast(facing.yaw)) });
+            try ins.bind(6, fr.Value{ .float = @as(f64, @floatCast(facing.pitch)) });
             try ins.exec();
         }
     }
@@ -290,6 +318,7 @@ pub const SaveManager = struct {
             registry.add(entity, Comps.MoveIntent{});
             registry.add(entity, Comps.Health{ .current = row.health, .max = info.health });
             registry.add(entity, Comps.AttackCooldown{ .interval = info.attack_interval });
+            registry.add(entity, Comps.Facing{ .yaw = row.facing_yaw, .pitch = row.facing_pitch });
         }
     }
 
