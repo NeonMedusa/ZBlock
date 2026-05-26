@@ -289,8 +289,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.gctx = gctx;
 
     // 初始化噪声系统
-    const perlin = @import("perlin.zig");
-    perlin.init(99);
+    const noise = @import("noise.zig");
+    noise.init(99);
 
     // 初始化资源管理器
     const res_manager = try ResManager.init(allocator, &self.gctx, &self.render_pipeline);

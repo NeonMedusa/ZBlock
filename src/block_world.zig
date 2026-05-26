@@ -8,7 +8,7 @@ const Quat = Imports.Quat;
 const Wgpu = Imports.Wgpu;
 const Gctx = Imports.Gctx;
 const RenderPipeline = @import("render_pipeline.zig");
-const Perlin = @import("perlin.zig");
+const Noise = @import("noise.zig");
 const ECS = Imports.ECS;
 const Comps = Imports.Comps;
 const AABB = @import("aabb.zig").AABB;
@@ -53,7 +53,7 @@ pub const Chunk = struct {
             for (0..CHUNK_WIDTH) |z| {
                 const world_x = world_origin.x + @as(i32, @intCast(x));
                 const world_z = world_origin.z + @as(i32, @intCast(z));
-                const noise_val = Perlin.octavePerlin2d(
+                const noise_val = Noise.octavePerlin2d(
                     @as(f32, @floatFromInt(world_x)) * base_noise_scale,
                     @as(f32, @floatFromInt(world_z)) * base_noise_scale,
                     octaves,
@@ -68,7 +68,7 @@ pub const Chunk = struct {
                 }));
 
                 // 垂直群落边界弯曲，使雪线/裸岩线自然凹凸
-                const biome_noise = Perlin.perlin2d(
+                const biome_noise = Noise.perlin2d(
                     @as(f32, @floatFromInt(world_x)) * biome_noise_scale,
                     @as(f32, @floatFromInt(world_z)) * biome_noise_scale,
                 );

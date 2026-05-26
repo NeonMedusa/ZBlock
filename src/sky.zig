@@ -89,33 +89,12 @@ pub const SkyPipeline = struct {
     pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
         const shader_module = try gctx.createShaderModule("resources/shaders/sky_shader.wgsl");
 
-        // 加载 6 面彩色 cubemap 贴图
-        const face_names = [_][]const u8{
-            "resources/textures/sky/right.png",
-            "resources/textures/sky/left.png",
-            "resources/textures/sky/top.png",
-            "resources/textures/sky/bottom.png",
-            "resources/textures/sky/front.png",
-            "resources/textures/sky/back.png",
-        };
-        const first_file = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, face_names[0], std.math.maxInt(usize));
-        defer std.heap.page_allocator.free(first_file);
-        var first_img = try zigimg.Image.fromMemory(std.heap.page_allocator, first_file);
-        defer first_img.deinit(std.heap.page_allocator);
-        if (first_img.pixels != .rgba32) try first_img.convert(std.heap.page_allocator, .rgba32);
-        const face_size: u32 = @intCast(@min(first_img.width, first_img.height));
-        const face_len = face_size * face_size;
-        const face_bytes = face_len * 4;
-
-        var face0_data = try std.heap.page_allocator.alloc(u8, face_bytes);
-        defer std.heap.page_allocator.free(face0_data);
-        for (0..face_len) |i| {
-            const p = first_img.pixels.rgba32[i];
-            face0_data[i * 4 + 0] = p.r;
-            face0_data[i * 4 + 1] = p.g;
-            face0_data[i * 4 + 2] = p.b;
-            face0_data[i * 4 + 3] = p.a;
-        }
+        // CPU 烘培 3D 噪声 cubemap（6 面，每面 512²，单 buffer 逐面覆写）
+        const noise = @import("noise.zig");
+        const face_size: u32 = 512;
+        const freq: f32 = 2.5;
+        const fd = try std.heap.page_allocator.alloc(u8, face_size * face_size * 4);
+        defer std.heap.page_allocator.free(fd);
 
         const cubemap_texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &.{
             .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
@@ -126,40 +105,57 @@ pub const SkyPipeline = struct {
             .sampleCount = 1,
         });
 
-        // 写第一面（已加载）
-        Wgpu.wgpuQueueWriteTexture(
-            gctx.queue,
-            &Wgpu.WGPUTexelCopyTextureInfo{ .texture = cubemap_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = 0 } },
-            face0_data.ptr,
-            face_bytes,
-            &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = face_size * 4, .rowsPerImage = face_size },
-            &Wgpu.WGPUExtent3D{ .width = face_size, .height = face_size, .depthOrArrayLayers = 1 },
-        );
-
-        // 写第 2-6 面
-        for (face_names[1..], 0..) |name, fi| {
-            const file = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, name, std.math.maxInt(usize));
-            defer std.heap.page_allocator.free(file);
-            var img = try zigimg.Image.fromMemory(std.heap.page_allocator, file);
-            defer img.deinit(std.heap.page_allocator);
-            if (img.pixels != .rgba32) try img.convert(std.heap.page_allocator, .rgba32);
-            const fd = try std.heap.page_allocator.alloc(u8, face_bytes);
-            defer std.heap.page_allocator.free(fd);
-            for (0..face_len) |i| {
-                const p = img.pixels.rgba32[i];
-                fd[i * 4 + 0] = p.r;
-                fd[i * 4 + 1] = p.g;
-                fd[i * 4 + 2] = p.b;
-                fd[i * 4 + 3] = p.a;
+        for (0..6) |face| {
+            for (0..face_size) |y| {
+                for (0..face_size) |x| {
+                    const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(face_size)) * 2.0 - 1.0;
+                    const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(face_size)) * 2.0 - 1.0;
+                    const dir = switch (face) {
+                        0 => Vec3.norm(Vec3.new(1, -v, -u)),
+                        1 => Vec3.norm(Vec3.new(-1, -v, u)),
+                        2 => Vec3.norm(Vec3.new(u, 1, v)),
+                        3 => Vec3.norm(Vec3.new(u, -1, -v)),
+                        4 => Vec3.norm(Vec3.new(u, -v, 1)),
+                        5 => Vec3.norm(Vec3.new(-u, -v, -1)),
+                        else => unreachable,
+                    };
+                    const d = Vec3.norm(dir);
+                    const n = noise.fbmSnoise3(Vec3.new(d.x * freq, d.y * freq, d.z * freq), 4);
+                    const val = @as(u8, @intFromFloat(@min(@max(n * 0.5 + 0.5, 0) * 255.0, 255.0)));
+                    const idx = (y * face_size + x) * 4;
+                    fd[idx + 0] = val; // 主噪声层（云密度）
+                    fd[idx + 1] = 0;   // 预留：第二噪声层（如高层薄云）
+                    fd[idx + 2] = 0;   // 预留：第三噪声层（如地形雾）
+                    fd[idx + 3] = 255; // 预留：透明度/遮罩
+                }
             }
             Wgpu.wgpuQueueWriteTexture(
                 gctx.queue,
-                &Wgpu.WGPUTexelCopyTextureInfo{ .texture = cubemap_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = @intCast(fi + 1) } },
+                &Wgpu.WGPUTexelCopyTextureInfo{ .texture = cubemap_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = @intCast(face) } },
                 fd.ptr,
-                face_bytes,
+                face_size * face_size * 4,
                 &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = face_size * 4, .rowsPerImage = face_size },
                 &Wgpu.WGPUExtent3D{ .width = face_size, .height = face_size, .depthOrArrayLayers = 1 },
             );
+
+            // 导出各面到 zig-out/sky_faces/
+            const test_dir = "tmp/sky_faces";
+            _ = std.fs.cwd().makePath(test_dir) catch {};
+            var out_img = try zigimg.Image.create(std.heap.page_allocator, face_size, face_size, .rgba32);
+            for (0..face_size * face_size) |i| {
+                out_img.pixels.rgba32[i] = .{
+                    .r = fd[i * 4 + 0],
+                    .g = fd[i * 4 + 1],
+                    .b = fd[i * 4 + 2],
+                    .a = 255,
+                };
+            }
+            const fname = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/face_{}.png", .{ test_dir, face });
+            defer std.heap.page_allocator.free(fname);
+            const wbuf = try std.heap.page_allocator.alloc(u8, 0);
+            defer std.heap.page_allocator.free(wbuf);
+            try out_img.writeToFilePath(std.heap.page_allocator, fname, wbuf, .{ .png = .{} });
+            out_img.deinit(std.heap.page_allocator);
         }
         const cubemap_texture_view = Wgpu.wgpuTextureCreateView(cubemap_texture, &.{
             .aspect = Wgpu.WGPUTextureAspect_All,
