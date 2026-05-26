@@ -58,6 +58,20 @@ pub fn start(self: *Game) !void {
                     self.menu_state = .Pause;
                 if (self.keybinds.isJustPressed(&self.input, .toggle_inventory))
                     self.menu_state = .Inventory;
+
+                // 临时测试天空盒用：-=跳到明天，==跳到后天
+                if (self.input.isKeyJustPressed(.minus)) {
+                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
+                    const current_day = self.tick_count / day_ticks;
+                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.25 / TICK_DT));
+                    self.accumulator = 0;
+                }
+                if (self.input.isKeyJustPressed(.equal)) {
+                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
+                    const current_day = self.tick_count / day_ticks;
+                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.85 / TICK_DT));
+                    self.accumulator = 0;
+                }
             },
             .Inventory => {
                 if (self.keybinds.isJustPressed(&self.input, .pause_menu) or self.keybinds.isJustPressed(&self.input, .toggle_inventory)) {
@@ -181,11 +195,10 @@ pub fn start(self: *Game) !void {
     save_menu.deinit(self.allocator);
 }
 
-/// 重建投影矩阵和天空盒缓存。窗口缩放或参数变更后统一调用。
+/// 重建投影矩阵。窗口缩放后调用。
 pub fn rebuildProjMatrix(self: *Game) void {
     const aspect = self.window.width / self.window.height;
     self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.1, 500);
-    self.sky_pipeline.cached_inv_proj = self.ubo.proj_matrix.inverse();
 }
 
 /// 选存档后初始化游戏世界（玩家实体、区块、存档数据）
@@ -276,8 +289,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.gctx = gctx;
 
     // 初始化噪声系统
-    const perlin = @import("perlin.zig");
-    perlin.init(99);
+    const noise = @import("noise.zig");
+    noise.init(99);
 
     // 初始化资源管理器
     const res_manager = try ResManager.init(allocator, &self.gctx, &self.render_pipeline);
