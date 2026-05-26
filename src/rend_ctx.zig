@@ -843,8 +843,9 @@ pub const SceneUniform = struct {
     sun_intensity: f32 = undefined, // 太阳强度
     sun_color: Vec3 = undefined, // 太阳颜色
     moon_brightness: f32 = undefined, // 月亮强度
-    horizon_color: Vec3 = undefined, // 地平线色（环境光）
-    _pad: f32 = undefined,
+    ambient_ground: Vec3 = undefined, // 白天环境光色，独立于 horizon_color
+    _pad1: [1]f32 = undefined,
+
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
         const proj_matrix = Mat4.perspectiveReversedZ(
@@ -863,8 +864,7 @@ pub const SceneUniform = struct {
             .sun_intensity = 1.0,
             .sun_color = Vec3.new(1, 1, 1),
             .moon_brightness = 0.3,
-            .horizon_color = Vec3.new(0.6, 0.72, 0.9),
-            ._pad = undefined,
+            .ambient_ground = Vec3.new(1, 1, 1), // 环境光
         };
     }
 };

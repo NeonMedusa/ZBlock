@@ -1,6 +1,6 @@
 // sky_shader.wgsl
-// 程序化天空穹顶：用 @builtin(vertex_index) 生成的一个大三角形覆盖屏幕，
-// 无需 vertex/index buffer。逐像素从 NDC 还原世界方向，绘制天空。
+// 彩色 cubemap 天空盒：用 @builtin(vertex_index) 生成的一个大三角形覆盖屏幕，
+// 无需 vertex/index buffer。逐像素从 NDC 还原世界方向，采样 cubemap 混合天空。
 // 太阳/月亮/星星/天空渐变全部在片元着色器里完成。
 
 struct SkyUniform {
@@ -20,23 +20,26 @@ struct SkyUniform {
 };
 
 @group(0) @binding(0) var<uniform> sky: SkyUniform;
+@group(0) @binding(1) var cube_tex: texture_cube<f32>;
+@group(0) @binding(2) var cube_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
-    @location(0) uv: vec2f,
+    @location(1) dir: vec4f,
 };
 
 // 覆盖整个 NDC 的大三角形（3 个顶点盖满屏幕，无需 index buffer）
 @vertex
-fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
+fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOutput {
     let pos = array<vec2f, 3>(
         vec2f(-1.0, -1.0),
         vec2f(3.0, -1.0),
         vec2f(-1.0, 3.0),
     );
+    let p = pos[idx];
     var out: VertexOutput;
-    out.position = vec4f(pos[vi], 1.0, 1.0);
-    out.uv = pos[vi] * 0.5 + 0.5;
+    out.position = vec4f(p, 0.0, 1.0);
+    out.dir = vec4f(p, -1.0, 1.0);
     return out;
 }
 
@@ -53,7 +56,6 @@ fn hash3d(p: vec3f) -> f32 {
 //   smoothstep(0.3, 0.0, dist) 的 0.3 为星星半径
 //   1.2 为最大亮度
 fn stars(dir: vec3f) -> vec3f {
-    if dir.y < 0.05 { return vec3f(0.0); }
     let ndir = normalize(dir);
     let cell = floor(ndir * 100.0);
     let in_cell = fract(ndir * 100.0);
@@ -80,10 +82,13 @@ fn stars(dir: vec3f) -> vec3f {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    // NDC → 世界方向
-    let ndc = vec4f(in.uv * 2.0 - 1.0, 1.0, 1.0);
-    let world = sky.inv_view_proj * ndc;
-    let dir = normalize(world.xyz / world.w);
+    // NDC → 世界方向（Y 取反补偿 reversedZ 符号差异）
+    let t = sky.inv_view_proj * in.dir;
+    let d = t.xyz / t.w;
+    let dir = normalize(vec3f(d.x, -d.y, d.z));
+
+    // cubemap 采样（全屏背景）
+    let background = textureSample(cube_tex, cube_sampler, dir).rgb;
 
     // 昼夜混合因子：太阳高度低于 -0.15 为夜、高于 0.25 为昼，中间为黄昏/黎明
     let day_factor = smoothstep(-0.15, 0.25, sky.sun_direction.y);
@@ -93,15 +98,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         day_factor,
     );
 
+    // 混合：夜间 cubemap 变暗，白天渐变叠加
+    let bg = mix(background * 0.3, background, day_factor);
+
     // 太阳：两层（外层光晕 + 内层亮盘）
-    // 可调：pow( ,64) 和 pow( ,512) 分别控制光晕和亮盘大小，指数越大盘越小
+    // 可调：pow( ,256) 和 pow( ,2048) 分别控制光晕和亮盘大小，指数越大盘越小
     let sun_dot = max(dot(dir, normalize(sky.sun_direction.xyz)), 0.0);
     let sun_glow = pow(sun_dot, 256.0) * sky.sun_intensity * 2.0;
     let sun_disk = pow(sun_dot, 2048.0) * sky.sun_intensity * 4.0;
     let sun = (sun_glow + sun_disk) * sky.sun_color.rgb;
 
     // 月亮：硬切圆盘（位于太阳的正对面）
-    // 可调：step(0.995, ) 的 0.995 为月亮半径，越小月亮越大
+    // 可调：step(0.998, ) 的 0.998 为月亮半径，越小月亮越大
     let moon_dir = normalize(-sky.sun_direction.xyz);
     let moon_dot = max(dot(dir, moon_dir), 0.0);
     let moon_disk = step(0.998, moon_dot);
@@ -110,6 +118,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // 星星：夜间亮度翻倍
     let star = stars(dir) * (1.0 - day_factor) * 2.0 * (1.0 - moon_disk);
 
-    let final_color = sky_gradient.rgb + sun + moon + star;
+    let final_color = bg + sun + moon + star;
     return vec4f(final_color, 1.0);
 }

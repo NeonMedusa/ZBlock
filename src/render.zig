@@ -14,7 +14,6 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     game.ubo.sun_intensity = game.sky_pipeline.state.sun_intensity;
     game.ubo.sun_color = game.sky_pipeline.state.sun_color;
     game.ubo.moon_brightness = game.sky_pipeline.state.moon_brightness;
-    game.ubo.horizon_color = game.sky_pipeline.state.horizon_color;
     game.ubo.time = sky_time;
 
     Wgpu.wgpuQueueWriteBuffer(
@@ -26,13 +25,12 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     );
 
     if (world) {
-        // 天空方向矩阵：去掉 view 的平移（保留纯旋转），乘以缓存的 inv(proj)。
-        // 比每帧全量求逆 inv(proj * view) 更稳定。
+        // inverse(proj × view_rot)：从 NDC 方向反算世界方向（全屏三角 cubemap）
         var view_rot = game.ubo.view_matrix;
         view_rot.m[3][0] = 0;
         view_rot.m[3][1] = 0;
         view_rot.m[3][2] = 0;
-        const sky_mat = Mat4.mul(view_rot.transpose(), game.sky_pipeline.cached_inv_proj);
+        const sky_mat = Mat4.inverse(Mat4.mul(game.ubo.proj_matrix, view_rot));
         game.sky_pipeline.updateUniform(&game.gctx, sky_mat, sky_time);
     }
 
@@ -49,7 +47,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         var anim_map = std.AutoHashMap(u32, i32).init(game.allocator);
         defer anim_map.deinit();
         {
-            var view = game.registry.view(.{ Comps.AnimationState }, .{});
+            var view = game.registry.view(.{Comps.AnimationState}, .{});
             var it = view.entityIterator();
             while (it.next()) |e| {
                 const state = view.get(e);
@@ -77,7 +75,6 @@ fn drawFrame(game: *Game, comptime world: bool) void {
                 .transform = entity_transform,
                 .bone_offset = bone_off,
             };
-
 
             const model_name = view.getConst(Comps.ModelName, entity);
             const model = game.res_manager.getOrLoadModel(model_name.id);
@@ -171,7 +168,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
 
     if (world) {
-        // 绘制天空（独立 pipeline/bind group，不写 depth）
+        // 绘制天空（全屏三角，无 vertex/index buffer）
         Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.sky_pipeline.handle);
         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.sky_pipeline.bind_group, 0, null);
         Wgpu.wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
@@ -257,8 +254,12 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     Wgpu.wgpuTextureRelease(surface_texture.texture);
 }
 
-pub fn draw(game: *Game) void { drawFrame(game, true); }
-pub fn drawUI(game: *Game) void { drawFrame(game, false); }
+pub fn draw(game: *Game) void {
+    drawFrame(game, true);
+}
+pub fn drawUI(game: *Game) void {
+    drawFrame(game, false);
+}
 
 const Imports = @import("imports.zig");
 

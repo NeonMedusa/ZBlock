@@ -3,23 +3,26 @@
 // 所有模型/方块共用这一个 shader module，两条 pipeline 仅 vertex attribute layout 不同。
 
 // --- 全局绑定 (group 0, 每帧更新) ---
-@group(0) @binding(0) var<uniform> scene_uniform : SceneUniform;
-@group(0) @binding(1) var<storage, read> entities_data : array<EntitiesData>;
-@group(0) @binding(2) var<storage, read> ins_data : array<InstanceData>;
-@group(0) @binding(3) var<storage, read> bone_matrices : array<mat4x4f>;
+@group(0) @binding(0) var<uniform> scene_uniform: SceneUniform;
+@group(0) @binding(1) var<storage, read> entities_data: array<EntitiesData>;
+@group(0) @binding(2) var<storage, read> ins_data: array<InstanceData>;
+@group(0) @binding(3) var<storage, read> bone_matrices: array<mat4x4f>;
 
 // --- 材质绑定 (group 1, 纹理) ---
-@group(1) @binding(0) var<uniform> material_uniform : MaterialConstants;
-@group(1) @binding(1) var color_texture : texture_2d<f32>;
-@group(1) @binding(2) var normal_texture : texture_2d<f32>;
+@group(1) @binding(0) var<uniform> material_uniform: MaterialConstants;
+@group(1) @binding(1) var color_texture: texture_2d<f32>;
+@group(1) @binding(2) var normal_texture: texture_2d<f32>;
 
 struct SceneUniform {
     proj_matrix: mat4x4f,
     view_matrix: mat4x4f,
-    camera_pos: vec4f,        // xyz = pos, w = time
-    sun_direction: vec4f,     // xyz = dir, w = intensity
-    sun_color: vec4f,         // xyz = color, w = moon_brightness
-    horizon_color: vec4f,     // xyz = horizon, w = unused
+    camera_pos: vec3f,
+    time: f32,
+    sun_direction: vec3f,
+    sun_intensity: f32,
+    sun_color: vec3f,
+    moon_brightness: f32,
+    ambient_ground: vec3f,
 };
 
 struct MaterialConstants {
@@ -71,9 +74,9 @@ fn skinPosition(input_position: vec3f, bone_offset: i32, joint_indices: vec4u, j
     var skin_matrix: mat4x4f;
     for (var i = 0u; i < 4u; i++) {
         let w = joint_weights[i];
-        if (w > 0.0) {
+        if w > 0.0 {
             let mat = bone_matrices[bone_offset + i32(joint_indices[i])];
-            if (i == 0u) { skin_matrix = mat * w; } else { skin_matrix = skin_matrix + mat * w; }
+            if i == 0u { skin_matrix = mat * w; } else { skin_matrix = skin_matrix + mat * w; }
         }
     }
     return (skin_matrix * vec4f(input_position, 1.0)).xyz;
@@ -83,9 +86,9 @@ fn skinNormal(input_normal: vec3f, bone_offset: i32, joint_indices: vec4u, joint
     var skin_matrix: mat4x4f;
     for (var i = 0u; i < 4u; i++) {
         let w = joint_weights[i];
-        if (w > 0.0) {
+        if w > 0.0 {
             let mat = bone_matrices[bone_offset + i32(joint_indices[i])];
-            if (i == 0u) { skin_matrix = mat * w; } else { skin_matrix = skin_matrix + mat * w; }
+            if i == 0u { skin_matrix = mat * w; } else { skin_matrix = skin_matrix + mat * w; }
         }
     }
     return (skin_matrix * vec4f(input_normal, 0.0)).xyz;
@@ -100,21 +103,19 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
     let n = normalize(normal);
 
     // 太阳光
-    let sun_dir = normalize(scene_uniform.sun_direction.xyz);
-    let sun_intensity = scene_uniform.sun_direction.w;
-    let sun_col = scene_uniform.sun_color.xyz * sun_intensity;
+    let sun_dir = normalize(scene_uniform.sun_direction);
+    let sun_col = scene_uniform.sun_color * scene_uniform.sun_intensity;
 
     // 月光（方向相反、偏蓝、更弱）
     let moon_dir = -sun_dir;
-    let moon_intensity = scene_uniform.sun_color.w;
-    let moon_col = vec3f(0.5, 0.55, 0.8) * moon_intensity * 2.0;
+    let moon_col = vec3f(0.5, 0.55, 0.8) * scene_uniform.moon_brightness * 2.0;
 
     // 昼夜因子（与天空盒一致）
     let day = smoothstep(-0.15, 0.25, scene_uniform.sun_direction.y);
     let night = 1.0 - day;
 
-    // 环境光：白天用地平线色，夜晚深空
-    let ambient_color = mix(vec3f(0.02, 0.02, 0.08), scene_uniform.horizon_color.xyz, day);
+    // 环境光：白天用 ambient_ground，夜晚深空
+    let ambient_color = mix(vec3f(0.02, 0.02, 0.08), scene_uniform.ambient_ground, day);
     let ambient = ambient_color * AMBIENT_STRENGTH * base_color.rgb;
 
     // 漫反射
@@ -123,7 +124,7 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
     let diffuse = sun_diffuse + moon_diffuse;
 
     // 高光（仅太阳）
-    let camera_pos = scene_uniform.camera_pos.xyz;
+    let camera_pos = scene_uniform.camera_pos;
     let view_dir = normalize(camera_pos - position);
     let reflect_dir = reflect(-sun_dir, n);
     let specular = day * pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS) * SPECULAR_STRENGTH * sun_col;
@@ -176,7 +177,7 @@ fn vs_skinned(in: SkinnedVertex, @builtin(instance_index) ins_idx: u32) -> Verte
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var base_color: vec4f;
-    if (material_uniform.has_base_color != 0u) {
+    if material_uniform.has_base_color != 0u {
         let texture_dims = textureDimensions(color_texture);
         let texel_coords = vec2i(
             i32(in.texcoord.x * f32(texture_dims.x)),

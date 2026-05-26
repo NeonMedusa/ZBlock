@@ -1,10 +1,11 @@
-// sky.zig — 程序化天空穹顶（全屏三角，无 vertex/index buffer）
+// sky.zig — 彩色 cubemap 天空盒（全屏三角，无 mesh 依赖）
 const std = @import("std");
 const Wgpu = @import("imports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
 const Vec3 = @import("algebra.zig").Vec3;
 const Vec4 = @import("algebra.zig").Vec4;
 const Mat4 = @import("algebra.zig").Mat4;
+const zigimg = @import("zigimg");
 
 pub const SkyUniform = struct {
     // inv(proj * view_rot)，不含平移：sky_mat * ndc → world 方向，数值稳定
@@ -57,18 +58,14 @@ pub const SkyState = struct {
     pub fn generate(seed: u64) SkyState {
         var prng = std.Random.DefaultPrng.init(seed);
         const r = prng.random();
-
-        const sun_hue = 25.0 + r.float(f32) * 55.0;
-        const sat = 0.4 + r.float(f32) * 0.6;
-
         return .{
             .sun_direction = Vec3.norm(Vec3.new(-0.3 + r.float(f32) * 0.6, 0.3 + r.float(f32) * 0.5, -0.5 + r.float(f32) * 0.6)),
-            .sun_color = hslToRgb(sun_hue, sat, 0.85 + r.float(f32) * 0.15),
+            .sun_color = Vec3.new(1.0, 0.95, 0.90),
             .sun_intensity = 0.6 + r.float(f32) * 0.6,
             .moon_phase = r.float(f32),
             .moon_brightness = 0.3 + r.float(f32) * 0.6,
-            .horizon_color = Vec3.new(0.60, 0.72, 0.90),
-            .zenith_color = Vec3.new(0.20, 0.35, 0.70),
+            .horizon_color = Vec3.new(0.18, 0.28, 0.7),
+            .zenith_color = Vec3.new(0.08, 0.18, 0.7),
             .star_density = 0.03 + r.float(f32) * 0.07,
             .star_twinkle_speed = 1.0 + r.float(f32) * 1.0,
             .star_color_strength = r.float(f32) * r.float(f32) * 0.6,
@@ -77,15 +74,6 @@ pub const SkyState = struct {
     }
 };
 
-fn hslToRgb(hue: f32, sat: f32, light: f32) Vec3 {
-    const c = (1.0 - @abs(2.0 * light - 1.0)) * sat;
-    const hp = @mod(hue / 60.0, 6.0);
-    const x = c * (1.0 - @abs(@mod(hp, 2.0) - 1.0));
-    const rgb = if (hp < 1.0) Vec3.new(c, x, 0.0) else if (hp < 2.0) Vec3.new(x, c, 0.0) else if (hp < 3.0) Vec3.new(0.0, c, x) else if (hp < 4.0) Vec3.new(0.0, x, c) else if (hp < 5.0) Vec3.new(x, 0.0, c) else Vec3.new(c, 0.0, x);
-    const m = light - c / 2.0;
-    return Vec3.new(rgb.x + m, rgb.y + m, rgb.z + m);
-}
-
 pub const SkyPipeline = struct {
     handle: Wgpu.WGPURenderPipeline,
     bind_group_layout: Wgpu.WGPUBindGroupLayout,
@@ -93,20 +81,112 @@ pub const SkyPipeline = struct {
     uniform_buffer: Wgpu.WGPUBuffer,
     shader_module: Wgpu.WGPUShaderModule,
     state: SkyState,
-    day_length: f32 = 24.0, // 一天多少秒
-    cached_inv_proj: Mat4, // inv(proj)，在 game.zig init 中赋值，避免每帧重复求逆
+    day_length: f32 = 60.0, // 一天多少秒
+    cubemap_texture: Wgpu.WGPUTexture,
+    cubemap_texture_view: Wgpu.WGPUTextureView,
+    cubemap_sampler: Wgpu.WGPUSampler,
 
     pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
         const shader_module = try gctx.createShaderModule("resources/shaders/sky_shader.wgsl");
 
+        // 加载 6 面彩色 cubemap 贴图
+        const face_names = [_][]const u8{
+            "resources/textures/sky/right.png",
+            "resources/textures/sky/left.png",
+            "resources/textures/sky/top.png",
+            "resources/textures/sky/bottom.png",
+            "resources/textures/sky/front.png",
+            "resources/textures/sky/back.png",
+        };
+        const first_file = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, face_names[0], std.math.maxInt(usize));
+        defer std.heap.page_allocator.free(first_file);
+        var first_img = try zigimg.Image.fromMemory(std.heap.page_allocator, first_file);
+        defer first_img.deinit(std.heap.page_allocator);
+        if (first_img.pixels != .rgba32) try first_img.convert(std.heap.page_allocator, .rgba32);
+        const face_size: u32 = @intCast(@min(first_img.width, first_img.height));
+        const face_len = face_size * face_size;
+        const face_bytes = face_len * 4;
+
+        var face0_data = try std.heap.page_allocator.alloc(u8, face_bytes);
+        defer std.heap.page_allocator.free(face0_data);
+        for (0..face_len) |i| {
+            const p = first_img.pixels.rgba32[i];
+            face0_data[i * 4 + 0] = p.r;
+            face0_data[i * 4 + 1] = p.g;
+            face0_data[i * 4 + 2] = p.b;
+            face0_data[i * 4 + 3] = p.a;
+        }
+
+        const cubemap_texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &.{
+            .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
+            .dimension = Wgpu.WGPUTextureDimension_2D,
+            .size = .{ .width = face_size, .height = face_size, .depthOrArrayLayers = 6 },
+            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        });
+
+        // 写第一面（已加载）
+        Wgpu.wgpuQueueWriteTexture(
+            gctx.queue,
+            &Wgpu.WGPUTexelCopyTextureInfo{ .texture = cubemap_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = 0 } },
+            face0_data.ptr,
+            face_bytes,
+            &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = face_size * 4, .rowsPerImage = face_size },
+            &Wgpu.WGPUExtent3D{ .width = face_size, .height = face_size, .depthOrArrayLayers = 1 },
+        );
+
+        // 写第 2-6 面
+        for (face_names[1..], 0..) |name, fi| {
+            const file = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, name, std.math.maxInt(usize));
+            defer std.heap.page_allocator.free(file);
+            var img = try zigimg.Image.fromMemory(std.heap.page_allocator, file);
+            defer img.deinit(std.heap.page_allocator);
+            if (img.pixels != .rgba32) try img.convert(std.heap.page_allocator, .rgba32);
+            const fd = try std.heap.page_allocator.alloc(u8, face_bytes);
+            defer std.heap.page_allocator.free(fd);
+            for (0..face_len) |i| {
+                const p = img.pixels.rgba32[i];
+                fd[i * 4 + 0] = p.r;
+                fd[i * 4 + 1] = p.g;
+                fd[i * 4 + 2] = p.b;
+                fd[i * 4 + 3] = p.a;
+            }
+            Wgpu.wgpuQueueWriteTexture(
+                gctx.queue,
+                &Wgpu.WGPUTexelCopyTextureInfo{ .texture = cubemap_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = @intCast(fi + 1) } },
+                fd.ptr,
+                face_bytes,
+                &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = face_size * 4, .rowsPerImage = face_size },
+                &Wgpu.WGPUExtent3D{ .width = face_size, .height = face_size, .depthOrArrayLayers = 1 },
+            );
+        }
+        const cubemap_texture_view = Wgpu.wgpuTextureCreateView(cubemap_texture, &.{
+            .aspect = Wgpu.WGPUTextureAspect_All,
+            .dimension = Wgpu.WGPUTextureViewDimension_Cube,
+            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
+            .baseMipLevel = 0,
+            .mipLevelCount = 1,
+            .baseArrayLayer = 0,
+            .arrayLayerCount = 6,
+        });
+        const cubemap_sampler = Wgpu.wgpuDeviceCreateSampler(gctx.device, &.{
+            .addressModeU = Wgpu.WGPUAddressMode_ClampToEdge,
+            .addressModeV = Wgpu.WGPUAddressMode_ClampToEdge,
+            .addressModeW = Wgpu.WGPUAddressMode_ClampToEdge,
+            .magFilter = Wgpu.WGPUFilterMode_Linear,
+            .minFilter = Wgpu.WGPUFilterMode_Linear,
+            .mipmapFilter = Wgpu.WGPUMipmapFilterMode_Linear,
+            .lodMinClamp = 0,
+            .lodMaxClamp = 32,
+            .compare = Wgpu.WGPUCompareFunction_Undefined,
+            .maxAnisotropy = 1,
+        });
+
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
-            .{
-                .binding = 0,
-                .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment,
-                .buffer = .{
-                    .type = Wgpu.WGPUBufferBindingType_Uniform,
-                },
-            },
+            .{ .binding = 0, .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment, .buffer = .{ .type = Wgpu.WGPUBufferBindingType_Uniform } },
+            .{ .binding = 1, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Float, .viewDimension = Wgpu.WGPUTextureViewDimension_Cube } },
+            .{ .binding = 2, .visibility = Wgpu.WGPUShaderStage_Fragment, .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Filtering } },
         };
         const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(
             gctx.device,
@@ -122,16 +202,17 @@ pub const SkyPipeline = struct {
         });
 
         const state = SkyState.generate(seed);
-
         var sky_uniform: SkyUniform = undefined;
         sky_uniform = SkyUniform.pack(Mat4.identity, state, 0.0);
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &sky_uniform, @sizeOf(SkyUniform));
 
         const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
             .layout = bind_group_layout,
-            .entryCount = 1,
+            .entryCount = 3,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .offset = 0, .size = @sizeOf(SkyUniform) },
+                .{ .binding = 1, .textureView = cubemap_texture_view },
+                .{ .binding = 2, .sampler = cubemap_sampler },
             },
         });
 
@@ -176,7 +257,9 @@ pub const SkyPipeline = struct {
             .shader_module = shader_module,
             .state = state,
             .day_length = 60.0, // 1 分钟
-            .cached_inv_proj = Mat4.identity,
+            .cubemap_texture = cubemap_texture,
+            .cubemap_texture_view = cubemap_texture_view,
+            .cubemap_sampler = cubemap_sampler,
         };
     }
 
@@ -198,5 +281,8 @@ pub const SkyPipeline = struct {
         Wgpu.wgpuBindGroupRelease(self.bind_group);
         Wgpu.wgpuBufferRelease(self.uniform_buffer);
         Wgpu.wgpuShaderModuleRelease(self.shader_module);
+        Wgpu.wgpuTextureRelease(self.cubemap_texture);
+        Wgpu.wgpuTextureViewRelease(self.cubemap_texture_view);
+        Wgpu.wgpuSamplerRelease(self.cubemap_sampler);
     }
 };
