@@ -131,3 +131,8 @@ group 切换代价。
 ## 程序化天空盒
 
 详见 [rendering_sky.md](rendering_sky.md)
+
+## 程序化云
+
+CPU 预烘培 3D Simplex 噪声到 6×512² cubemap，shader 中采样实现逐像素云渲染。
+支持风动、三方向差分光照、太阳高光、边缘辉光。详见 [rendering_sky.md](rendering_sky.md) 的程序化云章节。
