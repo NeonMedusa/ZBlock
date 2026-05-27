@@ -385,7 +385,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
     // 测试方块世界
-    self.chunk_radius = 1;
+    self.chunk_radius = 16;
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
     try self.block_world.spawnWorker(); // mesh 生成线程
     try self.block_world.spawnAStarWorker(); // 寻路线程

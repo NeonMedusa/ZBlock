@@ -14,8 +14,8 @@ pub const SkyUniform = struct {
     sun_color: Vec4,
     horizon_color: Vec4,
     zenith_color: Vec4,
-    cloud_params1: Vec4, // x=云量(越大云越多), y=密度, z=高度, w=风速
-    cloud_params2: Vec4, // x=风向_X, y=风向_Z, z=云图缩放, w=光照偏移距
+    cloud_params1: Vec4, // x=云量, y=Y轴压缩, z=未用, w=风速
+    cloud_params2: Vec4, // x=风向_X, y=风向_Z, z=云图缩放(越大云纹越细), w=光照偏移距
     cloud_color0: Vec4,
     cloud_color1: Vec4,
     cloud_color2: Vec4,
@@ -39,7 +39,7 @@ pub const SkyUniform = struct {
             .sun_color = Vec4{ .x = state.sun_color.x, .y = state.sun_color.y, .z = state.sun_color.z, .w = 0 },
             .horizon_color = Vec4{ .x = state.horizon_color.x, .y = state.horizon_color.y, .z = state.horizon_color.z, .w = 0 },
             .zenith_color = Vec4{ .x = state.zenith_color.x, .y = state.zenith_color.y, .z = state.zenith_color.z, .w = 0 },
-            .cloud_params1 = Vec4{ .x = state.cloud_coverage, .y = state.cloud_density, .z = state.cloud_altitude, .w = state.cloud_speed },
+            .cloud_params1 = Vec4{ .x = state.cloud_coverage, .y = state.cloud_squish, .z = state.cloud_altitude, .w = state.cloud_speed },
             .cloud_params2 = Vec4{ .x = state.wind_dir.x, .y = state.wind_dir.y, .z = state.cloud_size, .w = state.offset_distance },
             .cloud_color0 = Vec4{ .x = state.cloud_color0.x, .y = state.cloud_color0.y, .z = state.cloud_color0.z, .w = 0 },
             .cloud_color1 = Vec4{ .x = state.cloud_color1.x, .y = state.cloud_color1.y, .z = state.cloud_color1.z, .w = 0 },
@@ -73,7 +73,7 @@ pub const SkyState = struct {
     star_color_strength: f32,
     seasonal_tilt: f32 = 0,
     cloud_coverage: f32,
-    cloud_density: f32,
+    cloud_squish: f32,
     cloud_altitude: f32,
     cloud_speed: f32,
     cloud_size: f32,
@@ -103,7 +103,7 @@ pub const SkyState = struct {
             .star_color_strength = r.float(f32) * r.float(f32) * 0.6,
             .seasonal_tilt = 0,
             .cloud_coverage = 1.1,
-            .cloud_density = 0.3,
+            .cloud_squish = 1.5,
             .cloud_altitude = 0.5,
             .cloud_speed = 2.0,
             .cloud_size = 1.0,
@@ -138,7 +138,7 @@ pub const SkyPipeline = struct {
         // CPU 烘培 3D 噪声 cubemap（6 面，每面 512²）
         const noise = @import("noise.zig");
         const face_size: u32 = 512;
-        const freq: f32 = 2.5;
+        const freq: f32 = 3.0;
         const fd = try std.heap.page_allocator.alloc(u8, face_size * face_size * 4);
         defer std.heap.page_allocator.free(fd);
 
@@ -171,7 +171,7 @@ pub const SkyPipeline = struct {
                     const n2 = noise.fbmSnoise3(Vec3.new(d.x * freq * 2.3 + 10.0, d.y * freq * 2.3 + 20.0, d.z * freq * 2.3 + 30.0), 3);
                     const val2 = @as(u8, @intFromFloat(@min(@max(n2 * 0.5 + 0.5, 0) * 255.0, 255.0)));
                     const idx = (y * face_size + x) * 4;
-                    fd[idx + 0] = val;  // R: 低层云
+                    fd[idx + 0] = val; // R: 低层云
                     fd[idx + 1] = val2; // G: 高层薄云
                     fd[idx + 2] = 0;
                     fd[idx + 3] = 255;

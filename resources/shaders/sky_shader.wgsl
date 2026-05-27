@@ -7,8 +7,8 @@ struct SkyUniform {
     sun_color: vec4f,
     horizon_color: vec4f,
     zenith_color: vec4f,
-    cloud_params1: vec4f,   // x=云量, y=密度, z=高度, w=风速
-    cloud_params2: vec4f,   // x=风向_X, y=风向_Z, z=云图缩放, w=光照偏移距
+    cloud_params1: vec4f,   // x=云量, y=Y轴压缩, z=未用, w=风速
+    cloud_params2: vec4f,   // x=风向_X, y=风向_Z, z=云图缩放(越大云纹越细), w=光照偏移距
     cloud_color0: vec4f,        // 云阴影色（暗）
     cloud_color1: vec4f,        // 云中间色（中）
     cloud_color2: vec4f,        // 云高光色（亮）
@@ -80,28 +80,32 @@ struct CloudResult {
 
 fn renderClouds(dir: vec3f, sun_halo: f32, time: f32) -> CloudResult {
     let cloudy_rate = sky.cloud_params1.x;
+    let squish = sky.cloud_params1.y;
     let wind_speed = sky.cloud_params1.w;
     let cloud_size = sky.cloud_params2.z;
     let offset_dist = sky.cloud_params2.w * 0.2;
     let sun_dir = normalize(sky.sun_direction.xyz);
+
+    // Y 轴压缩：1.0=正常球面, >1=Y 放大后归一化→方向向两极靠拢→云向水平汇聚
+    let flat_dir = normalize(vec3f(dir.x, dir.y * squish, dir.z));
 
     // 风动：绕 Y 轴旋转
     let wind_angle = wind_speed * time * 0.01;
     let cos_w = cos(wind_angle);
     let sin_w = sin(wind_angle);
     let wind_dir = vec3f(
-        dir.x * cos_w - dir.z * sin_w,
-        dir.y,
-        dir.x * sin_w + dir.z * cos_w,
+        flat_dir.x * cos_w - flat_dir.z * sin_w,
+        flat_dir.y,
+        flat_dir.x * sin_w + flat_dir.z * cos_w,
     );
 
     // 两层不同频率
-    let dir1 = normalize(dir * (cloud_size * 2.0));
+    let dir1 = normalize(flat_dir * (cloud_size * 2.0));
     let dir2 = normalize(wind_dir * (cloud_size + 0.1));
 
     // 三方向光照偏移
-    let dir_front = normalize(dir + sun_dir * offset_dist);
-    let dir_back = normalize(dir - sun_dir * offset_dist);
+    let dir_front = normalize(flat_dir + sun_dir * offset_dist);
+    let dir_back = normalize(flat_dir - sun_dir * offset_dist);
 
     // cubemap 采样（方向直采，无需 UV 计算）
     let c1 = textureSample(cube_tex, cube_sampler, dir1).r;
@@ -165,8 +169,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let cloud = cloud_layer * mix(0.3, 1.0, day_factor);
 
     // 太阳
-    let sun_glow = pow(sun_dot, 256.0) * sky.sun_intensity * 2.0;
-    let sun_disk = pow(sun_dot, 2048.0) * sky.sun_intensity * 4.0;
+    let sun_glow = pow(sun_dot, 512.0) * sky.sun_intensity * 2.0;
+    let sun_disk = pow(sun_dot, 4096.0) * sky.sun_intensity * 4.0;
     let sun = (sun_glow + sun_disk) * sky.sun_color.rgb;
 
     // 月亮
