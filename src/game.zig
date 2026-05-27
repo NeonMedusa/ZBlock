@@ -385,7 +385,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
     // 测试方块世界
-    self.chunk_radius = 16;
+    self.chunk_radius = 1;
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
     try self.block_world.spawnWorker(); // mesh 生成线程
     try self.block_world.spawnAStarWorker(); // 寻路线程
@@ -890,7 +890,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 3;
+        const MAX_ENEMIES: u32 = 0;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

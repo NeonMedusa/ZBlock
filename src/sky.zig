@@ -1,26 +1,35 @@
-// sky.zig — 彩色 cubemap 天空盒（全屏三角，无 mesh 依赖）
+// sky.zig — 全屏三角 + cubemap 噪声云渲染
 const std = @import("std");
 const Wgpu = @import("imports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
+const Vec2 = @import("algebra.zig").Vec2;
 const Vec3 = @import("algebra.zig").Vec3;
 const Vec4 = @import("algebra.zig").Vec4;
 const Mat4 = @import("algebra.zig").Mat4;
 const zigimg = @import("zigimg");
 
 pub const SkyUniform = struct {
-    // inv(proj * view_rot)，不含平移：sky_mat * ndc → world 方向，数值稳定
     inv_view_proj: Mat4,
     sun_direction: Vec4,
     sun_color: Vec4,
     horizon_color: Vec4,
     zenith_color: Vec4,
+    cloud_params1: Vec4, // x=云量(越大云越多), y=密度, z=高度, w=风速
+    cloud_params2: Vec4, // x=风向_X, y=风向_Z, z=云图缩放, w=光照偏移距
+    cloud_color0: Vec4,
+    cloud_color1: Vec4,
+    cloud_color2: Vec4,
+    time: f32,
     sun_intensity: f32,
     moon_phase: f32,
     moon_brightness: f32,
     star_density: f32,
     star_twinkle_speed: f32,
     star_color_strength: f32,
-    time: f32,
+    back_lit_strength: f32,
+    edge_lit_power: f32,
+    edge_lit_strength: f32,
+    cloud_color_mtime: f32,
     _pad: [1]f32 = undefined,
 
     pub fn pack(inv_view_proj: Mat4, state: SkyState, time: f32) SkyUniform {
@@ -30,13 +39,22 @@ pub const SkyUniform = struct {
             .sun_color = Vec4{ .x = state.sun_color.x, .y = state.sun_color.y, .z = state.sun_color.z, .w = 0 },
             .horizon_color = Vec4{ .x = state.horizon_color.x, .y = state.horizon_color.y, .z = state.horizon_color.z, .w = 0 },
             .zenith_color = Vec4{ .x = state.zenith_color.x, .y = state.zenith_color.y, .z = state.zenith_color.z, .w = 0 },
+            .cloud_params1 = Vec4{ .x = state.cloud_coverage, .y = state.cloud_density, .z = state.cloud_altitude, .w = state.cloud_speed },
+            .cloud_params2 = Vec4{ .x = state.wind_dir.x, .y = state.wind_dir.y, .z = state.cloud_size, .w = state.offset_distance },
+            .cloud_color0 = Vec4{ .x = state.cloud_color0.x, .y = state.cloud_color0.y, .z = state.cloud_color0.z, .w = 0 },
+            .cloud_color1 = Vec4{ .x = state.cloud_color1.x, .y = state.cloud_color1.y, .z = state.cloud_color1.z, .w = 0 },
+            .cloud_color2 = Vec4{ .x = state.cloud_color2.x, .y = state.cloud_color2.y, .z = state.cloud_color2.z, .w = 0 },
+            .time = time,
             .sun_intensity = state.sun_intensity,
             .moon_phase = state.moon_phase,
             .moon_brightness = state.moon_brightness,
             .star_density = state.star_density,
             .star_twinkle_speed = state.star_twinkle_speed,
             .star_color_strength = state.star_color_strength,
-            .time = time,
+            .back_lit_strength = state.back_lit_strength,
+            .edge_lit_power = state.edge_lit_power,
+            .edge_lit_strength = state.edge_lit_strength,
+            .cloud_color_mtime = state.cloud_color_mtime,
             ._pad = undefined,
         };
     }
@@ -53,7 +71,21 @@ pub const SkyState = struct {
     star_density: f32,
     star_twinkle_speed: f32,
     star_color_strength: f32,
-    seasonal_tilt: f32 = 0, // +0.3=夏至(昼长), 0=春秋分, -0.3=冬至(昼短)；未来可从季节系统获取
+    seasonal_tilt: f32 = 0,
+    cloud_coverage: f32,
+    cloud_density: f32,
+    cloud_altitude: f32,
+    cloud_speed: f32,
+    cloud_size: f32,
+    wind_dir: Vec2,
+    offset_distance: f32,
+    cloud_color0: Vec3,
+    cloud_color1: Vec3,
+    cloud_color2: Vec3,
+    back_lit_strength: f32,
+    edge_lit_power: f32,
+    edge_lit_strength: f32,
+    cloud_color_mtime: f32,
 
     pub fn generate(seed: u64) SkyState {
         var prng = std.Random.DefaultPrng.init(seed);
@@ -69,7 +101,21 @@ pub const SkyState = struct {
             .star_density = 0.03 + r.float(f32) * 0.07,
             .star_twinkle_speed = 1.0 + r.float(f32) * 1.0,
             .star_color_strength = r.float(f32) * r.float(f32) * 0.6,
-            .seasonal_tilt = 0, // 未来可从季节系统获取
+            .seasonal_tilt = 0,
+            .cloud_coverage = 1.1,
+            .cloud_density = 0.3,
+            .cloud_altitude = 0.5,
+            .cloud_speed = 2.0,
+            .cloud_size = 1.0,
+            .wind_dir = Vec2.new(-0.3 + r.float(f32) * 0.6, -0.3 + r.float(f32) * 0.6),
+            .offset_distance = 0.1,
+            .cloud_color0 = Vec3.new(0.2, 0.2, 0.2),
+            .cloud_color1 = Vec3.new(0.65, 0.65, 0.65),
+            .cloud_color2 = Vec3.new(1.0, 1.0, 1.0),
+            .back_lit_strength = 5.0,
+            .edge_lit_power = 1.0,
+            .edge_lit_strength = 1.0,
+            .cloud_color_mtime = 0.5,
         };
     }
 };
@@ -81,7 +127,7 @@ pub const SkyPipeline = struct {
     uniform_buffer: Wgpu.WGPUBuffer,
     shader_module: Wgpu.WGPUShaderModule,
     state: SkyState,
-    day_length: f32 = 60.0, // 一天多少秒
+    day_length: f32 = 60.0,
     cubemap_texture: Wgpu.WGPUTexture,
     cubemap_texture_view: Wgpu.WGPUTextureView,
     cubemap_sampler: Wgpu.WGPUSampler,
@@ -89,7 +135,7 @@ pub const SkyPipeline = struct {
     pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
         const shader_module = try gctx.createShaderModule("resources/shaders/sky_shader.wgsl");
 
-        // CPU 烘培 3D 噪声 cubemap（6 面，每面 512²，单 buffer 逐面覆写）
+        // CPU 烘培 3D 噪声 cubemap（6 面，每面 512²）
         const noise = @import("noise.zig");
         const face_size: u32 = 512;
         const freq: f32 = 2.5;
@@ -122,11 +168,13 @@ pub const SkyPipeline = struct {
                     const d = Vec3.norm(dir);
                     const n = noise.fbmSnoise3(Vec3.new(d.x * freq, d.y * freq, d.z * freq), 4);
                     const val = @as(u8, @intFromFloat(@min(@max(n * 0.5 + 0.5, 0) * 255.0, 255.0)));
+                    const n2 = noise.fbmSnoise3(Vec3.new(d.x * freq * 2.3 + 10.0, d.y * freq * 2.3 + 20.0, d.z * freq * 2.3 + 30.0), 3);
+                    const val2 = @as(u8, @intFromFloat(@min(@max(n2 * 0.5 + 0.5, 0) * 255.0, 255.0)));
                     const idx = (y * face_size + x) * 4;
-                    fd[idx + 0] = val; // 主噪声层（云密度）
-                    fd[idx + 1] = 0;   // 预留：第二噪声层（如高层薄云）
-                    fd[idx + 2] = 0;   // 预留：第三噪声层（如地形雾）
-                    fd[idx + 3] = 255; // 预留：透明度/遮罩
+                    fd[idx + 0] = val;  // R: 低层云
+                    fd[idx + 1] = val2; // G: 高层薄云
+                    fd[idx + 2] = 0;
+                    fd[idx + 3] = 255;
                 }
             }
             Wgpu.wgpuQueueWriteTexture(
@@ -137,26 +185,8 @@ pub const SkyPipeline = struct {
                 &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = face_size * 4, .rowsPerImage = face_size },
                 &Wgpu.WGPUExtent3D{ .width = face_size, .height = face_size, .depthOrArrayLayers = 1 },
             );
-
-            // 导出各面到 zig-out/sky_faces/
-            const test_dir = "tmp/sky_faces";
-            _ = std.fs.cwd().makePath(test_dir) catch {};
-            var out_img = try zigimg.Image.create(std.heap.page_allocator, face_size, face_size, .rgba32);
-            for (0..face_size * face_size) |i| {
-                out_img.pixels.rgba32[i] = .{
-                    .r = fd[i * 4 + 0],
-                    .g = fd[i * 4 + 1],
-                    .b = fd[i * 4 + 2],
-                    .a = 255,
-                };
-            }
-            const fname = try std.fmt.allocPrint(std.heap.page_allocator, "{s}/face_{}.png", .{ test_dir, face });
-            defer std.heap.page_allocator.free(fname);
-            const wbuf = try std.heap.page_allocator.alloc(u8, 0);
-            defer std.heap.page_allocator.free(wbuf);
-            try out_img.writeToFilePath(std.heap.page_allocator, fname, wbuf, .{ .png = .{} });
-            out_img.deinit(std.heap.page_allocator);
         }
+
         const cubemap_texture_view = Wgpu.wgpuTextureCreateView(cubemap_texture, &.{
             .aspect = Wgpu.WGPUTextureAspect_All,
             .dimension = Wgpu.WGPUTextureViewDimension_Cube,
@@ -166,6 +196,7 @@ pub const SkyPipeline = struct {
             .baseArrayLayer = 0,
             .arrayLayerCount = 6,
         });
+
         const cubemap_sampler = Wgpu.wgpuDeviceCreateSampler(gctx.device, &.{
             .addressModeU = Wgpu.WGPUAddressMode_ClampToEdge,
             .addressModeV = Wgpu.WGPUAddressMode_ClampToEdge,
@@ -252,19 +283,18 @@ pub const SkyPipeline = struct {
             .uniform_buffer = uniform_buffer,
             .shader_module = shader_module,
             .state = state,
-            .day_length = 60.0, // 1 分钟
+            .day_length = 60.0,
             .cubemap_texture = cubemap_texture,
             .cubemap_texture_view = cubemap_texture_view,
             .cubemap_sampler = cubemap_sampler,
         };
     }
 
-    // 每帧调用：用角度计算太阳方向，打包 uniform 并上传到 GPU
     pub fn updateUniform(self: *SkyPipeline, gctx: *Gctx, inv_view_proj: Mat4, time: f32) void {
         const angle = (time / self.day_length) * 2.0 * std.math.pi;
         self.state.sun_direction = Vec3.norm(Vec3.new(
             std.math.sin(angle) * 0.8,
-            std.math.cos(angle) * 0.6 + self.state.seasonal_tilt, // tilt 未来可从季节系统获取；0=春秋分,+0.3=夏至,-0.3=冬至
+            std.math.cos(angle) * 0.6 + self.state.seasonal_tilt,
             std.math.cos(angle) * 0.3,
         ));
         const u = SkyUniform.pack(inv_view_proj, self.state, time);
