@@ -1,4 +1,4 @@
-// sky.zig — 全屏三角 + cubemap 噪声云渲染
+// sky.zig — 全屏三角 + 纯 shader Simplex 噪声云渲染（无纹理）
 const std = @import("std");
 const Wgpu = @import("imports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
@@ -6,7 +6,6 @@ const Vec2 = @import("algebra.zig").Vec2;
 const Vec3 = @import("algebra.zig").Vec3;
 const Vec4 = @import("algebra.zig").Vec4;
 const Mat4 = @import("algebra.zig").Mat4;
-const zigimg = @import("zigimg");
 
 pub const SkyUniform = struct {
     inv_view_proj: Mat4,
@@ -128,92 +127,12 @@ pub const SkyPipeline = struct {
     shader_module: Wgpu.WGPUShaderModule,
     state: SkyState,
     day_length: f32 = 60.0,
-    cubemap_texture: Wgpu.WGPUTexture,
-    cubemap_texture_view: Wgpu.WGPUTextureView,
-    cubemap_sampler: Wgpu.WGPUSampler,
 
     pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
         const shader_module = try gctx.createShaderModule("resources/shaders/sky_shader.wgsl");
 
-        // CPU 烘培 3D 噪声 cubemap（6 面，每面 512²）
-        const noise = @import("noise.zig");
-        const face_size: u32 = 512;
-        const freq: f32 = 2.5;
-        const fd = try std.heap.page_allocator.alloc(u8, face_size * face_size * 4);
-        defer std.heap.page_allocator.free(fd);
-
-        const cubemap_texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &.{
-            .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
-            .dimension = Wgpu.WGPUTextureDimension_2D,
-            .size = .{ .width = face_size, .height = face_size, .depthOrArrayLayers = 6 },
-            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
-            .mipLevelCount = 1,
-            .sampleCount = 1,
-        });
-
-        for (0..6) |face| {
-            for (0..face_size) |y| {
-                for (0..face_size) |x| {
-                    const u = (@as(f32, @floatFromInt(x)) + 0.5) / @as(f32, @floatFromInt(face_size)) * 2.0 - 1.0;
-                    const v = (@as(f32, @floatFromInt(y)) + 0.5) / @as(f32, @floatFromInt(face_size)) * 2.0 - 1.0;
-                    const dir = switch (face) {
-                        0 => Vec3.norm(Vec3.new(1, -v, -u)),
-                        1 => Vec3.norm(Vec3.new(-1, -v, u)),
-                        2 => Vec3.norm(Vec3.new(u, 1, v)),
-                        3 => Vec3.norm(Vec3.new(u, -1, -v)),
-                        4 => Vec3.norm(Vec3.new(u, -v, 1)),
-                        5 => Vec3.norm(Vec3.new(-u, -v, -1)),
-                        else => unreachable,
-                    };
-                    const d = Vec3.norm(dir);
-                    const n = noise.fbmSnoise3(Vec3.new(d.x * freq, d.y * freq, d.z * freq), 4);
-                    const val = @as(u8, @intFromFloat(@min(@max(n * 0.5 + 0.5, 0) * 255.0, 255.0)));
-                    const n2 = noise.fbmSnoise3(Vec3.new(d.x * freq * 2.3 + 10.0, d.y * freq * 2.3 + 20.0, d.z * freq * 2.3 + 30.0), 3);
-                    const val2 = @as(u8, @intFromFloat(@min(@max(n2 * 0.5 + 0.5, 0) * 255.0, 255.0)));
-                    const idx = (y * face_size + x) * 4;
-                    fd[idx + 0] = val;  // R: 低层云
-                    fd[idx + 1] = val2; // G: 高层薄云
-                    fd[idx + 2] = 0;
-                    fd[idx + 3] = 255;
-                }
-            }
-            Wgpu.wgpuQueueWriteTexture(
-                gctx.queue,
-                &Wgpu.WGPUTexelCopyTextureInfo{ .texture = cubemap_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = @intCast(face) } },
-                fd.ptr,
-                face_size * face_size * 4,
-                &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = face_size * 4, .rowsPerImage = face_size },
-                &Wgpu.WGPUExtent3D{ .width = face_size, .height = face_size, .depthOrArrayLayers = 1 },
-            );
-        }
-
-        const cubemap_texture_view = Wgpu.wgpuTextureCreateView(cubemap_texture, &.{
-            .aspect = Wgpu.WGPUTextureAspect_All,
-            .dimension = Wgpu.WGPUTextureViewDimension_Cube,
-            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
-            .baseMipLevel = 0,
-            .mipLevelCount = 1,
-            .baseArrayLayer = 0,
-            .arrayLayerCount = 6,
-        });
-
-        const cubemap_sampler = Wgpu.wgpuDeviceCreateSampler(gctx.device, &.{
-            .addressModeU = Wgpu.WGPUAddressMode_ClampToEdge,
-            .addressModeV = Wgpu.WGPUAddressMode_ClampToEdge,
-            .addressModeW = Wgpu.WGPUAddressMode_ClampToEdge,
-            .magFilter = Wgpu.WGPUFilterMode_Linear,
-            .minFilter = Wgpu.WGPUFilterMode_Linear,
-            .mipmapFilter = Wgpu.WGPUMipmapFilterMode_Linear,
-            .lodMinClamp = 0,
-            .lodMaxClamp = 32,
-            .compare = Wgpu.WGPUCompareFunction_Undefined,
-            .maxAnisotropy = 1,
-        });
-
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
             .{ .binding = 0, .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment, .buffer = .{ .type = Wgpu.WGPUBufferBindingType_Uniform } },
-            .{ .binding = 1, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Float, .viewDimension = Wgpu.WGPUTextureViewDimension_Cube } },
-            .{ .binding = 2, .visibility = Wgpu.WGPUShaderStage_Fragment, .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Filtering } },
         };
         const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(
             gctx.device,
@@ -235,11 +154,9 @@ pub const SkyPipeline = struct {
 
         const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
             .layout = bind_group_layout,
-            .entryCount = 3,
+            .entryCount = 1,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .offset = 0, .size = @sizeOf(SkyUniform) },
-                .{ .binding = 1, .textureView = cubemap_texture_view },
-                .{ .binding = 2, .sampler = cubemap_sampler },
             },
         });
 
@@ -284,9 +201,6 @@ pub const SkyPipeline = struct {
             .shader_module = shader_module,
             .state = state,
             .day_length = 60.0,
-            .cubemap_texture = cubemap_texture,
-            .cubemap_texture_view = cubemap_texture_view,
-            .cubemap_sampler = cubemap_sampler,
         };
     }
 
@@ -307,8 +221,5 @@ pub const SkyPipeline = struct {
         Wgpu.wgpuBindGroupRelease(self.bind_group);
         Wgpu.wgpuBufferRelease(self.uniform_buffer);
         Wgpu.wgpuShaderModuleRelease(self.shader_module);
-        Wgpu.wgpuTextureRelease(self.cubemap_texture);
-        Wgpu.wgpuTextureViewRelease(self.cubemap_texture_view);
-        Wgpu.wgpuSamplerRelease(self.cubemap_sampler);
     }
 };

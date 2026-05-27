@@ -5,7 +5,7 @@ const Vec3 = @import("algebra.zig").Vec3;
 // https://github.com/ashima/webgl-noise
 
 // 排列表（运行时由 init(seed) 生成）
-var perm: [256]u8 = undefined;
+pub var perm: [256]u8 = undefined;
 var permMod12: [256]u8 = undefined;
 
 // 初始化 根据种子生成排列表（Fisher-Yates洗牌）
