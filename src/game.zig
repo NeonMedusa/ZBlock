@@ -23,6 +23,9 @@ flying: bool = false,
 last_space_press: f64 = 0.0,
 accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
 frame_timer: std.time.Instant, // 帧计时器，独立于 GLFW
+fps_buffer: [120]f32 = undefined, // 2 秒 FPS 窗口
+fps_idx: u32 = 0,
+fps_avg: f32 = 0,
 tick_count: u64 = 0, // 逻辑 tick 计数，1 tick = 1/30s
 sprint_toggled: bool = false, // 冲刺开关，渲染层触发，tick 层读取
 keybinds: Keybinds,
@@ -77,6 +80,15 @@ pub fn start(self: *Game) !void {
             const dt_ns = now.since(self.frame_timer);
             self.frame_timer = now;
             const dt = @as(f32, @floatFromInt(dt_ns)) / 1_000_000_000.0;
+            self.fps_buffer[self.fps_idx] = dt;
+            self.fps_idx = (self.fps_idx + 1) % 120;
+            {
+                var sum: f32 = 0;
+                for (&self.fps_buffer) |t| {
+                    sum += t;
+                }
+                self.fps_avg = @as(f32, @floatFromInt(120)) / sum;
+            }
             self.accumulator += dt;
             if (self.accumulator > TICK_DT * 5) self.accumulator = TICK_DT * 5;
 
@@ -149,6 +161,20 @@ pub fn start(self: *Game) !void {
                     try handleLeftClick(self);
                 if (self.keybinds.isJustPressed(&self.input, .place_block))
                     try tryPlaceBlock(self);
+
+                // - 跳到下一天早上，= 跳到下一天晚上（测试天空用）
+                if (self.input.isKeyJustPressed(.minus)) {
+                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
+                    const current_day = self.tick_count / day_ticks;
+                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.25 / TICK_DT));
+                    self.accumulator = 0;
+                }
+                if (self.input.isKeyJustPressed(.equal)) {
+                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
+                    const current_day = self.tick_count / day_ticks;
+                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.85 / TICK_DT));
+                    self.accumulator = 0;
+                }
             }
         }
 
@@ -169,6 +195,14 @@ pub fn start(self: *Game) !void {
             if (self.icon_atlas.getOrLoad(sel.item.item_id)) |slot_i| {
                 self.icon_atlas.addQuad(IconAtlas.slotUV(slot_i), pos.x - 16, pos.y - 16, 32);
             }
+        }
+        // 显示 FPS（右上角）
+        if (self.save_initialized) {
+            var fps_buf: [32]u8 = undefined;
+            const fps_str = std.fmt.bufPrint(&fps_buf, "FPS: {d:.1}", .{self.fps_avg}) catch "FPS: ?";
+            const screen_w = @as(f32, @floatFromInt(self.gctx.surface_config.width));
+            const text_w = self.ui_system.measureText(&self.gctx, fps_str, 24);
+            self.ui_system.drawText(&self.gctx, screen_w - text_w - 8, 8, fps_str, 24, .{ 1, 1, 1, 1 });
         }
         try self.ui_system.endFrame(&self.gctx);
         if (self.save_initialized) {
@@ -270,6 +304,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const input = Input.init(self);
     self.input = input;
     self.frame_timer = try std.time.Instant.now();
+    self.fps_idx = 0;
 
     // 初始化wgpu
     const gctx = try Gctx.init(self.window);
