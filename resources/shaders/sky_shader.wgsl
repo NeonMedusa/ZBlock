@@ -87,7 +87,7 @@ fn renderClouds(dir: vec3f, sun_halo: f32, time: f32) -> CloudResult {
     let offset_dist = sky.cloud_params2.w * 0.2;
     let sun_dir = normalize(sky.sun_direction.xyz);
 
-    // Y 轴压缩：1.0=正常球面, >1=Y 放大后归一化→方向向两极靠拢→云向水平汇聚
+    // Y 轴压缩
     let flat_dir = normalize(vec3f(dir.x, dir.y * squish, dir.z));
 
     // 风动：绕 Y 轴旋转
@@ -108,7 +108,7 @@ fn renderClouds(dir: vec3f, sun_halo: f32, time: f32) -> CloudResult {
     let dir_front = normalize(flat_dir + sun_dir * offset_dist);
     let dir_back = normalize(flat_dir - sun_dir * offset_dist);
 
-    // cubemap 采样（方向直采，无需 UV 计算）
+    // cubemap 采样
     let c1 = textureSample(cube_tex, cube_sampler, dir1).r;
     let c2 = textureSample(cube_tex, cube_sampler, dir2).r;
     let center_density = saturate(c1 * c2 * cloudy_rate * 2.5);
@@ -127,16 +127,16 @@ fn renderClouds(dir: vec3f, sun_halo: f32, time: f32) -> CloudResult {
     let halo_factor = sun_halo * (1.5 - cloudy_adj) + 0.6;
     let cloud_density = saturate(edge + edge_glow * halo_factor);
 
-    // 三色调云颜色
-    let cmt = sky.cloud_color_mtime;
-    var cloud_color: vec3f;
-    if (cloud_density >= cmt) {
-        let t = (cloud_density - cmt) / (1.0 - cmt);
-        cloud_color = mix(sky.cloud_color1.rgb, sky.cloud_color2.rgb, t);
-    } else {
-        let t = cloud_density / cmt;
-        cloud_color = mix(sky.cloud_color0.rgb, sky.cloud_color1.rgb, t);
-    }
+    // 三层偏移采样：阴影向背日侧、高光向日侧、常色在中间
+    let off = offset_dist;
+    let shadow_noise = textureSample(cube_tex, cube_sampler, normalize(flat_dir - sun_dir * off)).r;
+    let mid_noise    = textureSample(cube_tex, cube_sampler, normalize(flat_dir + sun_dir * off * 0.3)).r;
+    let highlight_noise = textureSample(cube_tex, cube_sampler, normalize(flat_dir + sun_dir * off * 1.5)).r;
+
+    // 用三层偏移噪声取代单一的 cloud_density 做三色调混合
+    var cloud_color = mix(sky.cloud_color0.rgb, sky.cloud_color1.rgb, mid_noise);
+    cloud_color = mix(cloud_color, sky.cloud_color2.rgb, smoothstep(0.0, 0.5, highlight_noise));
+    cloud_color = mix(cloud_color, sky.cloud_color0.rgb * 0.5, smoothstep(0.5, 0.0, shadow_noise));
 
     let bright_add = cloud_density * sun_halo * sky.cloud_color2.rgb * sky.back_lit_strength;
     return CloudResult(cloud_color, bright_add, cloud_density);

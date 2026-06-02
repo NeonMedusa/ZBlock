@@ -168,12 +168,19 @@ cloud_density = saturate(edge + edge_glow × halo_factor)
 
 #### 三色调颜色插值
 
+旧版基于单一 density 做阈值判断。新版改用三层偏移采样，将方向光照编码进颜色选择：
+
 ```
-if (density ≥ threshold)  color = mix(color1, color2, t)
-else                      color = mix(color0, color1, t)
+shadow_noise   = cubemap[normalize(dir - sun_dir × offset)]        // 背日侧
+mid_noise      = cubemap[normalize(dir + sun_dir × offset × 0.3)]  // 中间
+highlight_noise = cubemap[normalize(dir + sun_dir × offset × 1.5)] // 向日侧
+
+color = mix(color0, color1, mid_noise)
+color = mix(color,   color2, smoothstep(0, 0.5, highlight_noise))
+color = mix(color,   color0 × 0.5, smoothstep(0.5, 0, shadow_noise))
 ```
 
-密度低→阴影色，密度中→中间色，密度高→高光色。阈值 `cloud_color_mtime` 控制过渡位置。
+阴影、常色、高光三圈随太阳位置自然偏移，不再同心。阴影效果通过混入 `color0 × 0.5` 实现（而非降低原色亮度），避免产生灰黑色斑块。
 
 ### 风动
 
@@ -235,7 +242,7 @@ flat_dir = normalize(dir.x, dir.y × squish, dir.z)
 | `back_lit_strength` | 5.0 | 背光强度 |
 | `edge_lit_power` | 1.0 | 边缘辉光幂次 |
 | `edge_lit_strength` | 1.0 | 边缘辉光强度 |
-| `cloud_color_mtime` | 0.5 | 三色调插值阈值 |
+| `cloud_color_mtime` | 0.5 | 三色调插值阈值（旧版，当前由偏移采样替代）|
 
 ### 性能
 
