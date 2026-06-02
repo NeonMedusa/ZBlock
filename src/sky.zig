@@ -13,8 +13,9 @@ pub const SkyUniform = struct {
     sun_direction: Vec4,
     sun_color: Vec4,
     horizon_color: Vec4,
+    mid_color: Vec4,
     zenith_color: Vec4,
-    cloud_params1: Vec4, // x=云量, y=Y轴压缩, z=未用, w=风速
+    cloud_params1: Vec4, // x=云量, y=Y轴压缩, z=天空中间色高度, w=风速
     cloud_params2: Vec4, // x=风向_X, y=风向_Z, z=云图缩放(越大云纹越细), w=光照偏移距
     cloud_color0: Vec4,
     cloud_color1: Vec4,
@@ -38,6 +39,7 @@ pub const SkyUniform = struct {
             .sun_direction = Vec4{ .x = state.sun_direction.x, .y = state.sun_direction.y, .z = state.sun_direction.z, .w = 0 },
             .sun_color = Vec4{ .x = state.sun_color.x, .y = state.sun_color.y, .z = state.sun_color.z, .w = 0 },
             .horizon_color = Vec4{ .x = state.horizon_color.x, .y = state.horizon_color.y, .z = state.horizon_color.z, .w = 0 },
+            .mid_color = Vec4{ .x = state.mid_color.x, .y = state.mid_color.y, .z = state.mid_color.z, .w = 0 },
             .zenith_color = Vec4{ .x = state.zenith_color.x, .y = state.zenith_color.y, .z = state.zenith_color.z, .w = 0 },
             .cloud_params1 = Vec4{ .x = state.cloud_coverage, .y = state.cloud_squish, .z = state.cloud_altitude, .w = state.cloud_speed },
             .cloud_params2 = Vec4{ .x = state.wind_dir.x, .y = state.wind_dir.y, .z = state.cloud_size, .w = state.offset_distance },
@@ -67,7 +69,9 @@ pub const SkyState = struct {
     moon_phase: f32,
     moon_brightness: f32,
     horizon_color: Vec3,
+    mid_color: Vec3,
     zenith_color: Vec3,
+    ambient_ground: Vec3,
     star_density: f32,
     star_twinkle_speed: f32,
     star_color_strength: f32,
@@ -96,13 +100,15 @@ pub const SkyState = struct {
             .sun_intensity = 0.6 + r.float(f32) * 0.6,
             .moon_phase = r.float(f32),
             .moon_brightness = 0.3 + r.float(f32) * 0.6,
-            .horizon_color = Vec3.new(0.18, 0.28, 0.7),
-            .zenith_color = Vec3.new(0.08, 0.18, 0.7),
+            .horizon_color = Vec3.new(0.6, 0.7, 1.0),
+            .mid_color = Vec3.new(0.3, 0.5, 0.9),
+            .zenith_color = Vec3.new(0.05, 0.1, 0.5),
+            .ambient_ground = Vec3.new(1.0, 1.0, 1.0),
             .star_density = 0.03 + r.float(f32) * 0.07,
             .star_twinkle_speed = 1.0 + r.float(f32) * 1.0,
             .star_color_strength = r.float(f32) * r.float(f32) * 0.6,
             .seasonal_tilt = 0,
-            .cloud_coverage = 1.1,
+            .cloud_coverage = 1.2,
             .cloud_squish = 1.5,
             .cloud_altitude = 0.5,
             .cloud_speed = 2.0,
@@ -119,6 +125,109 @@ pub const SkyState = struct {
         };
     }
 };
+
+const SkyColorKeyframe = struct {
+    t: f32,
+    horizon: Vec3,
+    mid: Vec3,
+    zenith: Vec3,
+    ambient: Vec3,
+    sun_color: Vec3,
+    cloud0: Vec3,
+    cloud1: Vec3,
+    cloud2: Vec3,
+};
+
+const sky_color_keyframes = [_]SkyColorKeyframe{
+    .{ // t=0.00 正午
+        .t = 0.00,
+        .horizon = Vec3.new(0.6, 0.7, 1.0),
+        .mid = Vec3.new(0.3, 0.5, 0.9),
+        .zenith = Vec3.new(0.3, 0.5, 0.9),
+        .ambient = Vec3.new(1.0, 1.0, 1.0),
+        .sun_color = Vec3.new(1.0, 0.95, 0.9),
+        .cloud0 = Vec3.new(0.2, 0.2, 0.2),
+        .cloud1 = Vec3.new(0.65, 0.65, 0.65),
+        .cloud2 = Vec3.new(1.0, 1.0, 1.0),
+    },
+    .{ // t=0.25 日落
+        .t = 0.25,
+        .horizon = Vec3.new(1.0, 0.5, 0.2),
+        .mid = Vec3.new(0.8, 0.4, 0.3),
+        .zenith = Vec3.new(0.8, 0.4, 0.3),
+        .ambient = Vec3.new(1.0, 0.5, 0.2),
+        .sun_color = Vec3.new(1.0, 0.5, 0.2),
+        .cloud0 = Vec3.new(0.3, 0.15, 0.1),
+        .cloud1 = Vec3.new(0.6, 0.35, 0.2),
+        .cloud2 = Vec3.new(1.0, 0.7, 0.4),
+    },
+    .{ // t=0.35 黄昏
+        .t = 0.35,
+        .horizon = Vec3.new(0.3, 0.2, 0.5),
+        .mid = Vec3.new(0.15, 0.1, 0.4),
+        .zenith = Vec3.new(0.15, 0.1, 0.4),
+        .ambient = Vec3.new(0.2, 0.15, 0.4),
+        .sun_color = Vec3.new(0.2, 0.1, 0.3),
+        .cloud0 = Vec3.new(0.05, 0.03, 0.08),
+        .cloud1 = Vec3.new(0.1, 0.05, 0.15),
+        .cloud2 = Vec3.new(0.3, 0.15, 0.4),
+    },
+    .{ // t=0.50 午夜
+        .t = 0.50,
+        .horizon = Vec3.new(0.02, 0.0, 0.05),
+        .mid = Vec3.new(0.01, 0.0, 0.03),
+        .zenith = Vec3.new(0.0, 0.0, 0.0),
+        .ambient = Vec3.new(0.01, 0.0, 0.03),
+        .sun_color = Vec3.new(0.0, 0.0, 0.0),
+        .cloud0 = Vec3.new(0.0, 0.0, 0.0),
+        .cloud1 = Vec3.new(0.01, 0.0, 0.02),
+        .cloud2 = Vec3.new(0.02, 0.0, 0.03),
+    },
+    .{ // t=0.75 日出
+        .t = 0.75,
+        .horizon = Vec3.new(1.0, 0.6, 0.2),
+        .mid = Vec3.new(0.7, 0.5, 0.3),
+        .zenith = Vec3.new(0.7, 0.5, 0.3),
+        .ambient = Vec3.new(1.0, 0.6, 0.2),
+        .sun_color = Vec3.new(1.0, 0.55, 0.25),
+        .cloud0 = Vec3.new(0.35, 0.2, 0.12),
+        .cloud1 = Vec3.new(0.65, 0.4, 0.22),
+        .cloud2 = Vec3.new(1.0, 0.75, 0.45),
+    },
+    .{ // t=1.00=0.00（回到正午，用于循环插值）
+        .t = 1.00,
+        .horizon = Vec3.new(0.6, 0.7, 1.0),
+        .mid = Vec3.new(0.3, 0.5, 0.9),
+        .zenith = Vec3.new(0.3, 0.5, 0.9),
+        .ambient = Vec3.new(1.0, 1.0, 1.0),
+        .sun_color = Vec3.new(1.0, 0.95, 0.9),
+        .cloud0 = Vec3.new(0.2, 0.2, 0.2),
+        .cloud1 = Vec3.new(0.65, 0.65, 0.65),
+        .cloud2 = Vec3.new(1.0, 1.0, 1.0),
+    },
+};
+
+fn interpolateSkyColors(t: f32) struct { horizon: Vec3, mid: Vec3, zenith: Vec3, ambient: Vec3, sun_color: Vec3, cloud0: Vec3, cloud1: Vec3, cloud2: Vec3 } {
+    const clamped_t = t - @floor(t);
+    var i: usize = 0;
+    while (i < sky_color_keyframes.len - 1 and clamped_t > sky_color_keyframes[i + 1].t) {
+        i += 1;
+    }
+    const a = sky_color_keyframes[i];
+    const b = sky_color_keyframes[i + 1];
+    const local_t = (clamped_t - a.t) / (b.t - a.t);
+    const lerp = Vec3.lerp;
+    return .{
+        .horizon = lerp(a.horizon, b.horizon, local_t),
+        .mid = lerp(a.mid, b.mid, local_t),
+        .zenith = lerp(a.zenith, b.zenith, local_t),
+        .ambient = lerp(a.ambient, b.ambient, local_t),
+        .sun_color = lerp(a.sun_color, b.sun_color, local_t),
+        .cloud0 = lerp(a.cloud0, b.cloud0, local_t),
+        .cloud1 = lerp(a.cloud1, b.cloud1, local_t),
+        .cloud2 = lerp(a.cloud2, b.cloud2, local_t),
+    };
+}
 
 pub const SkyPipeline = struct {
     handle: Wgpu.WGPURenderPipeline,
@@ -297,6 +406,18 @@ pub const SkyPipeline = struct {
             std.math.cos(angle) * 0.6 + self.state.seasonal_tilt,
             std.math.cos(angle) * 0.3,
         ));
+
+        // 天空颜色关键帧插值
+        const colors = interpolateSkyColors(time / self.day_length);
+        self.state.horizon_color = colors.horizon;
+        self.state.mid_color = colors.mid;
+        self.state.zenith_color = colors.zenith;
+        self.state.ambient_ground = colors.ambient;
+        self.state.sun_color = colors.sun_color;
+        self.state.cloud_color0 = colors.cloud0;
+        self.state.cloud_color1 = colors.cloud1;
+        self.state.cloud_color2 = colors.cloud2;
+
         const u = SkyUniform.pack(inv_view_proj, self.state, time);
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.uniform_buffer, 0, &u, @sizeOf(SkyUniform));
     }

@@ -6,8 +6,9 @@ struct SkyUniform {
     sun_direction: vec4f,
     sun_color: vec4f,
     horizon_color: vec4f,
+    mid_color: vec4f,
     zenith_color: vec4f,
-    cloud_params1: vec4f,   // x=云量, y=Y轴压缩, z=未用, w=风速
+    cloud_params1: vec4f,   // x=云量, y=Y轴压缩, z=天空中间色高度, w=风速
     cloud_params2: vec4f,   // x=风向_X, y=风向_Z, z=云图缩放(越大云纹越细), w=光照偏移距
     cloud_color0: vec4f,        // 云阴影色（暗）
     cloud_color1: vec4f,        // 云中间色（中）
@@ -149,11 +150,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let dir = normalize(vec3f(d.x, -d.y, d.z));
 
     let day_factor = smoothstep(-0.15, 0.25, sky.sun_direction.y);
-    let sky_gradient = mix(
-        vec3f(0.02, 0.02, 0.08),
-        mix(sky.horizon_color, sky.zenith_color, max(dir.y, 0.0)).rgb,
-        day_factor,
-    );
+
+    // 三色天空渐变（地平线→中间→天顶）
+    let h = max(dir.y, 0.0);
+    let mid_h = sky.cloud_params1.z;
+    let lower = mix(sky.horizon_color.rgb, sky.mid_color.rgb, smoothstep(0.0, 1.0, h / mid_h));
+    let upper = mix(sky.mid_color.rgb, sky.zenith_color.rgb, smoothstep(0.0, 1.0, (h - mid_h) / (1.0 - mid_h)));
+    let blend_near = smoothstep(max(mid_h - 0.1, 0.0), min(mid_h + 0.1, 1.0), h);
+    let day_sky = mix(lower, upper, blend_near);
+    let sky_gradient = mix(vec3f(0.02, 0.02, 0.08), day_sky, day_factor);
 
     // 太阳光晕（用于云层照明）
     let sun_dot = max(dot(dir, normalize(sky.sun_direction.xyz)), 0.0);

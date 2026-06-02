@@ -14,6 +14,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     game.ubo.sun_intensity = game.sky_pipeline.state.sun_intensity;
     game.ubo.sun_color = game.sky_pipeline.state.sun_color;
     game.ubo.moon_brightness = game.sky_pipeline.state.moon_brightness;
+    game.ubo.ambient_ground = game.sky_pipeline.state.ambient_ground;
     game.ubo.time = sky_time;
 
     Wgpu.wgpuQueueWriteBuffer(
