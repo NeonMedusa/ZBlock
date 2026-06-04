@@ -165,14 +165,6 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let sun_halo_raw = pow(sun_dot, 16.0);
     let sun_halo = saturate(sun_halo_raw);
 
-    // 云渲染
-    let cloud_result = renderClouds(dir, sun_halo, sky.time);
-    let cloud_amount = saturate(cloud_result.density);
-    let cloud_layer = mix(sky_gradient.rgb, cloud_result.color, cloud_amount) + cloud_result.bright;
-
-    // 夜间变暗
-    let cloud = cloud_layer * mix(0.3, 1.0, day_factor);
-
     // 太阳
     let sun_glow = pow(sun_dot, 512.0) * sky.sun_intensity * 2.0;
     let sun_disk = pow(sun_dot, 4096.0) * sky.sun_intensity * 4.0;
@@ -187,6 +179,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // 星星
     let star = stars(dir) * (1.0 - day_factor) * 2.0 * (1.0 - moon_disk);
 
-    let final_color = cloud + sun + moon + star;
+    // 云渲染（云层覆盖在带日月星的天空之上）
+    let cloud_result = renderClouds(dir, sun_halo, sky.time);
+    let cloud_amount = saturate(cloud_result.density);
+    let sky_with_sun = sky_gradient.rgb + sun + moon + star;
+    let cloud_layer = mix(sky_with_sun, cloud_result.color, cloud_amount) + cloud_result.bright;
+
+    // 夜间变暗
+    let final_color = cloud_layer * mix(0.3, 1.0, day_factor);
     return vec4f(final_color, 1.0);
 }
