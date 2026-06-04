@@ -29,6 +29,8 @@ struct SkyUniform {
 @group(0) @binding(0) var<uniform> sky: SkyUniform;
 @group(0) @binding(1) var cube_tex: texture_cube<f32>;
 @group(0) @binding(2) var cube_sampler: sampler;
+@group(0) @binding(3) var moon_tex: texture_2d<f32>;
+@group(0) @binding(4) var moon_sampler: sampler;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -170,11 +172,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let sun_disk = pow(sun_dot, 4096.0) * sky.sun_intensity * 4.0;
     let sun = (sun_glow + sun_disk) * sky.sun_color.rgb;
 
-    // 月亮
+    // 月亮（纹理：随视方向变化的逐像素 UV）
     let moon_dir = normalize(-sky.sun_direction.xyz);
     let moon_dot = max(dot(dir, moon_dir), 0.0);
-    let moon_disk = step(0.998, moon_dot);
-    let moon = moon_disk * sky.moon_brightness * 3.0 * vec3f(0.9, 0.92, 1.0);
+    let moon_disk = smoothstep(0.75, 0.92, moon_dot);
+    let moon_right = normalize(cross(moon_dir, vec3f(0, 1, 0)));
+    let moon_up = cross(moon_dir, moon_right);
+    let moon_proj = dir - moon_dir * moon_dot;
+    let moon_uv = vec2f(
+        dot(moon_proj, moon_right) * 7.0 + 0.5,
+        dot(moon_proj, moon_up) * 7.0 + 0.5,
+    );
+    let moon_tex_color = textureSample(moon_tex, moon_sampler, moon_uv);
+    // 月亮用 alpha 混合覆盖天空（暗面挡住夜空，亮面显示纹理）
+    let moon_alpha = moon_disk * moon_tex_color.a;
+    let moon_color = sky.moon_brightness * 3.0 * moon_tex_color.rgb;
+    let sky_moon = mix(sky_gradient.rgb, moon_color, moon_alpha);
 
     // 星星
     let star = stars(dir) * (1.0 - day_factor) * 2.0 * (1.0 - moon_disk);
@@ -182,7 +195,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // 云渲染（云层覆盖在带日月星的天空之上）
     let cloud_result = renderClouds(dir, sun_halo, sky.time);
     let cloud_amount = saturate(cloud_result.density);
-    let sky_with_sun = sky_gradient.rgb + sun + moon + star;
+    let sky_with_sun = sky_moon + sun + star;
     let cloud_layer = mix(sky_with_sun, cloud_result.color, cloud_amount) + cloud_result.bright;
 
     // 夜间变暗

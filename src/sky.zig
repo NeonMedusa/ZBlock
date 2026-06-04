@@ -251,6 +251,9 @@ pub const SkyPipeline = struct {
     cubemap_texture: Wgpu.WGPUTexture,
     cubemap_texture_view: Wgpu.WGPUTextureView,
     cubemap_sampler: Wgpu.WGPUSampler,
+    moon_texture: Wgpu.WGPUTexture,
+    moon_texture_view: Wgpu.WGPUTextureView,
+    moon_sampler: Wgpu.WGPUSampler,
 
     pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
         const shader_module = try gctx.createShaderModule("resources/shaders/sky_shader.wgsl");
@@ -330,10 +333,62 @@ pub const SkyPipeline = struct {
             .maxAnisotropy = 1,
         });
 
+        // 加载月亮 2D 纹理
+        var moon_read_buf: [8192]u8 = undefined;
+        var moon_img = try zigimg.Image.fromFilePath(std.heap.page_allocator, "resources/textures/sky/moon.png", &moon_read_buf);
+        defer moon_img.deinit(std.heap.page_allocator);
+        if (moon_img.pixels != .rgba32) try moon_img.convert(std.heap.page_allocator, .rgba32);
+        const moon_w: u32 = @intCast(moon_img.width);
+        const moon_h: u32 = @intCast(moon_img.height);
+        const moon_pixels = moon_img.pixels.rgba32;
+        const moon_bytes = try std.heap.page_allocator.alloc(u8, moon_w * moon_h * 4);
+        defer std.heap.page_allocator.free(moon_bytes);
+        @memcpy(moon_bytes[0 .. moon_w * moon_h * 4], @as([*]const u8, @ptrCast(moon_pixels.ptr))[0 .. moon_w * moon_h * 4]);
+
+        const moon_texture = Wgpu.wgpuDeviceCreateTexture(gctx.device, &.{
+            .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
+            .dimension = Wgpu.WGPUTextureDimension_2D,
+            .size = .{ .width = moon_w, .height = moon_h, .depthOrArrayLayers = 1 },
+            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        });
+        Wgpu.wgpuQueueWriteTexture(
+            gctx.queue,
+            &Wgpu.WGPUTexelCopyTextureInfo{ .texture = moon_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = 0 } },
+            moon_bytes.ptr,
+            moon_bytes.len,
+            &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = moon_w * 4, .rowsPerImage = moon_h },
+            &Wgpu.WGPUExtent3D{ .width = moon_w, .height = moon_h, .depthOrArrayLayers = 1 },
+        );
+        const moon_texture_view = Wgpu.wgpuTextureCreateView(moon_texture, &.{
+            .aspect = Wgpu.WGPUTextureAspect_All,
+            .dimension = Wgpu.WGPUTextureViewDimension_2D,
+            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
+            .baseMipLevel = 0,
+            .mipLevelCount = 1,
+            .baseArrayLayer = 0,
+            .arrayLayerCount = 1,
+        });
+        const moon_sampler = Wgpu.wgpuDeviceCreateSampler(gctx.device, &.{
+            .addressModeU = Wgpu.WGPUAddressMode_ClampToEdge,
+            .addressModeV = Wgpu.WGPUAddressMode_ClampToEdge,
+            .addressModeW = Wgpu.WGPUAddressMode_ClampToEdge,
+            .magFilter = Wgpu.WGPUFilterMode_Nearest,
+            .minFilter = Wgpu.WGPUFilterMode_Nearest,
+            .mipmapFilter = Wgpu.WGPUMipmapFilterMode_Linear,
+            .lodMinClamp = 0,
+            .lodMaxClamp = 32,
+            .compare = Wgpu.WGPUCompareFunction_Undefined,
+            .maxAnisotropy = 1,
+        });
+
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
             .{ .binding = 0, .visibility = Wgpu.WGPUShaderStage_Vertex | Wgpu.WGPUShaderStage_Fragment, .buffer = .{ .type = Wgpu.WGPUBufferBindingType_Uniform } },
             .{ .binding = 1, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Float, .viewDimension = Wgpu.WGPUTextureViewDimension_Cube } },
             .{ .binding = 2, .visibility = Wgpu.WGPUShaderStage_Fragment, .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Filtering } },
+            .{ .binding = 3, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Float, .viewDimension = Wgpu.WGPUTextureViewDimension_2D } },
+            .{ .binding = 4, .visibility = Wgpu.WGPUShaderStage_Fragment, .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Filtering } },
         };
         const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(
             gctx.device,
@@ -355,11 +410,13 @@ pub const SkyPipeline = struct {
 
         const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
             .layout = bind_group_layout,
-            .entryCount = 3,
+            .entryCount = 5,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .offset = 0, .size = @sizeOf(SkyUniform) },
                 .{ .binding = 1, .textureView = cubemap_texture_view },
                 .{ .binding = 2, .sampler = cubemap_sampler },
+                .{ .binding = 3, .textureView = moon_texture_view },
+                .{ .binding = 4, .sampler = moon_sampler },
             },
         });
 
@@ -407,6 +464,9 @@ pub const SkyPipeline = struct {
             .cubemap_texture = cubemap_texture,
             .cubemap_texture_view = cubemap_texture_view,
             .cubemap_sampler = cubemap_sampler,
+            .moon_texture = moon_texture,
+            .moon_texture_view = moon_texture_view,
+            .moon_sampler = moon_sampler,
         };
     }
 
@@ -442,5 +502,8 @@ pub const SkyPipeline = struct {
         Wgpu.wgpuTextureRelease(self.cubemap_texture);
         Wgpu.wgpuTextureViewRelease(self.cubemap_texture_view);
         Wgpu.wgpuSamplerRelease(self.cubemap_sampler);
+        Wgpu.wgpuTextureRelease(self.moon_texture);
+        Wgpu.wgpuTextureViewRelease(self.moon_texture_view);
+        Wgpu.wgpuSamplerRelease(self.moon_sampler);
     }
 };
