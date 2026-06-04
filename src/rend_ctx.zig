@@ -854,7 +854,7 @@ pub const SceneUniform = struct {
             0.1,
             500,
         );
-        const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, -3.0), Vec3.zero, Vec3.up);
+        const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, 0.0), Vec3.unit_z, Vec3.up);
         return .{
             .proj_matrix = proj_matrix,
             .view_matrix = view_matrix,

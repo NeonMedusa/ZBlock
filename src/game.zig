@@ -250,6 +250,13 @@ fn initGame(self: *Game) !void {
     self.registry.add(player_entity, Comps.Health{ .current = 100, .max = 100 });
     self.registry.add(player_entity, Comps.SpawnPos{ .pos = Vec3.new(8, 130, 8) });
 
+    // { // 调试：生成一个静态模型验证光照方向
+    //     const debug_entity = self.registry.create();
+    //     self.registry.add(debug_entity, Comps.ModelName{ .id = RendCTX.ModelId.fromName("CesiumMan") });
+    //     self.registry.add(debug_entity, Comps.Position{ .vec = Vec3.new(0, 200, 0), .prev = Vec3.new(0, 200, 0) });
+    //     self.registry.add(debug_entity, Comps.Collider{ .width = 1.0, .height = 1.0 });
+    // }
+
     // 加载初始区块
     {
         var chunk_io = chunkIO(&self.save_manager);

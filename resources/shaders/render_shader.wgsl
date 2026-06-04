@@ -103,7 +103,8 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
     let n = normalize(normal);
 
     // 太阳光
-    let sun_dir = normalize(scene_uniform.sun_direction);
+    // 场景坐标系的 X/Z 与天空盒相反，绕 Y 轴旋转 180° 补偿
+    let sun_dir = normalize(vec3f(-scene_uniform.sun_direction.x, scene_uniform.sun_direction.y, -scene_uniform.sun_direction.z));
     let sun_col = scene_uniform.sun_color * scene_uniform.sun_intensity;
 
     // 月光（方向相反、偏蓝、更弱）
