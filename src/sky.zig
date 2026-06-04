@@ -161,8 +161,8 @@ const sky_color_keyframes = [_]SkyColorKeyframe{
         .cloud1 = Vec3.new(0.6, 0.35, 0.2),
         .cloud2 = Vec3.new(1.0, 0.7, 0.4),
     },
-    .{ // t=0.35 黄昏
-        .t = 0.35,
+    .{ // t=0.30 黄昏
+        .t = 0.30,
         .horizon = Vec3.new(0.3, 0.2, 0.5),
         .mid = Vec3.new(0.15, 0.1, 0.4),
         .zenith = Vec3.new(0.15, 0.1, 0.4),
@@ -170,7 +170,7 @@ const sky_color_keyframes = [_]SkyColorKeyframe{
         .sun_color = Vec3.new(0.2, 0.1, 0.3),
         .cloud0 = Vec3.new(0.05, 0.03, 0.08),
         .cloud1 = Vec3.new(0.1, 0.05, 0.15),
-        .cloud2 = Vec3.new(0.3, 0.15, 0.4),
+        .cloud2 = Vec3.new(0.3, 0.2, 0.5),
     },
     .{ // t=0.50 午夜
         .t = 0.50,
@@ -179,9 +179,20 @@ const sky_color_keyframes = [_]SkyColorKeyframe{
         .zenith = Vec3.new(0.0, 0.0, 0.0),
         .ambient = Vec3.new(0.01, 0.0, 0.03),
         .sun_color = Vec3.new(0.0, 0.0, 0.0),
-        .cloud0 = Vec3.new(0.0, 0.0, 0.0),
-        .cloud1 = Vec3.new(0.01, 0.0, 0.02),
-        .cloud2 = Vec3.new(0.02, 0.0, 0.03),
+        .cloud0 = Vec3.new(0.02, 0.01, 0.08),
+        .cloud1 = Vec3.new(0.05, 0.03, 0.12),
+        .cloud2 = Vec3.new(0.12, 0.15, 0.30),
+    },
+    .{ // t=0.65 曙光前
+        .t = 0.65,
+        .horizon = Vec3.new(0.03, 0.02, 0.06),
+        .mid = Vec3.new(0.02, 0.02, 0.05),
+        .zenith = Vec3.new(0.01, 0.01, 0.03),
+        .ambient = Vec3.new(0.03, 0.02, 0.06),
+        .sun_color = Vec3.new(0.1, 0.08, 0.15),
+        .cloud0 = Vec3.new(0.02, 0.02, 0.06),
+        .cloud1 = Vec3.new(0.06, 0.05, 0.10),
+        .cloud2 = Vec3.new(0.12, 0.15, 0.25),
     },
     .{ // t=0.75 日出
         .t = 0.75,
