@@ -33,6 +33,50 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         view_rot.m[3][2] = 0;
         const sky_mat = Mat4.inverse(Mat4.mul(game.ubo.proj_matrix, view_rot));
         game.sky_pipeline.updateUniform(&game.gctx, sky_mat, sky_time);
+
+        // 阴影光源方向：太阳在水平线上方用太阳，否则用月亮
+        const player_shadow_pos = Vec3.new(game.camera.position.x, 0.0, game.camera.position.z);
+        const ldir = if (game.sky_pipeline.state.sun_direction.y > 0.0)
+            Vec3.new(-game.sky_pipeline.state.sun_direction.x, game.sky_pipeline.state.sun_direction.y, -game.sky_pipeline.state.sun_direction.z)
+        else
+            Vec3.new(game.sky_pipeline.state.sun_direction.x, -game.sky_pipeline.state.sun_direction.y, game.sky_pipeline.state.sun_direction.z);
+        game.shadow_pipeline.computeLightVp(ldir, player_shadow_pos);
+        game.shadow_pipeline.updateUniform(&game.gctx);
+        game.ubo.shadow_vp = game.shadow_pipeline.light_vp; // 同步到场景 uniform，供 fs 采样
+
+        // === 阴影渲染通道 (Pass 1) ===
+        // 从光源视角渲染所有区块到 4096² 深度贴图
+        const shadow_pass_desc = Wgpu.WGPURenderPassDescriptor{
+            .colorAttachmentCount = 0,
+            .colorAttachments = null,
+            .depthStencilAttachment = &Wgpu.WGPURenderPassDepthStencilAttachment{
+                .view = game.shadow_pipeline.depth_texture_view,
+                .depthLoadOp = Wgpu.WGPULoadOp_Clear,
+                .depthStoreOp = Wgpu.WGPUStoreOp_Store,
+                .depthClearValue = 1.0,
+                .depthReadOnly = 0,
+                .stencilLoadOp = Wgpu.WGPULoadOp_Undefined,
+                .stencilStoreOp = Wgpu.WGPUStoreOp_Undefined,
+                .stencilClearValue = 0,
+                .stencilReadOnly = 1,
+            },
+        };
+        const shadow_pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &shadow_pass_desc);
+        Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.handle);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(shadow_pass, 0, game.shadow_pipeline.bind_group, 0, null);
+        var s_chunk_it = game.block_world.chunks.iterator();
+        while (s_chunk_it.next()) |entry| {
+            const loaded = &entry.value_ptr.*;
+            var s_mesh_it = loaded.mesh_cache.meshes.iterator();
+            while (s_mesh_it.next()) |mesh_entry| {
+                const mesh = mesh_entry.value_ptr;
+                if (mesh.vertex_count == 0) continue;
+                Wgpu.wgpuRenderPassEncoderSetVertexBuffer(shadow_pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
+                Wgpu.wgpuRenderPassEncoderSetIndexBuffer(shadow_pass, mesh.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(mesh.index_buffer));
+                Wgpu.wgpuRenderPassEncoderDrawIndexed(shadow_pass, mesh.index_count, 1, 0, 0, 0);
+            }
+        }
+        Wgpu.wgpuRenderPassEncoderEnd(shadow_pass);
     }
 
     var chunk_instance_idx: u32 = 0;
@@ -175,6 +219,9 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         Wgpu.wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
 
         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
+        if (game.render_pipeline.shadow_bind_group) |sg| {
+            Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 2, sg, 0, null); // group 2 = 阴影贴图 + 比较采样器
+        }
 
         // 绘制所有模型实体
         for (game.res_manager.draw_batches[0..game.res_manager.draw_batch_count]) |batch| {

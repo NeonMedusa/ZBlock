@@ -5,6 +5,8 @@
 global_bgl: Wgpu.WGPUBindGroupLayout,
 global_bind_group: Wgpu.WGPUBindGroup,
 material_bgl: Wgpu.WGPUBindGroupLayout,
+shadow_bgl: Wgpu.WGPUBindGroupLayout,
+shadow_bind_group: ?Wgpu.WGPUBindGroup,
 pipeline_layout: Wgpu.WGPUPipelineLayout,
 shader_module: Wgpu.WGPUShaderModule,
 pipeline_static: Wgpu.WGPURenderPipeline,
@@ -120,13 +122,26 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
         },
     );
 
+    // 阴影贴图 BGL (group 2)：深度纹理 + 比较采样器
+    const shadow_bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
+        .{ .binding = 0, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Depth, .viewDimension = Wgpu.WGPUTextureViewDimension_2D } },
+        .{ .binding = 1, .visibility = Wgpu.WGPUShaderStage_Fragment, .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Comparison } },
+    };
+    const shadow_bgl = Wgpu.wgpuDeviceCreateBindGroupLayout(
+        game.gctx.device,
+        &Wgpu.WGPUBindGroupLayoutDescriptor{
+            .entryCount = shadow_bgl_entries.len,
+            .entries = &shadow_bgl_entries,
+        },
+    );
+
     // 创建渲染管线
     const pipeline_layout = Wgpu.wgpuDeviceCreatePipelineLayout(
         game.gctx.device,
         &Wgpu.WGPUPipelineLayoutDescriptor{
-            .bindGroupLayoutCount = 2,
+            .bindGroupLayoutCount = 3,
             .bindGroupLayouts = &[_]Wgpu.WGPUBindGroupLayout{
-                global_bgl, material_bgl,
+                global_bgl, material_bgl, shadow_bgl,
             },
         },
     );
@@ -148,7 +163,13 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
         .shader_module = shader_module,
         .pipeline_static = pipe_static,
         .pipeline_skinned = pipe_skinned,
+        .shadow_bgl = shadow_bgl,
+        .shadow_bind_group = null,
     };
+}
+
+pub fn setShadowBindGroup(self: *@This(), shadow_bind_group: Wgpu.WGPUBindGroup) void {
+    self.shadow_bind_group = shadow_bind_group;
 }
 
 fn createPipelineGctx(gctx: *Gctx, layout: Wgpu.WGPUPipelineLayout, module: Wgpu.WGPUShaderModule, comptime entry: []const u8, comptime VertexType: type, attrs: []const Wgpu.WGPUVertexAttribute) Wgpu.WGPURenderPipeline {

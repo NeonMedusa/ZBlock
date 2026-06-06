@@ -23,6 +23,8 @@ struct SceneUniform {
     sun_color: vec3f,
     moon_brightness: f32,
     ambient_ground: vec3f,
+    _pad: f32,
+    shadow_vp: mat4x4f,
 };
 
 struct MaterialConstants {
@@ -94,16 +96,43 @@ fn skinNormal(input_normal: vec3f, bone_offset: i32, joint_indices: vec4u, joint
     return (skin_matrix * vec4f(input_normal, 0.0)).xyz;
 }
 
+// --- 阴影贴图 (group 2) ---
+@group(2) @binding(0) var shadow_tex: texture_depth_2d;
+@group(2) @binding(1) var shadow_sampler: sampler_comparison;
+
 // --- 光照参数 ---
 const AMBIENT_STRENGTH = 0.3;
 const SPECULAR_STRENGTH = 0.5;
 const SPECULAR_SHININESS = 32.0;
 
+// 阴影采样：PCF 3×3 + depth bias
+fn sampleShadow(world_pos: vec3f) -> f32 {
+    let p = scene_uniform.shadow_vp * vec4f(world_pos, 1.0);
+    var ndc = p.xyz / p.w;
+    let uv = vec2f(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5); // Y 翻转补偿 Vulkan framebuffer
+    let ref_depth = ndc.z;
+
+    // 超出光源视锥体 → 返回 1.0（无阴影）
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ref_depth < 0.0 || ref_depth > 1.0) {
+        return 1.0;
+    }
+
+    let bias: f32 = 0.001;               // 固定深度偏移 (~0.5m)，防自交闪烁
+    let step = 1.0 / 4096.0;             // 单纹素 UV 步长
+    var vis: f32 = 0.0;
+    for (var y = -1; y <= 1; y++) {      // PCF 3×3
+        for (var x = -1; x <= 1; x++) {
+            let off = vec2f(f32(x), f32(y)) * step;
+            vis += textureSampleCompare(shadow_tex, shadow_sampler, uv + off, ref_depth - bias);
+        }
+    }
+    return vis / 9.0;
+}
+
 fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f {
     let n = normalize(normal);
 
-    // 太阳光
-    // 场景坐标系的 X/Z 与天空盒相反，绕 Y 轴旋转 180° 补偿
+    // 太阳光 场景坐标系的 X/Z 与天空盒相反，绕 Y 轴旋转 180° 补偿
     let sun_dir = normalize(vec3f(-scene_uniform.sun_direction.x, scene_uniform.sun_direction.y, -scene_uniform.sun_direction.z));
     let sun_col = scene_uniform.sun_color * scene_uniform.sun_intensity;
 
@@ -130,7 +159,8 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
     let reflect_dir = reflect(-sun_dir, n);
     let specular = day * pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS) * SPECULAR_STRENGTH * sun_col;
 
-    let final_color = ambient + diffuse + specular;
+    let shadow = sampleShadow(position);
+    let final_color = ambient + (diffuse + specular) * (0.3 + shadow * 0.7);
     return vec4f(final_color, base_color.a);
 }
 

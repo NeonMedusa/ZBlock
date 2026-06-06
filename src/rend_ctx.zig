@@ -844,7 +844,8 @@ pub const SceneUniform = struct {
     sun_color: Vec3 = undefined, // 太阳颜色
     moon_brightness: f32 = undefined, // 月亮强度
     ambient_ground: Vec3 = undefined, // 白天环境光色，独立于 horizon_color
-    _pad1: [1]f32 = undefined,
+    _pad: f32 = undefined,
+    shadow_vp: Mat4 = undefined, // 太阳视角 VP 矩阵（阴影贴图）
 
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
@@ -865,6 +866,8 @@ pub const SceneUniform = struct {
             .sun_color = Vec3.new(1, 1, 1),
             .moon_brightness = 0.3,
             .ambient_ground = Vec3.new(1, 1, 1), // 环境光
+            ._pad = undefined,
+            .shadow_vp = Mat4.identity,
         };
     }
 };

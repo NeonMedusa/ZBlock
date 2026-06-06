@@ -9,6 +9,7 @@ res_manager: ResManager,
 wireframe_pipeline: WireframePipeline,
 render_pipeline: RenderPipeline,
 sky_pipeline: SkyPipeline,
+shadow_pipeline: ShadowPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
@@ -338,11 +339,25 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     const res_manager = try ResManager.init(allocator, &self.gctx, &self.render_pipeline);
     self.res_manager = res_manager;
 
+    // 阴影管线（方向光 shadow map）
+    self.shadow_pipeline = try ShadowPipeline.init(&self.gctx);
+
     // 创建渲染管线
     self.render_pipeline = try RenderPipeline.init(
         self,
         "resources/shaders/render_shader.wgsl",
     );
+
+    // 将阴影深度贴图 + 比较采样器绑定到渲染管线 group 2
+    const shadow_bind_group = Wgpu.wgpuDeviceCreateBindGroup(self.gctx.device, &.{
+        .layout = self.render_pipeline.shadow_bgl,
+        .entryCount = 2,
+        .entries = &[_]Wgpu.WGPUBindGroupEntry{
+            .{ .binding = 0, .textureView = self.shadow_pipeline.depth_texture_view },
+            .{ .binding = 1, .sampler = self.shadow_pipeline.depth_sampler },
+        },
+    });
+    self.render_pipeline.setShadowBindGroup(shadow_bind_group);
 
     // 线框管线（调试用）
     self.wireframe_pipeline = try WireframePipeline.init(
@@ -410,6 +425,7 @@ pub fn deinit(self: *@This()) void {
 
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
+    self.shadow_pipeline.deinit();
     self.sky_pipeline.deinit();
     self.wireframe_pipeline.deinit();
     self.ui_system.deinit();
@@ -897,7 +913,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 0;
+        const MAX_ENEMIES: u32 = 3;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();
@@ -1044,6 +1060,7 @@ const Raycast = @import("raycast.zig");
 
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
 const SkyPipeline = @import("sky.zig").SkyPipeline;
+const ShadowPipeline = @import("shadow.zig").ShadowPipeline;
 
 const BlockWorld = @import("block_world.zig");
 const TICK_DT = BlockWorld.TICK_DT;

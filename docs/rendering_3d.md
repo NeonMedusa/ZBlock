@@ -64,6 +64,75 @@ SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正�
 
 ---
 
+## 阴影贴图 (Shadow Mapping)
+
+方向光阴影，使用单张 4096² 深度贴图（`Depth32Float`）。
+
+### 整体流程
+
+1. **每帧选择光源方向**：`sun_direction.y > 0` 时从太阳投射，否则从月亮投射
+2. **Pass 1 — 阴影渲染**：`render.zig` 从光源视角将所有区块渲染到 `shadow_depth_texture`
+3. **Pass 2 — 主渲染**：fragment shader 每像素查询阴影贴图，调制直接光照
+
+### 阴影 VP 矩阵
+
+`ShadowPipeline.computeLightVp()` 计算光源视角的正交投影 VP：
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| `half_size` | 128 | 覆盖 ±128m（256m 宽 / 4096² = 16 texels/m） |
+| `dist` | 256 | 光源距中心 256m |
+| `center Y` | 60 | 阴影视锥中心固定在地面高度 |
+| `n / f` | -128 / -640 | 近/远平面（view 空间负 Z，深度范围 512m） |
+
+正交投影使用 Vulkan NDC z ∈ [0,1]，n/f 均为负值（view 空间中相机前方沿 -Z）。
+VP = `proj * lookAt(light_pos, center, (0,1,0))`。
+
+### 阴影采样（shader）
+
+`render_shader.wgsl: sampleShadow()`:
+
+```
+world_pos → shadow_vp 变换 → NDC → UV (Y 翻转补偿 Vulkan framebuffer)
+  → PCF 3×3 (textureSampleCompare + Linear 硬件滤波)
+  → 采样值与 ref_depth - bias (0.001) 比较
+  → 返回 0=shadow, 1=lit
+```
+
+UV 范围外返回 1.0（无阴影）。
+
+### 偏置策略（防自交 + 防偏移）
+
+| 机制 | 位置 | 效果 |
+|------|------|------|
+| `depthBiasSlopeScale = 3.0` | `shadow.zig` 管线 depth stencil | 斜面自动加大偏置，防闪烁 |
+| `bias = 0.001` | shader `sampleShadow` | 固定深度偏移 (~0.5m)，防自交 |
+| PCF 3×3 | shader 循环 9 次采样 | 平滑阴影边缘，吸收纹素走样 |
+
+### GPU 资源
+
+| 资源 | 说明 |
+|------|------|
+| `shadow_depth_texture` | 4096² `Depth32Float`，render attachment + texture binding |
+| `shadow_sampler` | `CompareFunction_Less` + `Linear`（硬件 PCF） |
+| `shadow_bgl` | 渲染 pipeline group 2：深度贴图 + 比较采样器 |
+| `ShadowPipeline.light_vp` | CPU 端缓存 VP，每帧写入 shadow uniform buffer 和 `SceneUniform.shadow_vp` |
+
+### 文件索引
+
+| 文件 | 内容 |
+|------|------|
+| `src/shadow.zig` | `ShadowPipeline`：init、`computeLightVp`、深度贴图/采样器/管线 |
+| `src/render.zig:37-80` | 方向选择、VP 计算、阴影渲染 pass |
+| `src/render.zig:219-222` | 主渲染 pass 绑定阴影 bind group |
+| `resources/shaders/shadow_shader.wgsl` | 阴影 pass vertex shader（深度写入） |
+| `resources/shaders/render_shader.wgsl:99-130` | `sampleShadow()` + 阴影采样器声明 |
+| `src/rend_ctx.zig:847-848` | `SceneUniform.shadow_vp` / `.shadow_bias` |
+| `src/render_pipeline.zig:125-135` | shadow BGL 定义 |
+| `src/game.zig:342-360` | 阴影管线 + bind group 初始化 |
+
+---
+
 ## 双管线顶点架构
 
 管线和 vertex 格式按"是否带骨骼"分拆，核心思路是用一个 vertex buffer 承载两种格式，两

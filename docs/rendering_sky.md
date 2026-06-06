@@ -43,9 +43,64 @@ dir = normalize(sky_mat × ndc)
 
 ### 月亮
 
-硬切圆盘：`step(0.998, moon_dot)` × brightness × 3。
-位于太阳正对面（`moon_dir = -sun_dir`），不需要独立位置计算。
-未来可用贴图替代。
+加载 `moon.png`（512×512 RGBA8）作为 2D 纹理，像素级 UV 采样。
+
+#### 纹理加载（`sky.zig`）
+
+使用 `zigimg.Image.fromFilePath` + 栈上 8KB 读取缓冲区 + 堆分配像素数组加载 PNG。
+纹理格式 `RGBA8Unorm`，采样器 `Nearest`（避免低分辨率纹理被线性插值糊掉）。
+绑定到天空 BGL 的 binding 3（纹理）+ binding 4（采样器）。
+
+#### 逐像素 UV 计算（`sky_shader.wgsl`）
+
+```
+moon_dot = max(dot(view_dir, moon_dir), 0)
+moon_disk = smoothstep(0.75, 0.92, moon_dot)   // 软边缘代替旧的 step(0.998)
+
+// 月亮局部坐标系
+moon_right = normalize(cross(moon_dir, (0,1,0)))
+moon_up = cross(moon_dir, moon_right)
+
+// 视线在月亮平面上的投影 → UV
+moon_proj = view_dir - moon_dir × moon_dot
+moon_uv = (dot(moon_proj, moon_right) × 7.0 + 0.5, dot(moon_proj, moon_up) × 7.0 + 0.5)
+```
+
+`× 7.0` 控制月亮在天空中的视大小（值越大月亮越小，7.0 约等于太阳的视觉尺寸）。
+
+#### Alpha 混合
+
+```
+moon_alpha = moon_disk × moon_tex_color.a
+sky_moon = mix(sky_gradient, moon_color, moon_alpha)
+```
+
+- `moon_disk` 提供边缘淡出，`moon_tex_color.a` 来自贴图 alpha 通道（暗面=0，完全透明 → 夜空可见；亮面=1 → 显示月亮纹理）
+- 暗面正确遮挡星空，消除旧版硬切圆盘的"半透明暗面"问题
+
+#### 关键坑：贴图边缘必须保留 1px 透明间距
+
+**现象**：月亮在天空中呈现十字形拖尾闪烁（四个方向各有一条拉伸线）。
+
+**根本原因**：
+
+```
+moon_uv = (dot(moon_proj, right) × 7.0 + 0.5, dot(moon_proj, up) × 7.0 + 0.5)
+```
+
+`smoothstep(0.75, 0.92, moon_dot)` 的软边缘范围比月亮贴图的 UV 安全区更宽。
+当 `moon_dot ≈ 0.75` 时，视线仍在采样范围内（`moon_disk > 0`），但此时
+`moon_proj` 的投影分量可能已超过 `±0.5 / 7.0 ≈ ±0.071`，导致 `moon_uv` 超出 [0, 1]。
+
+采样器使用 `ClampToEdge` 地址模式——越界 UV 被钳制到边界像素。如果贴图边缘
+像素有非零 alpha，这四个方向的边界像素被拉伸出去，形成十字形拖尾。
+
+**解决**：贴图中的有效内容与图片四边之间**必须保留至少 1px 的全透明间距**。
+这样即使 UV 越界被钳制，采样到的是 alpha=0 的透明像素，视觉上完全不可见。
+
+**通用规则**：任何以 `ClampToEdge` + UV 绕轴投影方式采样的天体贴图
+（月亮、太阳、星球等），只要使用软边缘（smoothstep），**有效像素绝对不能
+接触图片边缘**。建议保留 2-4px 透明边距以兼容不同的缩放系数和边缘宽度。
 
 ### 星星
 
