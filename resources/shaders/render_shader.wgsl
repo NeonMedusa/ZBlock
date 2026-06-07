@@ -25,6 +25,7 @@ struct SceneUniform {
     ambient_ground: vec3f,
     _pad: f32,
     shadow_vp: mat4x4f,
+    moon_color: vec3f,
 };
 
 struct MaterialConstants {
@@ -138,14 +139,14 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
 
     // 月光（方向相反、偏蓝、更弱）
     let moon_dir = -sun_dir;
-    let moon_col = vec3f(0.5, 0.55, 0.8) * scene_uniform.moon_brightness * 2.0;
+    let moon_col = scene_uniform.moon_color * scene_uniform.moon_brightness;
 
     // 昼夜因子（与天空盒一致）
     let day = smoothstep(-0.15, 0.25, scene_uniform.sun_direction.y);
     let night = 1.0 - day;
 
     // 环境光：白天用 ambient_ground，夜晚深空
-    let ambient_color = mix(vec3f(0.02, 0.02, 0.08), scene_uniform.ambient_ground, day);
+    let ambient_color = scene_uniform.ambient_ground;
     let ambient = ambient_color * AMBIENT_STRENGTH * base_color.rgb;
 
     // 漫反射

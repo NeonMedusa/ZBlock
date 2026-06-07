@@ -160,7 +160,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let upper = mix(sky.mid_color.rgb, sky.zenith_color.rgb, smoothstep(0.0, 1.0, (h - mid_h) / (1.0 - mid_h)));
     let blend_near = smoothstep(max(mid_h - 0.1, 0.0), min(mid_h + 0.1, 1.0), h);
     let day_sky = mix(lower, upper, blend_near);
-    let sky_gradient = mix(vec3f(0.02, 0.02, 0.08), day_sky, day_factor);
+    let sky_gradient = day_sky;
 
     // 太阳光晕（用于云层照明）
     let sun_dot = max(dot(dir, normalize(sky.sun_direction.xyz)), 0.0);
