@@ -21,7 +21,7 @@ pub const ShadowPipeline = struct {
 
     pub fn init(gctx: *Gctx) !ShadowPipeline {
         const shader_module = try gctx.createShaderModule("resources\\shaders\\shadow_shader.wgsl");
-        const map_size: u32 = 4096; // 4096² 深度贴图，每纹素覆盖 ~0.0625m
+        const map_size: u32 = 2048; // 2048² 深度贴图
 
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
             .{ .binding = 0, .visibility = Wgpu.WGPUShaderStage_Vertex, .buffer = .{ .type = Wgpu.WGPUBufferBindingType_Uniform } },
@@ -119,7 +119,7 @@ pub const ShadowPipeline = struct {
                 .stencilReadMask = 0,
                 .stencilWriteMask = 0,
                 .depthBias = 0,
-                .depthBiasSlopeScale = 3.0, // 斜面自交防护：表面越斜，自动增大偏置
+                .depthBiasSlopeScale = 0, // 无深度偏置（靠法线偏移防自交）
                 .depthBiasClamp = 0.0,
             },
         });

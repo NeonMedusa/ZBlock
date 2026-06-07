@@ -55,9 +55,14 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         const shadow_pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &shadow_pass_desc);
         Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.handle);
         Wgpu.wgpuRenderPassEncoderSetBindGroup(shadow_pass, 0, game.shadow_pipeline.bind_group, 0, null);
+        const shadow_frustum = Frustum.fromViewProj(game.shadow_pipeline.light_vp); // 阴影视锥体裁剪
         var s_chunk_it = game.block_world.chunks.iterator();
         while (s_chunk_it.next()) |entry| {
             const loaded = &entry.value_ptr.*;
+            const origin = entry.key_ptr.*;
+            const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
+            const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 256, @as(f32, @floatFromInt(origin.z + 16)));
+            if (!shadow_frustum.intersectsAABB(min, max)) continue;
             var s_mesh_it = loaded.mesh_cache.meshes.iterator();
             while (s_mesh_it.next()) |mesh_entry| {
                 const mesh = mesh_entry.value_ptr;

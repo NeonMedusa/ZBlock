@@ -472,10 +472,14 @@ pub const SkyPipeline = struct {
 
     pub fn updateUniform(self: *SkyPipeline, gctx: *Gctx, inv_view_proj: Mat4, time: f32) void {
         const angle = (time / self.day_length) * 2.0 * std.math.pi;
+        const sin_a = std.math.sin(angle);
+        const cos_a = std.math.cos(angle);
+        const c25: f32 = 0.906; // cos(25°)
+        const s25: f32 = 0.423; // sin(25°)
         self.state.sun_direction = Vec3.norm(Vec3.new(
-            std.math.sin(angle) * 0.8,
-            std.math.cos(angle) * 0.6 + self.state.seasonal_tilt,
-            std.math.cos(angle) * 0.3,
+            (sin_a * 0.8) * c25 - (cos_a * 0.3) * s25, // XZ 绕 Y 轴旋转 25°
+            cos_a * 0.6 + self.state.seasonal_tilt,
+            -(sin_a * 0.8) * s25 + (cos_a * 0.3) * c25,
         ));
 
         // 天空颜色关键帧插值

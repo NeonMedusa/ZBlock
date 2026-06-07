@@ -105,10 +105,19 @@ const AMBIENT_STRENGTH = 0.3;
 const SPECULAR_STRENGTH = 0.5;
 const SPECULAR_SHININESS = 32.0;
 
-// 阴影采样：单次 textureSampleCompare
-fn sampleShadow(world_pos: vec3f) -> f32 {
-    let p = scene_uniform.shadow_vp * vec4f(world_pos, 1.0);
+// 阴影采样：法线偏移 + 径向畸变
+fn sampleShadow(world_pos: vec3f, normal: vec3f, light_dir: vec3f) -> f32 {
+    let n = normalize(normal);
+    let n_dot_l = abs(dot(n, light_dir));
+    let cam_dist = length(world_pos - scene_uniform.camera_pos);
+    let off_amt = min(0.03 + cam_dist * 0.005, 0.5) * (2.0 - n_dot_l); // 法线偏移：近处小远处大，正对光的面更小
+    let biased = world_pos + n * off_amt;
+
+    let p = scene_uniform.shadow_vp * vec4f(biased, 1.0);
     var ndc = p.xyz / p.w;
+    let df = length(ndc.xy) + 0.1; // 与 shadow_shader.wgsl 一致的径向畸变
+    ndc.x /= df;
+    ndc.y /= df;
     let uv = vec2f(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5); // Y 翻转补偿 framebuffer 坐标系
     let ref_depth = ndc.z;
 
@@ -117,8 +126,7 @@ fn sampleShadow(world_pos: vec3f) -> f32 {
         return 1.0;
     }
 
-    let bias: f32 = 0.001; // 固定深度偏移，防自交闪烁
-    return textureSampleCompare(shadow_tex, shadow_sampler, uv, ref_depth - bias);
+    return textureSampleCompare(shadow_tex, shadow_sampler, uv, ref_depth);
 }
 
 fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f {
@@ -151,7 +159,7 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
     let reflect_dir = reflect(-sun_dir, n);
     let specular = day * pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS) * SPECULAR_STRENGTH * sun_col;
 
-    let shadow = sampleShadow(position);
+    let shadow = sampleShadow(position, normal, sun_dir);
     let final_color = ambient + (diffuse + specular) * (0.3 + shadow * 0.7);
     return vec4f(final_color, base_color.a);
 }

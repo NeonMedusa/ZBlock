@@ -118,7 +118,8 @@ moon_uv = (dot(moon_proj, right) × 7.0 + 0.5, dot(moon_proj, up) × 7.0 + 0.5)
 
 ```
 angle = (time / day_length) × 2π
-sun_direction = normalize(sin(angle)×0.8, cos(angle)×0.6 + tilt, cos(angle)×0.3)
+sun_direction = normalize((sin×0.8×c25 - cos×0.3×s25), cos×0.6 + tilt, (-sin×0.8×s25 + cos×0.3×c25))
+c25=cos(25°), s25=sin(25°)  // XZ 绕 Y 轴旋转 25°，东北升起西南落下
 ```
 
 - `day_length` = 60 秒（可在 `SkyPipeline` 的 `.day_length` 中调整）
