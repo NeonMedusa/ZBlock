@@ -141,8 +141,13 @@ pub const ShadowPipeline = struct {
     pub fn computeLightVp(self: *ShadowPipeline, sun_dir: Vec3, player_pos: Vec3) void {
         const half_size: f32 = 128.0; // 覆盖 ±128m = 256m 宽
         const dist: f32 = 256.0; // 光源距离中心 256m
+        const snap: f32 = 3.0; // 阴影中心 snap 间隔，防边缘拉锯
         const d = sun_dir.norm();
-        const center = Vec3.new(player_pos.x, 60.0, player_pos.z); // 阴影中心固定 Y=60（地面）
+        const center = Vec3.new(
+            @round(player_pos.x / snap) * snap,
+            60.0,
+            @round(player_pos.z / snap) * snap,
+        );
         const light_pos = Vec3.new(
             center.x + d.x * dist,
             center.y + d.y * dist,

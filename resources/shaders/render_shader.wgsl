@@ -105,11 +105,11 @@ const AMBIENT_STRENGTH = 0.3;
 const SPECULAR_STRENGTH = 0.5;
 const SPECULAR_SHININESS = 32.0;
 
-// 阴影采样：PCF 3×3 + depth bias
+// 阴影采样：单次 textureSampleCompare
 fn sampleShadow(world_pos: vec3f) -> f32 {
     let p = scene_uniform.shadow_vp * vec4f(world_pos, 1.0);
     var ndc = p.xyz / p.w;
-    let uv = vec2f(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5); // Y 翻转补偿 Vulkan framebuffer
+    let uv = vec2f(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5); // Y 翻转补偿 framebuffer 坐标系
     let ref_depth = ndc.z;
 
     // 超出光源视锥体 → 返回 1.0（无阴影）
@@ -117,16 +117,8 @@ fn sampleShadow(world_pos: vec3f) -> f32 {
         return 1.0;
     }
 
-    let bias: f32 = 0.001;               // 固定深度偏移 (~0.5m)，防自交闪烁
-    let step = 1.0 / 4096.0;             // 单纹素 UV 步长
-    var vis: f32 = 0.0;
-    for (var y = -1; y <= 1; y++) {      // PCF 3×3
-        for (var x = -1; x <= 1; x++) {
-            let off = vec2f(f32(x), f32(y)) * step;
-            vis += textureSampleCompare(shadow_tex, shadow_sampler, uv + off, ref_depth - bias);
-        }
-    }
-    return vis / 9.0;
+    let bias: f32 = 0.001; // 固定深度偏移，防自交闪烁
+    return textureSampleCompare(shadow_tex, shadow_sampler, uv, ref_depth - bias);
 }
 
 fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f {

@@ -59,8 +59,9 @@ SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正�
 
 1. `sky.zig:updateUniform` 从角度计算 `sun_direction`，写入天空 uniform
 2. `render.zig` 将 `sky_pipeline.state` 的以上字段拷贝到 `game.ubo`
-3. `render.zig` 写 `scene_uniform_buffer` 到 GPU
-4. shader 从 `SceneUniform` 读取光照参数，逐像素计算
+3. 计算阴影 VP → 渲染阴影 pass
+4. **写 `scene_uniform_buffer` 到 GPU（阴影 pass 之后，确保主 pass 使用同一帧的 shadow_vp）**
+5. shader 从 `SceneUniform` 读取光照参数，逐像素计算
 
 ---
 
@@ -72,7 +73,8 @@ SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正�
 
 1. **每帧选择光源方向**：`sun_direction.y > 0` 时从太阳投射，否则从月亮投射
 2. **Pass 1 — 阴影渲染**：`render.zig` 从光源视角将所有区块渲染到 `shadow_depth_texture`
-3. **Pass 2 — 主渲染**：fragment shader 每像素查询阴影贴图，调制直接光照
+3. **写入 scene uniform**：在阴影 pass 之后、主 pass 之前写入 GPU，确保两个 pass 使用**同一帧的 shadow_vp**（关键 bug 修复：之前 ubo 在阴影 VP 计算前写入，导致主 pass 采样式了一帧 VP，产生帧错位闪现）
+4. **Pass 2 — 主渲染**：fragment shader 每像素查询阴影贴图，调制直接光照
 
 ### 阴影 VP 矩阵
 
@@ -84,30 +86,46 @@ SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正�
 | `dist` | 256 | 光源距中心 256m |
 | `center Y` | 60 | 阴影视锥中心固定在地面高度 |
 | `n / f` | -128 / -640 | 近/远平面（view 空间负 Z，深度范围 512m） |
+| `snap` | 3.0 | 阴影中心 snap 间隔，消除子纹素边缘拉锯 |
 
-正交投影使用 Vulkan NDC z ∈ [0,1]，n/f 均为负值（view 空间中相机前方沿 -Z）。
+正交投影使用 WebGPU NDC z ∈ [0,1]，n/f 均为负值（view 空间中相机前方沿 -Z）。
 VP = `proj * lookAt(light_pos, center, (0,1,0))`。
+
+**center snap**：相机中心每 3m 跳一次，避免 VP 每帧微变导致的阴影边缘锯齿抖动。跳变间隔大于人眼敏感阈值，视觉效果为"平滑移动"。
 
 ### 阴影采样（shader）
 
 `render_shader.wgsl: sampleShadow()`:
 
 ```
-world_pos → shadow_vp 变换 → NDC → UV (Y 翻转补偿 Vulkan framebuffer)
-  → PCF 3×3 (textureSampleCompare + Linear 硬件滤波)
-  → 采样值与 ref_depth - bias (0.001) 比较
+world_pos → shadow_vp 变换 → NDC → UV (Y 翻转补偿 framebuffer 坐标系)
+  → textureSampleCompare 单次采样
+  → 与 ref_depth - bias (0.001) 比较
   → 返回 0=shadow, 1=lit
 ```
 
 UV 范围外返回 1.0（无阴影）。
 
-### 偏置策略（防自交 + 防偏移）
+### 偏置策略
 
 | 机制 | 位置 | 效果 |
 |------|------|------|
-| `depthBiasSlopeScale = 3.0` | `shadow.zig` 管线 depth stencil | 斜面自动加大偏置，防闪烁 |
+| `depthBiasSlopeScale = 3.0` | `shadow.zig` 管线 depth stencil | 硬件级斜面自动偏置，防闪烁 |
 | `bias = 0.001` | shader `sampleShadow` | 固定深度偏移 (~0.5m)，防自交 |
-| PCF 3×3 | shader 循环 9 次采样 | 平滑阴影边缘，吸收纹素走样 |
+
+### ubo 写入时机（关键修复）
+
+```
+× 之前：写入 ubo → 计算 shadow_vp → 阴影 pass → 主 pass（主 pass 用上一帧的 VP 采这一帧的影子 → 帧错位 → 闪现）
+✓ 现在：计算 shadow_vp → 阴影 pass → 写入 ubo（含正确 shadow_vp） → 主 pass（两 pass 同一帧 VP → 稳定）
+```
+
+### 开发经验
+
+1. **帧错位闪现**：ubo 写入时机不对导致阴影 pass 和主 pass 各用不同的 VP，比任何 bias/PCF 问题都严重。必须在阴影 pass 之后、主 pass 之前写入。
+2. **边缘拉锯（子纹素抖动）**：center snap（3.0m）比 UV snap 或 PCF 更有效——从根源上减少 VP 更新频率，而不是在后端"抹平"锯齿。
+3. **UV snap vs PCF**：UV snap 完全消除抖动但产生纯阶梯硬边；PCF 平滑边缘但牺牲了刀锋般的硬朗感。取舍决定了最终视觉效果。
+4. **法线偏移**：NdotL 动态 bias 在原理上正确，但参数调优复杂。固定 bias + slopeScale 也能达到可接受效果。
 
 ### GPU 资源
 
@@ -123,11 +141,12 @@ UV 范围外返回 1.0（无阴影）。
 | 文件 | 内容 |
 |------|------|
 | `src/shadow.zig` | `ShadowPipeline`：init、`computeLightVp`、深度贴图/采样器/管线 |
-| `src/render.zig:37-80` | 方向选择、VP 计算、阴影渲染 pass |
+| `src/render.zig:30-70` | 方向选择、VP 计算、阴影渲染 pass |
+| `src/render.zig:70-87` | ubo 写入（阴影 pass 后，关键顺序） |
 | `src/render.zig:219-222` | 主渲染 pass 绑定阴影 bind group |
 | `resources/shaders/shadow_shader.wgsl` | 阴影 pass vertex shader（深度写入） |
-| `resources/shaders/render_shader.wgsl:99-130` | `sampleShadow()` + 阴影采样器声明 |
-| `src/rend_ctx.zig:847-848` | `SceneUniform.shadow_vp` / `.shadow_bias` |
+| `resources/shaders/render_shader.wgsl:108-121` | `sampleShadow()` + 阴影采样器声明 |
+| `src/rend_ctx.zig:847-848` | `SceneUniform.shadow_vp` |
 | `src/render_pipeline.zig:125-135` | shadow BGL 定义 |
 | `src/game.zig:342-360` | 阴影管线 + bind group 初始化 |
 

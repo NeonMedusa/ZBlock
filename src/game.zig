@@ -63,17 +63,15 @@ pub fn start(self: *Game) !void {
                 if (self.keybinds.isJustPressed(&self.input, .toggle_inventory))
                     self.menu_state = .Inventory;
 
-                // 临时测试天空盒用：-跳到下一天日落，=跳到下一天日出
+                // - 时间倒退 0.5 小时，= 时间前进 0.5 小时
                 if (self.input.isKeyJustPressed(.minus)) {
-                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
-                    const current_day = self.tick_count / day_ticks;
-                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.75 / TICK_DT));
+                    const half_hour = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT / 48));
+                    self.tick_count -|= half_hour;
                     self.accumulator = 0;
                 }
                 if (self.input.isKeyJustPressed(.equal)) {
-                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
-                    const current_day = self.tick_count / day_ticks;
-                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.25 / TICK_DT));
+                    const half_hour = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT / 48));
+                    self.tick_count += half_hour;
                     self.accumulator = 0;
                 }
             },
@@ -177,17 +175,15 @@ pub fn start(self: *Game) !void {
                 if (self.keybinds.isJustPressed(&self.input, .place_block))
                     try tryPlaceBlock(self);
 
-                // - 跳到下一天日出，= 跳到下一天日落（测试天空用）
+                // - 时间倒退 0.5 小时，= 时间前进 0.5 小时
                 if (self.input.isKeyJustPressed(.minus)) {
-                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
-                    const current_day = self.tick_count / day_ticks;
-                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.25 / TICK_DT));
+                    const half_hour = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT / 48));
+                    self.tick_count -|= half_hour;
                     self.accumulator = 0;
                 }
                 if (self.input.isKeyJustPressed(.equal)) {
-                    const day_ticks = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT));
-                    const current_day = self.tick_count / day_ticks;
-                    self.tick_count = (current_day + 1) * day_ticks + @as(u64, @intFromFloat(self.sky_pipeline.day_length * 0.75 / TICK_DT));
+                    const half_hour = @as(u64, @intFromFloat(self.sky_pipeline.day_length / TICK_DT / 48));
+                    self.tick_count += half_hour;
                     self.accumulator = 0;
                 }
             }

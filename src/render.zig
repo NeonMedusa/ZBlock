@@ -17,14 +17,6 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     game.ubo.ambient_ground = game.sky_pipeline.state.ambient_ground;
     game.ubo.time = sky_time;
 
-    Wgpu.wgpuQueueWriteBuffer(
-        game.gctx.queue,
-        game.res_manager.scene_uniform_buffer,
-        0,
-        &game.ubo,
-        Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
-    );
-
     if (world) {
         // inverse(proj × view_rot)：从 NDC 方向反算世界方向（全屏三角 cubemap）
         var view_rot = game.ubo.view_matrix;
@@ -42,10 +34,9 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             Vec3.new(game.sky_pipeline.state.sun_direction.x, -game.sky_pipeline.state.sun_direction.y, game.sky_pipeline.state.sun_direction.z);
         game.shadow_pipeline.computeLightVp(ldir, player_shadow_pos);
         game.shadow_pipeline.updateUniform(&game.gctx);
-        game.ubo.shadow_vp = game.shadow_pipeline.light_vp; // 同步到场景 uniform，供 fs 采样
+        game.ubo.shadow_vp = game.shadow_pipeline.light_vp;
 
         // === 阴影渲染通道 (Pass 1) ===
-        // 从光源视角渲染所有区块到 4096² 深度贴图
         const shadow_pass_desc = Wgpu.WGPURenderPassDescriptor{
             .colorAttachmentCount = 0,
             .colorAttachments = null,
@@ -78,6 +69,15 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         }
         Wgpu.wgpuRenderPassEncoderEnd(shadow_pass);
     }
+
+    // 写入 scene uniform（含最新 shadow_vp），阴影 pass 与主 pass 使用同一帧的 VP
+    Wgpu.wgpuQueueWriteBuffer(
+        game.gctx.queue,
+        game.res_manager.scene_uniform_buffer,
+        0,
+        &game.ubo,
+        Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
+    );
 
     var chunk_instance_idx: u32 = 0;
     const frustum = if (world) Frustum.fromViewProj(Mat4.mul(game.ubo.proj_matrix, game.ubo.view_matrix)) else undefined;
