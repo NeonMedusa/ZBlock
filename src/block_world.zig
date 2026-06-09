@@ -20,6 +20,8 @@ const Pathfind = @import("pathfind.zig");
 const bitstream = @import("bitstream.zig");
 const readBits = bitstream.readBits;
 const writeBits = bitstream.writeBits;
+const fr = @import("fridge");
+const registries = @import("registries.zig");
 
 pub const CHUNK_WIDTH: u32 = 16;
 pub const CHUNK_HEIGHT: u32 = 256;
@@ -271,10 +273,18 @@ const NEIGHBOR_OFFSETS = [_]struct { x: i32, z: i32 }{
 /// 异步 A* 队列条目（pending 和 completed 共用）
 const AStarTask = struct { entity: ECS.Entity, state: Pathfind.AStarState };
 
-pub const ChunkIO = struct {
-    ctx: *anyopaque,
-    loadFn: *const fn (ctx: *anyopaque, origin: Vec3i, chunk: *Chunk) bool,
-    saveFn: *const fn (ctx: *anyopaque, origin: Vec3i, chunk: *const Chunk) void,
+/// 异步存档保存任务（主线程序列化数据，io worker 写 SQLite）
+const SaveTask = struct {
+    origin: Vec3i,
+    palette_json: []u8, // 主线程分配的 JSON，io worker 读取，主线程 processCompletedSaves 释放
+    index_data: []u8, // chunk.index_data 的拷贝
+    palette_count: u32, // 用于计算 bpi
+};
+
+/// 异步区块加载结果（io worker 分配 Chunk，主线程接收后放入 chunks HashMap）
+const LoadResult = struct {
+    origin: Vec3i,
+    chunk: *Chunk, // io worker 完全初始化的 Chunk，主线程直接接管
 };
 
 pub const BlockWorld = struct {
@@ -309,7 +319,30 @@ pub const BlockWorld = struct {
     astar_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     astar_worker: ?std.Thread = null,
 
-    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, chunk_radius: i32) !BlockWorld {
+    // 异步 IO worker：独立线程处理所有存档操作（SQLite 读写），不阻塞主线程
+    save_worker: ?std.Thread = null,
+    save_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    save_dir: []const u8, // 存档目录路径（如 "saves/world_1"），io worker 用它打开自己的 SQLite 连接
+
+    // 异步存档保存队列
+    pending_saves: std.ArrayListUnmanaged(SaveTask),
+    pending_saves_mutex: std.Thread.Mutex = .{},
+    completed_saves: std.ArrayListUnmanaged(SaveTask),
+    completed_saves_mutex: std.Thread.Mutex = .{},
+
+    // 异步区块加载队列（io worker 读 SQLite 或 generate，主线程接收后放入 chunks）
+    pending_loads: std.ArrayListUnmanaged(Vec3i),
+    pending_loads_mutex: std.Thread.Mutex = .{},
+    completed_loads: std.ArrayListUnmanaged(LoadResult),
+    completed_loads_mutex: std.Thread.Mutex = .{},
+
+    // 去重：已入队正在处理的 load 请求
+    io_active_loads: std.AutoHashMap(Vec3i, void),
+
+    /// 所有 IO 任务（load + save）的总数，deinit/saveAllChunks 等待此值归零
+    pending_io_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+
+    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, chunk_radius: i32, save_name: []const u8) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
         errdefer material_registry.deinit();
 
@@ -349,6 +382,12 @@ pub const BlockWorld = struct {
             .last_exact_targets = last_exact_targets,
             .astar_pending = .{},
             .astar_completed = .{},
+            .save_dir = save_name,
+            .pending_saves = .{},
+            .completed_saves = .{},
+            .pending_loads = .{},
+            .completed_loads = .{},
+            .io_active_loads = std.AutoHashMap(Vec3i, void).init(allocator),
         };
     }
 
@@ -360,8 +399,44 @@ pub const BlockWorld = struct {
         self.astar_worker = try std.Thread.spawn(.{}, astarWorkerFn, .{self});
     }
 
+    pub fn spawnSaveWorker(self: *BlockWorld) !void {
+        self.save_worker = try std.Thread.spawn(.{}, ioWorkerFn, .{self});
+    }
+
     pub fn deinit(self: *BlockWorld) void {
-        // 通知worker停止
+        // 检查是否有未处理的 pending 任务（先不处理 completed，等 worker 停后再统一清理）
+        const pending_count = self.pending_io_count.load(.acquire);
+        if (pending_count > 0) {
+            std.debug.print("WARNING: deinit with {d} pending IO tasks - data may be lost!\n", .{pending_count});
+        }
+
+        // 停止 IO worker（之后不会再 push 新的 completed）
+        self.save_running.store(false, .release);
+        if (self.save_worker) |w| {
+            w.join();
+        }
+        self.save_worker = null;
+
+        // 清理所有 IO 任务
+        for (self.pending_saves.items) |*t| {
+            self.allocator.free(t.palette_json);
+            self.allocator.free(t.index_data);
+        }
+        self.pending_saves.deinit(self.allocator);
+        for (self.completed_saves.items) |*t| {
+            self.allocator.free(t.palette_json);
+            self.allocator.free(t.index_data);
+        }
+        self.completed_saves.deinit(self.allocator);
+        for (self.completed_loads.items) |*r| {
+            r.chunk.deinit();
+            self.allocator.destroy(r.chunk);
+        }
+        self.completed_loads.deinit(self.allocator);
+        self.pending_loads.deinit(self.allocator);
+        self.io_active_loads.deinit();
+
+        // 通知mesh worker停止
         self.running.store(false, .release);
         if (self.worker) |w| {
             w.join();
@@ -379,7 +454,7 @@ pub const BlockWorld = struct {
         for (self.astar_completed.items) |*t| Pathfind.deinitAStar(&t.state);
         self.astar_completed.deinit(self.allocator);
 
-        // 清理剩余completed结果
+        // 清理剩余mesh completed结果
         for (self.completed.items) |*r| r.deinit();
         self.completed.deinit(self.allocator);
 
@@ -439,6 +514,7 @@ pub const BlockWorld = struct {
     }
 
     pub fn processCompletedBuilds(self: *BlockWorld) !void {
+        const start_ns = std.time.nanoTimestamp();
         self.completed_mutex.lock();
         defer self.completed_mutex.unlock();
 
@@ -451,58 +527,125 @@ pub const BlockWorld = struct {
             r.deinit();
         }
         self.completed.clearRetainingCapacity();
+        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+        if (elapsed_us > 100000) std.debug.print("[TIMER] processCompletedBuilds: {d}us\n", .{elapsed_us});
     }
 
-    pub fn loadChunk(self: *BlockWorld, origin: Vec3i, chunk_io: ?*const ChunkIO) !void {
+    /// 将脏区块数据拷贝入队，io worker 异步写入 SQLite
+    pub fn enqueueSaveTask(self: *BlockWorld, origin: Vec3i, chunk: *const Chunk) !void {
+        const start_ns = std.time.nanoTimestamp();
+        const pal = chunk.palette.items;
+        // 序列化 palette 为 JSON（同 saveChunk 格式）
+        var json = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, pal.len * 16);
+        try json.append(self.allocator, '[');
+        for (pal, 0..) |bs, i| {
+            if (i > 0) try json.append(self.allocator, ',');
+            try json.append(self.allocator, '"');
+            try json.appendSlice(self.allocator, bs.block_id.name());
+            try json.append(self.allocator, '_');
+            try json.append(self.allocator, @as(u8, '0') + @intFromEnum(bs.facing));
+            try json.append(self.allocator, '"');
+        }
+        try json.append(self.allocator, ']');
+
+        const palette_count = pal.len;
+        const bpi = if (palette_count <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, palette_count - 1) + 1));
+        const data_size = (CHUNK_BLOCKS * bpi + 7) / 8;
+        const idx_copy = try self.allocator.alloc(u8, data_size);
+        @memcpy(idx_copy, chunk.index_data[0..data_size]);
+
+        const json_owned = try json.toOwnedSlice(self.allocator);
+
+        self.pending_saves_mutex.lock();
+        defer self.pending_saves_mutex.unlock();
+        try self.pending_saves.append(self.allocator, .{
+            .origin = origin,
+            .palette_json = json_owned,
+            .index_data = idx_copy,
+            .palette_count = @as(u32, @intCast(palette_count)),
+        });
+        _ = self.pending_io_count.fetchAdd(1, .release);
+        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+        if (elapsed_us > 100000) std.debug.print("[TIMER] enqueueSaveTask({d},{d}): {d}us\n", .{ origin.x, origin.z, elapsed_us });
+    }
+
+    /// 入队异步区块加载请求
+    pub fn enqueueLoadTask(self: *BlockWorld, origin: Vec3i) !void {
         if (self.chunks.contains(origin)) return;
-        const chunk = try self.allocator.create(Chunk);
-        errdefer self.allocator.destroy(chunk);
-        chunk.* = Chunk.init(self.allocator);
-        errdefer chunk.deinit();
+        {
+            self.pending_loads_mutex.lock();
+            defer self.pending_loads_mutex.unlock();
+            // 如果已有相同 origin 的 load 在排队的，跳过
+            if (self.io_active_loads.contains(origin)) return;
+            try self.pending_loads.append(self.allocator, origin);
+            try self.io_active_loads.put(origin, {});
+        }
+        _ = self.pending_io_count.fetchAdd(1, .release);
+    }
 
-        if (chunk_io) |io| {
-            if (!io.loadFn(io.ctx, origin, chunk)) {
-                Chunk.generate(origin, chunk);
+    /// 处理已完成的 IO 加载任务（主线程每帧调用）
+    pub fn processCompletedLoads(self: *BlockWorld) !void {
+        self.completed_loads_mutex.lock();
+        defer self.completed_loads_mutex.unlock();
+        for (self.completed_loads.items) |*result| {
+            _ = self.io_active_loads.remove(result.origin);
+            var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
+            try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
+            {
+                self.chunk_mutex.lock();
+                defer self.chunk_mutex.unlock();
+                try self.chunks.put(result.origin, .{
+                    .chunk = result.chunk,
+                    .meshes = meshes,
+                    .dirty = false,
+                });
             }
-        } else {
-            Chunk.generate(origin, chunk);
-        }
-
-        var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
-        try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
-        errdefer {
-            meshes.deinit();
-            chunk.deinit();
-            self.allocator.destroy(chunk);
-        }
-        // chunks 写独占锁；然后 pending 写入 mesh_mutex
-        {
-            self.chunk_mutex.lock();
-            defer self.chunk_mutex.unlock();
-            try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .dirty = false });
-            std.debug.assert(self.chunks.count() <= self.chunks.capacity());
-        }
-        {
-            self.mesh_mutex.lock();
-            defer self.mesh_mutex.unlock();
-            try self.pending.put(origin, {});
-
+            try self.enqueueMeshBuild(result.origin);
+            // 也触发邻居 mesh 重建
             for (NEIGHBOR_OFFSETS[1..]) |noff| {
                 const nb_origin = Vec3i.new(
-                    origin.x + noff.x * CHUNK_WIDTH_I32,
+                    result.origin.x + noff.x * CHUNK_WIDTH_I32,
                     0,
-                    origin.z + noff.z * CHUNK_WIDTH_I32,
+                    result.origin.z + noff.z * CHUNK_WIDTH_I32,
                 );
-                if (self.chunks.getPtr(nb_origin)) |nb_loaded| {
-                    if (nb_loaded.chunk != chunk) {
-                        try self.pending.put(nb_origin, {});
-                    }
+                if (self.chunks.contains(nb_origin)) {
+                    try self.enqueueMeshBuild(nb_origin);
                 }
             }
         }
+        self.completed_loads.clearRetainingCapacity();
     }
 
-    pub fn unloadChunk(self: *BlockWorld, origin: Vec3i, chunk_io: ?*const ChunkIO) void {
+    /// 释放 io worker 已完成的任务内存
+    pub fn processCompletedSaves(self: *BlockWorld) void {
+        self.completed_saves_mutex.lock();
+        defer self.completed_saves_mutex.unlock();
+        for (self.completed_saves.items) |*t| {
+            self.allocator.free(t.palette_json);
+            self.allocator.free(t.index_data);
+        }
+        self.completed_saves.clearRetainingCapacity();
+    }
+
+    /// 等待所有待处理 IO 任务（load + save）完成
+    pub fn flushIO(self: *BlockWorld) void {
+        while (self.pending_io_count.load(.acquire) > 0) {
+            std.Thread.yield() catch {};
+        }
+        self.processCompletedSaves();
+    }
+
+    /// 当前待处理的 IO 任务数量
+    pub fn pendingIOCount(self: *BlockWorld) usize {
+        return self.pending_io_count.load(.acquire);
+    }
+
+    pub fn loadChunk(self: *BlockWorld, origin: Vec3i) !void {
+        try self.enqueueLoadTask(origin);
+    }
+
+    pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
+        const start_ns = std.time.nanoTimestamp();
         // 先检查 pending 队列（用 mesh_mutex）
         {
             self.mesh_mutex.lock();
@@ -527,9 +670,9 @@ pub const BlockWorld = struct {
                 }
             }
 
-            // 存档脏数据
-            if (loaded.dirty and chunk_io != null) {
-                chunk_io.?.saveFn(chunk_io.?.ctx, origin, loaded.chunk);
+            // 脏数据入队异步保存（不阻塞主线程）
+            if (loaded.dirty) {
+                self.enqueueSaveTask(origin, loaded.chunk) catch {};
             }
 
             // 释放所有 mesh
@@ -546,6 +689,8 @@ pub const BlockWorld = struct {
             _ = self.chunks.remove(origin);
         }
         self.material_registry.cleanupUnused();
+        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+        if (elapsed_us > 100000) std.debug.print("[TIMER] unloadChunk({d},{d}): {d}us\n", .{ origin.x, origin.z, elapsed_us });
     }
 
     pub fn setBlock(self: *BlockWorld, world_pos: Vec3i, block_state: BlockState) !void {
@@ -1373,4 +1518,217 @@ fn astarWorkerFn(world: *BlockWorld) void {
         std.Thread.yield() catch {};
     }
     if (active) |*t| Pathfind.deinitAStar(&t.state);
+}
+
+/// 异步 IO worker：将 pending_saves 中的任务写入 SQLite + 处理 pending_loads
+fn ioWorkerFn(world: *BlockWorld) void {
+    // worker 线程独享的 SQLite 连接池（共享 map 非线程安全，所以这里自己开连接）
+    var region_caches = std.AutoHashMap(i64, fr.Session).init(std.heap.page_allocator);
+    defer {
+        var it = region_caches.iterator();
+        while (it.next()) |entry| entry.value_ptr.deinit();
+        region_caches.deinit();
+    }
+    const pa = std.heap.page_allocator;
+
+    while (world.save_running.load(.acquire)) {
+        // 优先处理保存任务
+        var save_task: ?SaveTask = null;
+        {
+            world.pending_saves_mutex.lock();
+            defer world.pending_saves_mutex.unlock();
+            if (world.pending_saves.items.len > 0) {
+                save_task = world.pending_saves.swapRemove(0);
+            }
+        }
+
+        if (save_task) |t| {
+            // 原有保存逻辑（略作调整用 pa 替代 world.allocator）
+            const cx = @divExact(t.origin.x, 16);
+            const cz = @divExact(t.origin.z, 16);
+            const rx = @divFloor(cx, 32);
+            const rz = @divFloor(cz, 32);
+            const key: i64 = (@as(i64, @intCast(rx)) << 32) | @as(i64, @intCast(rz)) & 0xFFFFFFFF;
+
+            const db = blk: {
+                if (region_caches.getPtr(key)) |sess| break :blk sess;
+                const path = std.fmt.allocPrint(pa, "saves/{s}/regions/r_{d}_{d}.db", .{ world.save_dir, rx, rz }) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                defer pa.free(path);
+                const path_z = pa.dupeZ(u8, path) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                defer pa.free(path_z);
+                var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = path_z }) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                sess.conn.execAll("CREATE TABLE IF NOT EXISTS \"Chunks\" (x INTEGER NOT NULL,z INTEGER NOT NULL,palette TEXT NOT NULL,data BLOB NOT NULL,PRIMARY KEY (x, z)); PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;") catch {};
+                region_caches.put(key, sess) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                break :blk region_caches.getPtr(key).?;
+            };
+            {
+                var stmt = db.conn.prepare("INSERT OR REPLACE INTO Chunks (x,z,palette,data) VALUES (?,?,?,?)", &.{}) catch {
+                    std.debug.print("IO save failed\n", .{});
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                defer stmt.deinit();
+                _ = stmt.bind(0, fr.Value{ .int = cx }) catch {};
+                _ = stmt.bind(1, fr.Value{ .int = cz }) catch {};
+                _ = stmt.bind(2, fr.Value{ .string = t.palette_json }) catch {};
+                const bpi = if (t.palette_count <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, t.palette_count - 1) + 1));
+                const data_size = (CHUNK_BLOCKS * bpi + 7) / 8;
+                _ = stmt.bind(3, fr.Value{ .blob = t.index_data[0..data_size] }) catch {};
+                _ = stmt.exec() catch {};
+            }
+            world.completed_saves_mutex.lock();
+            world.completed_saves.append(world.allocator, t) catch {};
+            world.completed_saves_mutex.unlock();
+            _ = world.pending_io_count.fetchSub(1, .release);
+            continue;
+        }
+
+        // 没有保存任务，尝试加载任务
+        var origin: ?Vec3i = null;
+        {
+            world.pending_loads_mutex.lock();
+            defer world.pending_loads_mutex.unlock();
+            if (world.pending_loads.items.len > 0) {
+                origin = world.pending_loads.swapRemove(0);
+            }
+        }
+
+        if (origin) |o| {
+            const cx = @divExact(o.x, 16);
+            const cz = @divExact(o.z, 16);
+            const rx = @divFloor(cx, 32);
+            const rz = @divFloor(cz, 32);
+            const key: i64 = (@as(i64, @intCast(rx)) << 32) | @as(i64, @intCast(rz)) & 0xFFFFFFFF;
+
+            // 打开或获取 region 数据库连接
+            const db = blk: {
+                if (region_caches.getPtr(key)) |sess| break :blk sess;
+                const path = std.fmt.allocPrint(pa, "saves/{s}/regions/r_{d}_{d}.db", .{ world.save_dir, rx, rz }) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                defer pa.free(path);
+                const path_z = pa.dupeZ(u8, path) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                defer pa.free(path_z);
+                var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = path_z }) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                sess.conn.execAll("CREATE TABLE IF NOT EXISTS \"Chunks\" (x INTEGER NOT NULL,z INTEGER NOT NULL,palette TEXT NOT NULL,data BLOB NOT NULL,PRIMARY KEY (x, z)); PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;") catch {};
+                region_caches.put(key, sess) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                break :blk region_caches.getPtr(key).?;
+            };
+
+            // 尝试从 SQLite 加载
+            var stmt = db.conn.prepare("SELECT palette, data FROM Chunks WHERE x=? AND z=?", &.{}) catch {
+                _ = world.pending_io_count.fetchSub(1, .release);
+                continue;
+            };
+            defer stmt.deinit();
+            _ = stmt.bind(0, fr.Value{ .int = cx }) catch {};
+            _ = stmt.bind(1, fr.Value{ .int = cz }) catch {};
+            const found = stmt.step() catch false;
+
+            // 分配 Chunk
+            const chunk = world.allocator.create(Chunk) catch {
+                _ = world.pending_io_count.fetchSub(1, .release);
+                continue;
+            };
+            errdefer world.allocator.destroy(chunk);
+
+            if (found) {
+                // 从存档加载
+                const col0 = stmt.column(0) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                const src = col0.string;
+                // 解析 palette JSON
+                var palette_names = std.ArrayListUnmanaged([]const u8){};
+                defer palette_names.deinit(pa);
+                {
+                    var i: usize = 1;
+                    while (i < src.len and src[i] != ']') : (i += 1) {
+                        if (src[i] == '"') {
+                            const start = i + 1;
+                            const end = std.mem.indexOfScalarPos(u8, src, start, '"') orelse break;
+                            palette_names.append(pa, src[start..end]) catch {
+                                _ = world.pending_io_count.fetchSub(1, .release);
+                                continue;
+                            };
+                            i = end;
+                        }
+                    }
+                }
+                // 构建运行时 palette
+                var runtime_palette = std.ArrayListUnmanaged(BlockState){};
+                defer runtime_palette.deinit(pa);
+                runtime_palette.ensureTotalCapacity(pa, palette_names.items.len) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                for (palette_names.items) |name| {
+                    const last_underscore = std.mem.lastIndexOfScalar(u8, name, '_');
+                    const block_name = if (last_underscore) |pos| name[0..pos] else name;
+                    const facing_int: u3 = if (last_underscore) |pos| blk: {
+                        break :blk if (pos + 1 < name.len) @as(u3, @intCast(name[pos + 1] - '0')) else 0;
+                    } else 0;
+                    const id = registries.block_name_to_id.get(block_name) orelse 0;
+                    runtime_palette.appendAssumeCapacity(BlockState{
+                        .block_id = BlockId.fromInt(id),
+                        .facing = @enumFromInt(facing_int),
+                    });
+                }
+                const final_count = runtime_palette.items.len;
+                const bpi = if (final_count <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, final_count - 1) + 1));
+                chunk.* = Chunk.init(pa);
+                chunk.palette.deinit(pa);
+                chunk.palette = runtime_palette;
+                runtime_palette = .{};
+                chunk.index_bits = @as(u5, @intCast(bpi));
+                const col1 = stmt.column(1) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                const data_bytes = col1.blob;
+                const data_size = (CHUNK_BLOCKS * chunk.index_bits + 7) / 8;
+                chunk.allocator.free(chunk.index_data);
+                chunk.index_data = pa.alloc(u8, data_size) catch {
+                    _ = world.pending_io_count.fetchSub(1, .release);
+                    continue;
+                };
+                @memcpy(chunk.index_data, data_bytes[0..@min(data_size, data_bytes.len)]);
+                if (data_bytes.len < data_size) @memset(chunk.index_data[data_bytes.len..], 0);
+            } else {
+                chunk.* = Chunk.init(pa);
+                Chunk.generate(o, chunk);
+            }
+
+            // 推送 completed_loads
+            world.completed_loads_mutex.lock();
+            world.completed_loads.append(world.allocator, .{ .origin = o, .chunk = chunk }) catch {};
+            world.completed_loads_mutex.unlock();
+            _ = world.pending_io_count.fetchSub(1, .release);
+        } else {
+            std.Thread.yield() catch {};
+        }
+    }
 }

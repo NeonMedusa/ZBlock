@@ -218,6 +218,8 @@ pub fn start(self: *Game) !void {
         try self.ui_system.endFrame(&self.gctx);
         if (self.save_initialized) {
             try self.block_world.processCompletedBuilds();
+            try self.block_world.processCompletedLoads();
+            self.block_world.processCompletedSaves();
             Render.draw(self);
         } else if (self.ui_system.index_count > 0) {
             Render.drawUI(self);
@@ -229,7 +231,7 @@ pub fn start(self: *Game) !void {
 /// 重建投影矩阵。窗口缩放后调用。
 pub fn rebuildProjMatrix(self: *Game) void {
     const aspect = self.window.width / self.window.height;
-    const far = @as(f32, @floatFromInt(self.chunk_radius)) * @as(f32, @floatFromInt(BlockWorld.CHUNK_WIDTH)) * 1.5;
+    const far = @as(f32, @floatFromInt(self.chunk_radius)) * @as(f32, @floatFromInt(BlockWorld.CHUNK_WIDTH)) * 1.5 + BlockWorld.CHUNK_WIDTH * 4;
     self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.01, far);
 }
 
@@ -255,9 +257,8 @@ fn initGame(self: *Game) !void {
     //     self.registry.add(debug_entity, Comps.Collider{ .width = 1.0, .height = 1.0 });
     // }
 
-    // 加载初始区块
+    // 加载初始区块（异步 IO，入队后等待完成）
     {
-        var chunk_io = chunkIO(&self.save_manager);
         const player_origin = BlockWorld.BlockWorld.chunkOrigin(
             @intFromFloat(@floor(8.0)),
             @intFromFloat(@floor(8.0)),
@@ -271,7 +272,7 @@ fn initGame(self: *Game) !void {
                     player_origin.x + dx * BlockWorld.CHUNK_WIDTH_I32,
                     0,
                     player_origin.z + dz * BlockWorld.CHUNK_WIDTH_I32,
-                ), &chunk_io);
+                ));
             }
         }
     }
@@ -284,10 +285,14 @@ fn initGame(self: *Game) !void {
     var iter = view.entityIterator();
     if (iter.next()) |_| self.flying = true;
 
-    while (self.block_world.pendingCount() > 0) {
+    // 等待异步 IO 加载完成 + mesh 构建完成
+    while (self.block_world.pendingIOCount() > 0 or self.block_world.pendingCount() > 0) {
+        try self.block_world.processCompletedLoads();
         try self.block_world.processCompletedBuilds();
         std.Thread.yield() catch {};
     }
+    try self.block_world.processCompletedLoads();
+    try self.block_world.processCompletedBuilds();
 
     self.save_manager.loadAllEntities(&self.registry) catch |err| std.debug.print("loadEntities error: {}\n", .{err});
 
@@ -381,9 +386,6 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.inventory = .{};
     self.selected_item = null;
 
-    // 存档系统（默认 world_1，玩家可在菜单切换）
-    self.save_manager = try SaveManager.init(allocator, "world_1");
-
     // 按键绑定（加载配置文件，不存在则使用默认值）
     self.keybinds = try Keybinds.load(allocator, "config/keybinds.json");
     self.menu_state = .MainMenu;
@@ -395,19 +397,11 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.animation_system = try AnimationSystem.init(allocator, self.gctx.device);
 
     // 为渲染管线设置骨骼矩阵缓冲
-
-    // 为渲染管线设置骨骼矩阵缓冲
     self.render_pipeline.setBoneBuffer(self, self.animation_system.bone_pool_buffer);
 
     // 图标缓存 + 图标管线（传入 uniform 缓冲）
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
-
-    // 测试方块世界
-    self.chunk_radius = 32;
-    rebuildProjMatrix(self);
-    self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
-    try self.block_world.spawnWorker(); // mesh 生成线程
-    try self.block_world.spawnAStarWorker(); // 寻路线程
+    // 存档系统、BlockWorld、worker 线程在用户选择存档后才初始化（initGame/startSave）
 
     // 返回实例
     return self;
@@ -429,21 +423,22 @@ pub fn deinit(self: *@This()) void {
     self.icon_atlas.deinit();
 
     if (!self.game_cleaned) {
-        // 退出前保存
-        self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
-        self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
-        self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
-        // 清理 AI 实体的寻路状态和路径内存（在 registry.deinit 之前）
-        {
-            var view = self.registry.view(.{Comps.AIAgent}, .{});
-            var iter = view.entityIterator();
-            while (iter.next()) |entity| {
-                self.block_world.cleanupEntity(&self.registry, entity);
+        if (self.save_initialized) {
+            // 退出前保存
+            self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+            self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
+            self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
+            {
+                var view = self.registry.view(.{Comps.AIAgent}, .{});
+                var iter = view.entityIterator();
+                while (iter.next()) |entity| {
+                    self.block_world.cleanupEntity(&self.registry, entity);
+                }
             }
+            self.block_world.deinit();
+            self.save_manager.deinit();
         }
         self.registry.deinit();
-        self.block_world.deinit();
-        self.save_manager.deinit();
     }
     registries.deinit(self.allocator);
     self.animation_system.deinit();
@@ -451,14 +446,17 @@ pub fn deinit(self: *@This()) void {
 
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
-    if (!self.game_cleaned) self.save_manager.deinit();
+    self.chunk_radius = 32;
+    rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
+    // 如果是从 returnToMenu 回来的，需要重建 BlockWorld
     if (self.game_cleaned) {
         self.registry = ECS.Registry.init(self.allocator);
-        self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
-        try self.block_world.spawnWorker();
-        try self.block_world.spawnAStarWorker();
     }
+    self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius, name);
+    try self.block_world.spawnWorker();
+    try self.block_world.spawnAStarWorker();
+    try self.block_world.spawnSaveWorker();
     self.game_cleaned = false;
     try self.initGame();
 }
@@ -964,6 +962,7 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
 }
 
 fn updateChunks(self: *Game) !void {
+    const start_ns = std.time.nanoTimestamp();
     var view = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
     var iter = view.entityIterator();
     while (iter.next()) |entity| {
@@ -979,7 +978,6 @@ fn updateChunks(self: *Game) !void {
         const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_WIDTH_I32);
 
         const load_range: i32 = self.chunk_radius;
-        var io = chunkIO(&self.save_manager);
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;
@@ -988,7 +986,7 @@ fn updateChunks(self: *Game) !void {
                     player_origin.x + dx * BlockWorld.CHUNK_WIDTH_I32,
                     0,
                     player_origin.z + dz * BlockWorld.CHUNK_WIDTH_I32,
-                ), &io);
+                ));
             }
         }
 
@@ -1005,10 +1003,12 @@ fn updateChunks(self: *Game) !void {
             }
         }
         for (to_unload.items) |key| {
-            self.block_world.unloadChunk(key, &io);
+            self.block_world.unloadChunk(key);
         }
         break;
     }
+    const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+    if (elapsed_us > 100000) std.debug.print("[TIMER] updateChunks: {d}us\n", .{elapsed_us});
 }
 
 const Game = @This();
@@ -1085,29 +1085,6 @@ const SaveManager = @import("save_manager.zig").SaveManager;
 const Keybinds = @import("keybinds.zig").Keybinds;
 const KeyAction = @import("keybinds.zig").Action;
 const AnimationSystem = @import("animation.zig").AnimationSystem;
-
-/// 构建 ChunkIO 回调，使区块加载/卸载时自动读写存档
-fn chunkIO(mgr: *SaveManager) BlockWorld.ChunkIO {
-    const S = struct {
-        fn load(ctx: *anyopaque, origin: Vec3i, chunk: *BlockWorld.Chunk) bool {
-            const self = @as(*SaveManager, @ptrCast(@alignCast(ctx)));
-            const cx = @divExact(origin.x, 16);
-            const cz = @divExact(origin.z, 16);
-            return self.loadChunk(cx, cz, chunk) catch false;
-        }
-        fn save(ctx: *anyopaque, origin: Vec3i, chunk: *const BlockWorld.Chunk) void {
-            const self = @as(*SaveManager, @ptrCast(@alignCast(ctx)));
-            const cx = @divExact(origin.x, 16);
-            const cz = @divExact(origin.z, 16);
-            self.saveChunk(cx, cz, chunk) catch {};
-        }
-    };
-    return .{
-        .ctx = @ptrCast(mgr),
-        .loadFn = S.load,
-        .saveFn = S.save,
-    };
-}
 
 fn getSurfaceY(world: *BlockWorld.BlockWorld, x: i32, z: i32) ?i32 {
     var y: i32 = @intCast(BlockWorld.CHUNK_HEIGHT - 1);

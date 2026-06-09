@@ -2,12 +2,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const fr = @import("fridge");
-const BlockRegistry = @import("block_registry.zig");
-const BlockId = BlockRegistry.BlockId;
-const BlockState = BlockRegistry.BlockState;
-const BW = @import("block_world.zig");
-const BlockWorld = BW.BlockWorld;
-const Chunk = BW.Chunk;
+const BlockWorld = @import("block_world.zig").BlockWorld;
 const Vec3 = @import("algebra.zig").Vec3;
 const ECS = @import("zigecs");
 const Comps = @import("components.zig").Components;
@@ -17,10 +12,7 @@ const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const item_infos = @import("item_registry.zig").item_infos;
 const registries = @import("registries.zig");
 
-pub const REGION_SIZE: i32 = 32; // 每个 region 包含 32×32 区块
-const CHUNK_WIDTH: u32 = BW.CHUNK_WIDTH;
-const CHUNK_HEIGHT: u32 = BW.CHUNK_HEIGHT;
-const CHUNK_BLOCKS: usize = CHUNK_WIDTH * CHUNK_WIDTH * CHUNK_HEIGHT;
+pub const REGION_SIZE: i32 = 32;
 
 /// 按区块坐标计算所在的 region 坐标
 fn chunkToRegion(cx: i32, cz: i32) struct { i32, i32 } {
@@ -318,122 +310,24 @@ pub const SaveManager = struct {
         }
     }
 
-    // ── 区块（per-chunk palette + bit-packed data）──
+    // ── 区块（由 IO worker 异步处理 save/load，主线程不直接调用）──
 
-    pub fn saveChunk(self: *SaveManager, cx: i32, cz: i32, chunk: *const Chunk) !void {
-        const rx, const rz = chunkToRegion(cx, cz);
-        var db = try self.getOrOpenRegion(rx, rz);
-
-        // 1. 将运行时 palette 序列化为 JSON（含 facing，每个条目格式 "blockName_facingInt"）
-        const pal = chunk.palette.items;
-        var json = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, pal.len * 16);
-        defer json.deinit(self.allocator);
-        try json.append(self.allocator, '[');
-        for (pal, 0..) |bs, i| {
-            if (i > 0) try json.append(self.allocator, ',');
-            try json.append(self.allocator, '"');
-            try json.appendSlice(self.allocator, bs.block_id.name());
-            try json.append(self.allocator, '_');
-            try json.append(self.allocator, @as(u8, '0') + @intFromEnum(bs.facing));
-            try json.append(self.allocator, '"');
-        }
-        try json.append(self.allocator, ']');
-
-        // 2. 计算 index_bits（与运行时一致，因存档 palette == 运行时 palette）
-        const palette_count = pal.len;
-        const bpi = if (palette_count <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, palette_count - 1) + 1));
-
-        // 3. 直接将 index_data 的前 N 字节作为 data BLOB
-        const data_size = (CHUNK_BLOCKS * bpi + 7) / 8;
-        const data_bytes = chunk.index_data[0..data_size];
-
-        // 4. 写入 DB
-        var stmt = try db.conn.prepare("INSERT OR REPLACE INTO Chunks (x,z,palette,data) VALUES (?,?,?,?)", &.{});
-        defer stmt.deinit();
-        try stmt.bind(0, fr.Value{ .int = cx });
-        try stmt.bind(1, fr.Value{ .int = cz });
-        try stmt.bind(2, fr.Value{ .string = json.items });
-        try stmt.bind(3, fr.Value{ .blob = data_bytes });
-        try stmt.exec();
-    }
-
-    /// 尝试从存档恢复区块。返回 true 表示成功恢复，false 表示无存档需重新生成。
-    pub fn loadChunk(self: *SaveManager, cx: i32, cz: i32, chunk: *Chunk) !bool {
-        const rx, const rz = chunkToRegion(cx, cz);
-        var db = try self.getOrOpenRegion(rx, rz);
-        var stmt = try db.conn.prepare("SELECT palette, data FROM Chunks WHERE x=? AND z=?", &.{});
-        defer stmt.deinit();
-        try stmt.bind(0, fr.Value{ .int = cx });
-        try stmt.bind(1, fr.Value{ .int = cz });
-        if (!try stmt.step()) return false;
-
-        // 1. 解析 palette（JSON 字符串数组，含 facing 后缀：["grass_0","stone_5"]）
-        const col0 = try stmt.column(0);
-        const src = col0.string;
-        var palette_names = std.ArrayListUnmanaged([]const u8){};
-        defer palette_names.deinit(self.allocator);
-        {
-            var i: usize = 1;
-            while (i < src.len and src[i] != ']') : (i += 1) {
-                if (src[i] == '"') {
-                    const start = i + 1;
-                    const end = std.mem.indexOfScalarPos(u8, src, start, '"') orelse break;
-                    try palette_names.append(self.allocator, src[start..end]);
-                    i = end;
-                }
-            }
-        }
-
-        // 2. 解析 palette 名称 → 直接构建运行时 palette（含 facing）
-        //    名称格式: "blockName_facingInt"，如 "stone_5"，兼容旧格式无后缀
-        var runtime_palette = std.ArrayListUnmanaged(BlockState){};
-        defer runtime_palette.deinit(self.allocator);
-        try runtime_palette.ensureTotalCapacity(self.allocator, palette_names.items.len);
-        for (palette_names.items) |name| {
-            const last_underscore = std.mem.lastIndexOfScalar(u8, name, '_');
-            const block_name = if (last_underscore) |pos| name[0..pos] else name;
-            const facing_int: u3 = if (last_underscore) |pos| blk: {
-                break :blk if (pos + 1 < name.len) @as(u3, @intCast(name[pos + 1] - '0')) else 0;
-            } else 0;
-            const id = registries.block_name_to_id.get(block_name) orelse 0;
-            runtime_palette.appendAssumeCapacity(BlockState{
-                .block_id = BlockId.fromInt(id),
-                .facing = @enumFromInt(facing_int),
-            });
-        }
-
-        // 3. 计算 index_bits，直接替换 chunk 内容
-        const final_count = runtime_palette.items.len;
-        const bpi = if (final_count <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, final_count - 1) + 1));
-        chunk.deinit();
-        chunk.palette = runtime_palette;
-        runtime_palette = .{}; // 阻止 defer 释放
-        chunk.index_bits = @as(u5, @intCast(bpi));
-
-        // 4. 将存档 data BLOB 直接复制到 index_data
-        const col1 = try stmt.column(1);
-        const data_bytes = col1.blob;
-        const data_size = (CHUNK_BLOCKS * chunk.index_bits + 7) / 8;
-        chunk.index_data = try chunk.allocator.alloc(u8, data_size);
-        @memcpy(chunk.index_data, data_bytes[0..@min(data_size, data_bytes.len)]);
-        if (data_bytes.len < data_size) {
-            @memset(chunk.index_data[data_bytes.len..], 0);
-        }
-
-        return true;
-    }
-
-    pub fn saveAllChunks(self: *SaveManager, world: *BlockWorld) !void {
+    pub fn saveAllChunks(_: *SaveManager, world: *BlockWorld) !void {
+        var save_count: u32 = 0;
         var it = world.chunks.iterator();
         while (it.next()) |entry| {
             const loaded = &entry.value_ptr.*;
             if (loaded.dirty) {
-                const cx = @divExact(entry.key_ptr.x, 16);
-                const cz = @divExact(entry.key_ptr.z, 16);
-                try self.saveChunk(cx, cz, loaded.chunk);
+                world.enqueueSaveTask(entry.key_ptr.*, loaded.chunk) catch |err| {
+                    std.debug.print("saveChunk enqueue error: {}\n", .{err});
+                    continue;
+                };
                 loaded.dirty = false;
+                save_count += 1;
             }
         }
+        std.debug.print("saveAllChunks: {d} dirty\n", .{save_count});
+        world.flushIO();
     }
 
     // ── 内部：region 连接管理 ──
@@ -457,6 +351,7 @@ pub const SaveManager = struct {
             \\);
             \\PRAGMA journal_mode=WAL;
             \\PRAGMA synchronous=NORMAL;
+            \\PRAGMA busy_timeout=5000;
         );
         try self.region_caches.put(key, sess);
         return self.region_caches.getPtr(key) orelse unreachable;
