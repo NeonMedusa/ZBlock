@@ -744,7 +744,15 @@ fn tryPlaceBlock(self: *Game) !void {
     const selected_item_id = self.hotbar.slots[self.hotbar.selected].item_id;
     if (selected_item_id == 0) return;
     const block_id = BlockRegistry.BlockId.fromInt(selected_item_id);
-    try self.block_world.setBlock(place_pos, block_id);
+
+    // 根据点击的方块面设置朝向
+    const facing: Direction = blk: {
+        const fn_ = hit.face_normal;
+        if (fn_.y != 0) break :blk if (fn_.y > 0) .up else .down;
+        if (fn_.x != 0) break :blk if (fn_.x > 0) .east else .west;
+        break :blk if (fn_.z > 0) .south else .north;
+    };
+    try self.block_world.setBlock(place_pos, BlockState{ .block_id = block_id, .facing = facing });
 }
 
 /// 尝试将物品加入热栏/背包（优先堆叠，次优先空位）
@@ -1062,6 +1070,8 @@ const ShadowPipeline = @import("shadow.zig").ShadowPipeline;
 const BlockWorld = @import("block_world.zig");
 const TICK_DT = BlockWorld.TICK_DT;
 const BlockRegistry = @import("block_registry.zig");
+const BlockState = BlockRegistry.BlockState;
+const Direction = @import("direction.zig").Direction;
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;

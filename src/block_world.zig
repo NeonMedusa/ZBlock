@@ -548,13 +548,13 @@ pub const BlockWorld = struct {
         self.material_registry.cleanupUnused();
     }
 
-    pub fn setBlock(self: *BlockWorld, world_pos: Vec3i, block_id: BlockId) !void {
+    pub fn setBlock(self: *BlockWorld, world_pos: Vec3i, block_state: BlockState) !void {
         const origin = chunkOrigin(world_pos.x, world_pos.z);
         if (self.chunks.getPtr(origin)) |loaded| {
             const lx: u32 = @intCast(world_pos.x - origin.x);
             const ly: u32 = @intCast(world_pos.y - origin.y);
             const lz: u32 = @intCast(world_pos.z - origin.z);
-            loaded.chunk.setBlock(lx, ly, lz, BlockState.init(block_id));
+            loaded.chunk.setBlock(lx, ly, lz, block_state);
             loaded.dirty = true;
             try self.enqueueMeshBuild(origin);
 

@@ -113,4 +113,10 @@ pub const BlockState = struct {
             .facing = .up,
         };
     }
+    pub fn fromName(comptime name: []const u8) BlockState {
+        return .{
+            .block_id = BlockId.fromName(name),
+            .facing = .up,
+        };
+    }
 };
