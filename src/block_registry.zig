@@ -73,14 +73,14 @@ pub const BlockNames = blk: {
     for (&fields, block_infos, 0..) |*field, def, i|
         field.* = .{ .name = def.name, .value = i };
     break :blk @Type(.{ .@"enum" = .{
-        .tag_type = u32,
+        .tag_type = u16,
         .fields = &fields,
         .decls = &.{},
         .is_exhaustive = true,
     } });
 };
 
-pub const BlockId = enum(u32) {
+pub const BlockId = enum(u16) {
     _,
     pub fn fromInt(i: anytype) BlockId {
         return @enumFromInt(i);

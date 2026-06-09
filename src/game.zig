@@ -229,7 +229,8 @@ pub fn start(self: *Game) !void {
 /// 重建投影矩阵。窗口缩放后调用。
 pub fn rebuildProjMatrix(self: *Game) void {
     const aspect = self.window.width / self.window.height;
-    self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.1, 500);
+    const far = @as(f32, @floatFromInt(self.chunk_radius)) * @as(f32, @floatFromInt(BlockWorld.CHUNK_WIDTH)) * 1.5;
+    self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.01, far);
 }
 
 /// 选存档后初始化游戏世界（玩家实体、区块、存档数据）
@@ -403,7 +404,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
 
     // 测试方块世界
-    self.chunk_radius = 16;
+    self.chunk_radius = 32;
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
     try self.block_world.spawnWorker(); // mesh 生成线程
     try self.block_world.spawnAStarWorker(); // 寻路线程
@@ -909,7 +910,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 3;
+        const MAX_ENEMIES: u32 = 0;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

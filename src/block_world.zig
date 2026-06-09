@@ -106,7 +106,6 @@ const MaterialIdx = ChunkMesh.MaterialIdx;
 const MaterialKey = ChunkMesh.MaterialKey;
 const GlobalMaterial = ChunkMesh.GlobalMaterial;
 const MaterialRegistry = ChunkMesh.MaterialRegistry;
-const ChunkMeshCache = ChunkMesh.ChunkMeshCache;
 const MeshBuildResult = ChunkMesh.MeshBuildResult;
 const buildChunkMeshCPU = ChunkMesh.buildChunkMeshCPU;
 const applyMeshResult = ChunkMesh.applyMeshResult;
@@ -127,7 +126,7 @@ const FLY_SPEED_MULTIPLIER: f32 = 2.3; // 飞行极速 = 走速 × 此值
 
 const LoadedChunk = struct {
     chunk: *Chunk,
-    mesh_cache: ChunkMeshCache,
+    meshes: std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh),
     build_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     dirty: bool = false, // 被修改过，需要写入存档
 };
@@ -251,15 +250,22 @@ pub const BlockWorld = struct {
         for (self.astar_completed.items) |*t| Pathfind.deinitAStar(&t.state);
         self.astar_completed.deinit(self.allocator);
 
-        // 清理剩余completed结果（由worker_gpa分配）
+        // 清理剩余completed结果
         for (self.completed.items) |*r| r.deinit();
-        self.completed.deinit(self.worker_gpa.allocator());
+        self.completed.deinit(self.allocator);
 
         // 直接释放所有区块（不走unloadChunk的pending/build_lock检查）
         {
             var it = self.chunks.valueIterator();
             while (it.next()) |loaded| {
-                loaded.mesh_cache.deinit();
+                {
+                    var mesh_it = loaded.meshes.iterator();
+                    while (mesh_it.next()) |entry| {
+                        entry.value_ptr.deinit(self.allocator);
+                        self.material_registry.releaseById(entry.key_ptr.*);
+                    }
+                }
+                loaded.meshes.deinit();
                 self.allocator.destroy(loaded.chunk);
             }
             self.chunks.clearAndFree();
@@ -306,13 +312,13 @@ pub const BlockWorld = struct {
         self.completed_mutex.lock();
         defer self.completed_mutex.unlock();
 
-        for (self.completed.items) |*result| {
-            if (self.chunks.getPtr(result.origin)) |loaded| {
-                applyMeshResult(&loaded.mesh_cache, result) catch |err| {
+        for (self.completed.items) |*r| {
+            if (self.chunks.getPtr(r.origin)) |loaded| {
+                applyMeshResult(&loaded.meshes, self.allocator, self.gctx, &self.material_registry, r) catch |err| {
                     std.debug.print("applyMeshResult failed: {}\n", .{err});
                 };
             }
-            result.deinit();
+            r.deinit();
         }
         self.completed.clearRetainingCapacity();
     }
@@ -330,16 +336,17 @@ pub const BlockWorld = struct {
             Chunk.generate(origin, chunk);
         }
 
-        var mesh_cache = try ChunkMeshCache.init(self.allocator, self.gctx, &self.material_registry);
+        var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
+        try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
         errdefer {
-            mesh_cache.deinit();
+            meshes.deinit();
             self.allocator.destroy(chunk);
         }
         // chunks 写独占锁；然后 pending 写入 mesh_mutex
         {
             self.chunk_mutex.lock();
             defer self.chunk_mutex.unlock();
-            try self.chunks.put(origin, .{ .chunk = chunk, .mesh_cache = mesh_cache, .dirty = false });
+            try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .dirty = false });
             std.debug.assert(self.chunks.count() <= self.chunks.capacity());
         }
         {
@@ -392,7 +399,15 @@ pub const BlockWorld = struct {
                 chunk_io.?.saveFn(chunk_io.?.ctx, origin, loaded.chunk);
             }
 
-            loaded.mesh_cache.deinit();
+            // 释放所有 mesh
+            {
+                var mesh_it = loaded.meshes.iterator();
+                while (mesh_it.next()) |entry| {
+                    entry.value_ptr.deinit(self.allocator);
+                    self.material_registry.releaseById(entry.key_ptr.*);
+                }
+            }
+            loaded.meshes.deinit();
             self.allocator.destroy(loaded.chunk);
             _ = self.chunks.remove(origin);
         }
@@ -1177,7 +1192,7 @@ fn meshWorkerFn(world: *BlockWorld) void {
                 }
 
                 world.completed_mutex.lock();
-                world.completed.append(alloc, result) catch {
+                world.completed.append(world.allocator, result) catch {
                     result.deinit();
                 };
                 world.completed_mutex.unlock();

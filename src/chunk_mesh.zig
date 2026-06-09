@@ -91,9 +91,9 @@ pub const ChunkMesh = struct {
         if (self.index_buffer) |b| Wgpu.wgpuBufferRelease(b);
     }
 
-    pub fn clearCpuData(self: *ChunkMesh) void {
-        self.cpu_vertices.clearRetainingCapacity();
-        self.cpu_indices.clearRetainingCapacity();
+    pub fn clearCpuData(self: *ChunkMesh, allocator: std.mem.Allocator) void {
+        self.cpu_vertices.clearAndFree(allocator);
+        self.cpu_indices.clearAndFree(allocator);
     }
 
     pub fn uploadMeshData(self: *ChunkMesh, gctx: *Gctx) !void {
@@ -227,59 +227,6 @@ pub const MaterialRegistry = struct {
     }
 };
 
-pub const ChunkMeshCache = struct {
-    allocator: std.mem.Allocator,
-    gctx: *Gctx,
-    global_registry: *MaterialRegistry,
-
-    meshes: std.AutoHashMap(MaterialIdx, ChunkMesh),
-
-    pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, global_registry: *MaterialRegistry) !ChunkMeshCache {
-        var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh).init(allocator);
-        try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
-        return .{
-            .allocator = allocator,
-            .gctx = gctx,
-            .global_registry = global_registry,
-            .meshes = meshes,
-        };
-    }
-
-    pub fn deinit(self: *ChunkMeshCache) void {
-        self.clear();
-        self.meshes.deinit();
-    }
-
-    pub fn clear(self: *ChunkMeshCache) void {
-        var it = self.meshes.iterator();
-        while (it.next()) |entry| {
-            const mat_idx = entry.key_ptr.*;
-            entry.value_ptr.deinit(self.allocator);
-            self.global_registry.releaseById(mat_idx);
-        }
-        self.meshes.clearRetainingCapacity();
-    }
-
-    pub fn getMesh(self: *ChunkMeshCache, mat_idx: MaterialIdx) !*ChunkMesh {
-        const res = try self.meshes.getOrPut(mat_idx);
-        if (!res.found_existing) {
-            res.value_ptr.* = try ChunkMesh.init(self.gctx);
-        }
-        return res.value_ptr;
-    }
-
-    /// 上传所有非空材质网格到 GPU，上传后清空 CPU 暂存。
-    pub fn uploadAll(self: *ChunkMeshCache) !void {
-        var it = self.meshes.valueIterator();
-        while (it.next()) |mesh| {
-            if (mesh.cpu_vertices.items.len > 0) {
-                try mesh.uploadMeshData(self.gctx);
-                mesh.clearCpuData();
-            }
-        }
-    }
-};
-
 pub const MeshBuildResult = struct {
     origin: Vec3i,
     allocator: std.mem.Allocator,
@@ -405,12 +352,24 @@ pub fn buildChunkMeshCPU(
     return result;
 }
 
-/// 在主线程调用：释放旧网格，acquire 材质，写入新顶点/索引到 ChunkMeshCache，上传 GPU。
+/// 在主线程调用：释放旧网格，acquire 材质，写入新顶点/索引到 Chunk 的 meshes HashMap，上传 GPU。
 pub fn applyMeshResult(
-    cache: *ChunkMeshCache,
+    meshes: *std.AutoHashMap(MaterialIdx, ChunkMesh),
+    allocator: std.mem.Allocator,
+    gctx: *Gctx,
+    global_registry: *MaterialRegistry,
     result: *MeshBuildResult,
 ) !void {
-    cache.clear();
+    // 释放旧网格
+    {
+        var it = meshes.iterator();
+        while (it.next()) |entry| {
+            const mat_idx = entry.key_ptr.*;
+            entry.value_ptr.deinit(allocator);
+            global_registry.releaseById(mat_idx);
+        }
+        meshes.clearRetainingCapacity();
+    }
 
     for (0..MAX_MATERIALS) |mat_idx_usize| {
         const mat_idx: MaterialIdx = @intCast(mat_idx_usize);
@@ -418,12 +377,24 @@ pub fn applyMeshResult(
         if (verts.len == 0) continue;
 
         const mat_key = MaterialKey.fromId(mat_idx);
-        _ = try cache.global_registry.acquire(mat_key);
+        _ = try global_registry.acquire(mat_key);
 
-        const mesh = try cache.getMesh(mat_idx);
-        try mesh.cpu_vertices.appendSlice(cache.allocator, verts);
-        try mesh.cpu_indices.appendSlice(cache.allocator, result.indices[mat_idx_usize].items);
+        const mesh_entry = try meshes.getOrPut(mat_idx);
+        if (!mesh_entry.found_existing) {
+            mesh_entry.value_ptr.* = try ChunkMesh.init(gctx);
+        }
+        try mesh_entry.value_ptr.cpu_vertices.appendSlice(allocator, verts);
+        try mesh_entry.value_ptr.cpu_indices.appendSlice(allocator, result.indices[mat_idx_usize].items);
     }
 
-    try cache.uploadAll();
+    // 上传所有非空材质网格到 GPU，上传后清空 CPU 暂存
+    {
+        var it = meshes.valueIterator();
+        while (it.next()) |mesh| {
+            if (mesh.cpu_vertices.items.len > 0) {
+                try mesh.uploadMeshData(gctx);
+                mesh.clearCpuData(allocator);
+            }
+        }
+    }
 }

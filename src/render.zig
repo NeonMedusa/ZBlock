@@ -64,7 +64,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
             const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 256, @as(f32, @floatFromInt(origin.z + 16)));
             if (!shadow_frustum.intersectsAABB(min, max)) continue;
-            var s_mesh_it = loaded.mesh_cache.meshes.iterator();
+            var s_mesh_it = loaded.meshes.iterator();
             while (s_mesh_it.next()) |mesh_entry| {
                 const mesh = mesh_entry.value_ptr;
                 if (mesh.vertex_count == 0) continue;
@@ -251,7 +251,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
             const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 256, @as(f32, @floatFromInt(origin.z + 16)));
             if (!frustum.intersectsAABB(min, max)) continue; // 视锥体裁剪
-            var mesh_it = loaded.mesh_cache.meshes.iterator();
+            var mesh_it = loaded.meshes.iterator();
             while (mesh_it.next()) |mesh_entry| {
                 const mat_idx = mesh_entry.key_ptr.*;
                 const mesh = mesh_entry.value_ptr;
