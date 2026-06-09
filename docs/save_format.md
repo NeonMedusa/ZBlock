@@ -108,104 +108,68 @@ CREATE TABLE "Chunks" (
 ```
 
 - `x`, `z`: chunk 坐标（一个 chunk = 16×256×16 方块）
-- `palette`: JSON 字符串数组，列出该 chunk 中出现的所有方块类型名称
-- `data`: bit-packed 二进制块，存储 65536 个方块的调色板索引 + 朝向值
+- `palette`: JSON 字符串数组，列出该 chunk 中出现的所有方块类型名称（含朝向后缀）
+- `data`: bit-packed 二进制块，存储 65536 个方块的调色板索引
 
 ### 每个 chunk 一个 palette（per-chunk palette）
 
-每个 chunk 保存时全量重建自己的 palette。只包含当前 chunk 出现的方块类型：
+每个 chunk 保存时全量重建自己的 palette。只包含当前 chunk 出现的 `BlockState`（方块种类 + 朝向的组合）：
 
 ```json
-["air", "grass", "stone", "dirt", "water"]
+["air", "water", "grass_0", "sand", "stone", "dirt", "snow"]
 ```
 
-- palette 行数 = 当前 chunk 的独特方块数量（地表 ~5-15 种，地下 ~3-8 种）
+- 每项格式 `blockName_facingInt`，如 `"stone_5"` 表示 stone 的第 5 个朝向
+- palette 行数 ≤ 方块数 × 6 朝向（当前最多 8 × 6 = 48 种）
 - palette 是**自描述的**：加载时不依赖游戏版本的 `block_infos` 定义
 
 ### 自动清理幽灵条目
 
 因为每次 `saveChunk` 都是**全量重建 + `INSERT OR REPLACE`**：
 
-1. 扫描当前 65536 个方块，收集 unique 的 block_id
-2. 构建 palette（只含当前存在的方块类型）
+1. 将 chunk 的运行时 palette 序列化为 JSON（无需遍历 65536 个方块）
+2. 将运行时 `index_data` 直接复制为 data BLOB
 3. 写入 DB 替换旧数据
 
 如果某个方块类型在游戏更新中被删除，下次保存该 chunk 时 palette 中自然不再包含它。**不需要额外的压缩工具或引用计数。**
 
 ### Data BLOB 格式
 
-`data` 是一个连续的比特流，每方块存储 `[palette_index | facing]` 的紧凑位序列：
+`data` 是一个连续的比特流，每方块存储 `palette_index`（不单独存储朝向——朝向已编码到 palette 的 facing 后缀中）：
 
 ```
-每个方块占用 bits = bits_per_index + 4
+每个方块占用 bits = bits_per_index
 
 bits_per_index = ceil(log2(palette_size))
                  palette_size=1 时特判为 1
-
-facing = 4 bits（0-5，对应 Direction 枚举的 6 个朝向）
 ```
 
 排列方式：按 `[x][y][z]` 顺序逐块排列，总共 65536 组，无分隔符。
 
 | palette_size | bits_per_index | 每方块总位 | 每 chunk data 体积 |
 |-------------|----------------|-----------|-------------------|
-| 1           | 1              | 5         | ~40KB             |
-| 2-3         | 2              | 6         | ~48KB             |
-| 4-7         | 3              | 7         | ~56KB             |
-| 8-15        | 4              | 8         | **64KB**          |
-| 16-31       | 5              | 9         | ~72KB             |
+| 1           | 1              | 1         | ~8KB              |
+| 2-3         | 2              | 2         | ~16KB             |
+| 4-7         | 3              | 3         | ~24KB             |
+| 8-15        | 4              | 4         | **32KB**          |
+| 16-31       | 5              | 5         | ~40KB             |
 
-相比旧方案固定 256KB/chunk，体积缩小约 4-6 倍。
-
-### 比特流编码细节
-
-使用 `BitWriter` / `BitReader` 工具：
-
-```zig
-const BitWriter = struct {
-    buf: []u8,
-    byte_pos: usize,
-    bit_pos: u4,     // 当前 byte 中下一个可写入的 bit 位置
-
-    fn write(self, value: u32, bits: u32) void;
-    fn finish(self) usize;  // 返回实际占用字节数
-};
-
-const BitReader = struct {
-    buf: []const u8,
-    byte_pos: usize,
-    bit_pos: u4,
-
-    fn read(self, bits: u32) u32;
-};
-```
-
-实现要点：
-
-- 跨字节边界写入：当 `bit_pos + bits > 8` 时，拆分到相邻字节
-- 不设字节序——按位逐字节处理，无歧义
-- `finish` 返回向上取整的字节数（最后不足一字节也计为一字节）
+相比旧方案固定 256KB/chunk，体积缩小约 6-32 倍。
 
 ### 保存流程（saveChunk）
 
 ```
-1. 扫描 65536 个方块
-   → AutoHashMap<block_id, palette_index>（去重 + 分配索引）
+1. 将 chunk.palette 序列化为 JSON 名称数组
+   → 遍历 5-48 条记录，每条格式 "blockName_facingInt"
+   → JSON 序列化：["air","grass_0","stone_0","dirt_0",...]
 
-2. 构建 palette 名称数组
-   → 用 block_infos[block_id].name 收集
-   → JSON 序列化：["air","grass","stone",...]
+2. 计算 bits_per_index = ceil(log2(palette_size))
 
-3. 计算 bits_per_index = ceil(log2(palette_size))
+3. 将 index_data 的前 N 字节直接写入 data BLOB
+   → 大小 = (65536 * bits_per_index + 7) / 8
+   → 0 次 BitWriter
 
-4. 分配 data 缓冲区
-   → 大小 = (65536 * (bits_per_index + 4) + 7) / 8
-
-5. BitWriter 逐块写入：
-   → write(palette_index, bits_per_index)
-   → write(facing_enum, 4)
-
-6. INSERT OR REPLACE INTO Chunks (x, z, palette, data)
+4. INSERT OR REPLACE INTO Chunks (x, z, palette, data)
 ```
 
 ### 加载流程（loadChunk）
@@ -213,25 +177,26 @@ const BitReader = struct {
 ```
 1. SELECT palette, data FROM Chunks
 
-2. 解析 palette JSON → 字符串数组
+2. 解析 palette JSON → 名称字符串数组
+   对于每个名称，解析 "blockName_facingInt"：
+   → 找到最后一个 '_'：左侧为 block_name，右侧为 facing 数字
+   → 无 '_' 时自动降级为 facing=0（兼容旧格式）
 
-3. 分配 runtime_ids[palette_size]
-   → for each name: runtime_ids[i] = blockNameToId(name)
-   → 找不到的名称对应 ID=0（air）
+3. 从名称直接构建运行时 palette（含 facing）
+   → runtime_palette[i] = BlockState{ block_id, facing }
+   → 0 次 BitReader 解包
 
-4. 计算 bits_per_index = ceil(log2(palette_size))
-
-5. BitReader 逐块解包：
-   → pal_idx  = read(bits_per_index)
-   → facing   = read(4)
-   → blocks[i] = BlockState{ block_id = runtime_ids[pal_idx], facing }
+4. 计算 bits_per_index，分配 index_data
+   → 将 data BLOB 直接 @memcpy 到 index_data
+   → 0 次 BitReader，0 次 writeBits
 ```
 
 ### 版本兼容
 
-- palette 是自描述的字符串数组，不依赖游戏版本的 `block_infos`
-- 加载时 `BlockId.fromNameRuntime(name)` 返回 `null` → 自动作为空气处理
-- 新版本增加方块 → 旧存档正常读取（区块中不会出现该方块名字，除非被新版本编辑过）
+- palette 是自描述的字符串数组，不依赖游戏版本的 `block_infos` 定义
+- 旧格式 palette（无 facing 后缀的纯名称列表）仍可正常加载：缺失 `_` 时默认 facing = 0（up）
+- 加载时 `registries.block_name_to_id.get(name)` 返回 `null` → 自动作为空气处理
+- 新版本增加方块 → 旧存档正常读取
 - 新版本删除方块 → 旧存档中该方块加载时变为空气，下次保存时从 palette 中自动消失
 
 **不需要版本号、不需要迁移工具、不需要外部映射文件。**
