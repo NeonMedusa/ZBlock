@@ -978,6 +978,7 @@ fn updateChunks(self: *Game) !void {
         const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_WIDTH_I32);
 
         const load_range: i32 = self.chunk_radius;
+        const t_load_start = std.time.nanoTimestamp();
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;
@@ -989,6 +990,8 @@ fn updateChunks(self: *Game) !void {
                 ));
             }
         }
+        const t_unload_start = std.time.nanoTimestamp();
+        const load_us = @as(u64, @intCast(@max(@as(i64, 0), t_unload_start - t_load_start))) / 1000;
 
         // 卸载远处区块
         var to_unload = std.ArrayListUnmanaged(Vec3i){};
@@ -1002,13 +1005,17 @@ fn updateChunks(self: *Game) !void {
                 to_unload.append(self.allocator, key.*) catch continue;
             }
         }
+        const t_unload_loop_start = std.time.nanoTimestamp();
+        const scan_us = @as(u64, @intCast(@max(@as(i64, 0), t_unload_loop_start - t_unload_start))) / 1000;
         for (to_unload.items) |key| {
             self.block_world.unloadChunk(key);
         }
+        const t_end = std.time.nanoTimestamp();
+        const unload_us = @as(u64, @intCast(@max(@as(i64, 0), t_end - t_unload_loop_start))) / 1000;
+        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), t_end - start_ns))) / 1000;
+        if (elapsed_us > 100000) std.debug.print("[TIMER] updateChunks: total={d}us load={d}us scan={d}us unload={d}us\n", .{ elapsed_us, load_us, scan_us, unload_us });
         break;
     }
-    const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
-    if (elapsed_us > 100000) std.debug.print("[TIMER] updateChunks: {d}us\n", .{elapsed_us});
 }
 
 const Game = @This();

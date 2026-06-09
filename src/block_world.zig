@@ -506,6 +506,15 @@ pub const BlockWorld = struct {
         try self.pending.put(origin, {});
     }
 
+    /// 批量入队 mesh 构建请求（一次锁操作，减少锁争抢）
+    fn enqueueMeshBuildBatch(self: *BlockWorld, origins: []const Vec3i) !void {
+        self.mesh_mutex.lock();
+        defer self.mesh_mutex.unlock();
+        for (origins) |origin| {
+            try self.pending.put(origin, {});
+        }
+    }
+
     /// 待构建 mesh 的 chunk 数量
     pub fn pendingCount(self: *BlockWorld) usize {
         self.mesh_mutex.lock();
@@ -587,6 +596,11 @@ pub const BlockWorld = struct {
     pub fn processCompletedLoads(self: *BlockWorld) !void {
         self.completed_loads_mutex.lock();
         defer self.completed_loads_mutex.unlock();
+
+        // 先收集所有需要 mesh 构建的 origin，批量入队（一次锁操作）
+        var batch_origins = std.ArrayListUnmanaged(Vec3i){};
+        defer batch_origins.deinit(self.allocator);
+
         for (self.completed_loads.items) |*result| {
             _ = self.io_active_loads.remove(result.origin);
             var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
@@ -600,7 +614,7 @@ pub const BlockWorld = struct {
                     .dirty = false,
                 });
             }
-            try self.enqueueMeshBuild(result.origin);
+            try batch_origins.append(self.allocator, result.origin);
             // 也触发邻居 mesh 重建
             for (NEIGHBOR_OFFSETS[1..]) |noff| {
                 const nb_origin = Vec3i.new(
@@ -609,10 +623,15 @@ pub const BlockWorld = struct {
                     result.origin.z + noff.z * CHUNK_WIDTH_I32,
                 );
                 if (self.chunks.contains(nb_origin)) {
-                    try self.enqueueMeshBuild(nb_origin);
+                    try batch_origins.append(self.allocator, nb_origin);
                 }
             }
         }
+
+        if (batch_origins.items.len > 0) {
+            try self.enqueueMeshBuildBatch(batch_origins.items);
+        }
+
         self.completed_loads.clearRetainingCapacity();
     }
 
@@ -646,15 +665,10 @@ pub const BlockWorld = struct {
 
     pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
         const start_ns = std.time.nanoTimestamp();
-        // 先检查 pending 队列（用 mesh_mutex）
-        {
-            self.mesh_mutex.lock();
-            defer self.mesh_mutex.unlock();
-            if (self.pending.contains(origin)) return;
-        }
 
         self.chunk_mutex.lock();
         defer self.chunk_mutex.unlock();
+        const c_mutex_ns = std.time.nanoTimestamp();
 
         if (self.chunks.getPtr(origin)) |loaded| {
             if (loaded.build_lock.load(.acquire)) return;
@@ -670,10 +684,14 @@ pub const BlockWorld = struct {
                 }
             }
 
+            const t1_ns = std.time.nanoTimestamp();
+
             // 脏数据入队异步保存（不阻塞主线程）
             if (loaded.dirty) {
                 self.enqueueSaveTask(origin, loaded.chunk) catch {};
             }
+
+            const t2_ns = std.time.nanoTimestamp();
 
             // 释放所有 mesh
             {
@@ -684,13 +702,31 @@ pub const BlockWorld = struct {
                 }
             }
             loaded.meshes.deinit();
+
+            const t3_ns = std.time.nanoTimestamp();
+
             loaded.chunk.deinit();
             self.allocator.destroy(loaded.chunk);
             _ = self.chunks.remove(origin);
+
+            const t4_ns = std.time.nanoTimestamp();
+
+            self.material_registry.cleanupUnused();
+
+            const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+            if (elapsed_us > 100000) {
+                const cmtx_us = @as(u64, @intCast(@max(@as(i64, 0), c_mutex_ns - start_ns))) / 1000;
+                const lookup_us = @as(u64, @intCast(@max(@as(i64, 0), t1_ns - c_mutex_ns))) / 1000;
+                const save_us = @as(u64, @intCast(@max(@as(i64, 0), t2_ns - t1_ns))) / 1000;
+                const mesh_us = @as(u64, @intCast(@max(@as(i64, 0), t3_ns - t2_ns))) / 1000;
+                const chunk_us = @as(u64, @intCast(@max(@as(i64, 0), t4_ns - t3_ns))) / 1000;
+                const reg_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - t4_ns))) / 1000;
+                std.debug.print("[TIMER] unloadChunk({d},{d}): total={d}us cmtx={d}us look={d}us save={d}us mesh={d}us chunk={d}us reg={d}us\n", .{ origin.x, origin.z, elapsed_us, cmtx_us, lookup_us, save_us, mesh_us, chunk_us, reg_us });
+            }
+        } else {
+            // chunk 不存在，只执行 cleanupUnused
+            self.material_registry.cleanupUnused();
         }
-        self.material_registry.cleanupUnused();
-        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
-        if (elapsed_us > 100000) std.debug.print("[TIMER] unloadChunk({d},{d}): {d}us\n", .{ origin.x, origin.z, elapsed_us });
     }
 
     pub fn setBlock(self: *BlockWorld, world_pos: Vec3i, block_state: BlockState) !void {

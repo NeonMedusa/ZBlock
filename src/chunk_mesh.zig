@@ -306,6 +306,9 @@ pub fn buildChunkMeshCPU(
                                 continue;
                             }
                         }
+                    } else if (ny < 0) {
+                        // 世界最底层 Y=-1 始终为实心（兜底方块/虚空屏障），朝向下的面不渲染
+                        continue;
                     }
 
                     const neighbor_proto = neighbor.prototype();

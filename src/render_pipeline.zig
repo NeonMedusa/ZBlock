@@ -186,7 +186,11 @@ fn createPipelineGctx(gctx: *Gctx, layout: Wgpu.WGPUPipelineLayout, module: Wgpu
             .module = module,
             .entryPoint = .{ .data = entry.ptr, .length = @as(u32, @intCast(entry.len)) },
         },
-        .primitive = .{ .topology = Wgpu.WGPUPrimitiveTopology_TriangleList, .frontFace = Wgpu.WGPUFrontFace_CCW, .cullMode = Wgpu.WGPUCullMode_Back },
+        .primitive = .{
+            .topology = Wgpu.WGPUPrimitiveTopology_TriangleList,
+            .frontFace = Wgpu.WGPUFrontFace_CCW,
+            .cullMode = Wgpu.WGPUCullMode_Back,
+        },
         .fragment = &Wgpu.WGPUFragmentState{
             .module = module,
             .entryPoint = .{ .data = "fs_main", .length = 7 },

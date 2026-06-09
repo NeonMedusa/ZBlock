@@ -173,9 +173,17 @@ render(alpha = accumulator / TICK_DT)  ← 插值渲染
 
 | 位置 | 计时点 | 典型耗时 |
 |------|--------|---------|
-| `game.zig` | `updateChunks` | 通常 <16ms |
+| `game.zig` | `updateChunks` | 加载/卸载循环，含锁等待 |
 | `block_world.zig` | `processCompletedBuilds` | 通常 <5ms |
 | `block_world.zig` | `enqueueSaveTask` | 调色板序列化，通常 <1ms |
-| `block_world.zig` | `unloadChunk` | **100ms-2.5s**（GPU wgpuBufferRelease 同步） |
+| `block_world.zig` | `unloadChunk` | 修复后无 >100ms 输出 |
 
-`unloadChunk` 的高耗时是 wgpu-native 驱动架构限制：`wgpuBufferRelease` 会强制 drain GPU 队列，无法在应用层消除。调试时保留计时器可区分 GPU 同步与 CPU 逻辑的卡顿来源。
+### 卡顿修复历史
+
+`unloadChunk` 曾经在加载完全部区块后移动时触发 100ms-2.5s 的大卡顿。
+
+**根因：** 主线程 `unloadChunk` 和 mesh worker 争抢 `mesh_mutex`。`unloadChunk` 中通过 `pending.contains(origin)` 检查 chunk 是否在 mesh 构建队列中，这需要持 `mesh_mutex`。与此同时，`processCompletedLoads` 每处理一个 IO 加载结果就要调 5 次 `enqueueMeshBuild`（自身+4邻居），每次都要抢 `mesh_mutex`。当主线程遍历卸载几十个 chunk 时，不断与 worker 线程锁争抢，每次切换都延迟上百毫秒。
+
+**修复：**
+1. 移除 `unloadChunk` 中的 `pending.contains` 检查（改用 `build_lock` + `chunk_mutex` 保证安全），不再碰 `mesh_mutex`
+2. `processCompletedLoads` 将每帧几十次的逐个 `enqueueMeshBuild` 改为一次 `enqueueMeshBuildBatch` 批量入队，减少锁操作次数
