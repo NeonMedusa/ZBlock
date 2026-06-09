@@ -15,16 +15,111 @@ const AABB = @import("aabb.zig").AABB;
 const Direction = @import("direction.zig").Direction;
 const BlockId = @import("block_registry.zig").BlockId;
 const BlockState = @import("block_registry.zig").BlockState;
+const MAX_BLOCKS = @import("block_registry.zig").MAX_BLOCKS;
 const Pathfind = @import("pathfind.zig");
+const bitstream = @import("bitstream.zig");
+const readBits = bitstream.readBits;
+const writeBits = bitstream.writeBits;
 
 pub const CHUNK_WIDTH: u32 = 16;
 pub const CHUNK_HEIGHT: u32 = 256;
 pub const CHUNK_WIDTH_I32: i32 = CHUNK_WIDTH;
+const CHUNK_BLOCKS: u32 = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH;
 
 pub const Chunk = struct {
-    blocks: [CHUNK_WIDTH][CHUNK_HEIGHT][CHUNK_WIDTH]BlockState,
+    allocator: std.mem.Allocator,
+    palette: std.ArrayListUnmanaged(BlockState),
+    index_bits: u5,
+    index_data: []u8,
+
+    const Self = @This();
+
+    pub fn init(allocator: std.mem.Allocator) Self {
+        const buf_size = (CHUNK_BLOCKS + 7) / 8; // 1-bit 最小大小
+        return Self{
+            .allocator = allocator,
+            .palette = .{},
+            .index_bits = 1,
+            .index_data = allocator.alloc(u8, buf_size) catch unreachable,
+        };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.palette.deinit(self.allocator);
+        self.allocator.free(self.index_data);
+    }
+
+    fn bitOffset(self: *const Self, x: u32, y: u32, z: u32) usize {
+        // 匹配原始 blocks[x][y][z] 布局: z 变化最快, 然后 y, x 最慢
+        const index = z + CHUNK_WIDTH * (y + CHUNK_HEIGHT * x);
+        return index * self.index_bits;
+    }
+
+    pub fn getBlock(self: *const Self, x: u32, y: u32, z: u32) BlockState {
+        const offset = self.bitOffset(x, y, z);
+        const idx = readBits(self.index_data, offset, self.index_bits);
+        return self.palette.items[idx];
+    }
+
+    pub fn getBlockId(self: *const Self, x: u32, y: u32, z: u32) BlockId {
+        return self.getBlock(x, y, z).block_id;
+    }
+
+    pub fn setBlock(self: *Self, x: u32, y: u32, z: u32, bs: BlockState) void {
+        // 在 palette 中查找
+        for (self.palette.items, 0..) |existing, i| {
+            if (existing.block_id == bs.block_id and existing.facing == bs.facing) {
+                const offset = self.bitOffset(x, y, z);
+                writeBits(self.index_data, offset, @intCast(i), self.index_bits);
+                return;
+            }
+        }
+        // 未找到 → 追加到 palette
+        const new_idx = self.palette.items.len;
+        const needed_bits = if (new_idx <= 1) @as(u5, 1) else @as(u5, @intCast(std.math.log2_int(usize, new_idx) + 1));
+        if (needed_bits > self.index_bits) {
+            self.growIndexBits(needed_bits);
+        }
+        self.palette.append(self.allocator, bs) catch unreachable;
+        const offset = self.bitOffset(x, y, z);
+        writeBits(self.index_data, offset, @intCast(new_idx), self.index_bits);
+    }
+
+    fn growIndexBits(self: *Self, new_bits: u5) void {
+        const old_bits = self.index_bits;
+        const new_size = (CHUNK_BLOCKS * new_bits + 7) / 8;
+        const new_data = self.allocator.alloc(u8, new_size) catch unreachable;
+        @memset(new_data, 0);
+
+        for (0..CHUNK_WIDTH) |x| {
+            for (0..CHUNK_WIDTH) |z| {
+                for (0..CHUNK_HEIGHT) |y| {
+                    const idx = x + CHUNK_WIDTH * (z + CHUNK_WIDTH * y);
+                    const old_offset = idx * old_bits;
+                    const val = readBits(self.index_data, old_offset, old_bits);
+                    const new_offset = idx * new_bits;
+                    writeBits(new_data, new_offset, val, new_bits);
+                }
+            }
+        }
+
+        self.allocator.free(self.index_data);
+        self.index_data = new_data;
+        self.index_bits = new_bits;
+    }
 
     pub fn generate(world_origin: Vec3i, out_chunk: *Chunk) void {
+        // 第一阶段：用固定大小数组做 lookup（block_infos 编译期已知，≤ 256 种）
+        var temp_pal = std.ArrayListUnmanaged(BlockState){};
+        defer temp_pal.deinit(out_chunk.allocator);
+
+        // idx_lookup[block_id_int] = palette_index，初始为 null
+        var idx_lookup: [MAX_BLOCKS]?u32 = [_]?u32{null} ** MAX_BLOCKS;
+
+        var temp_indices = std.ArrayListUnmanaged(u32){};
+        defer temp_indices.deinit(out_chunk.allocator);
+        temp_indices.ensureTotalCapacity(out_chunk.allocator, CHUNK_BLOCKS) catch unreachable;
+
         // === 噪声生成 ===
         const base_noise_scale: f32 = 0.005; // 地形特征尺度：越小→大陆越大/越平缓，越大→丘陵越碎
         const octaves: u32 = 6; // 噪声层数：越多→细节越丰富（性能↓），越少→越光滑
@@ -67,7 +162,6 @@ pub const Chunk = struct {
                     break :blk base_height_f + threshold * plain_scale + (@exp2(slope * mountain_factor) - 1.0) * mountain_scale;
                 }));
 
-                // 垂直群落边界弯曲，使雪线/裸岩线自然凹凸
                 const biome_noise = Noise.perlin2d(
                     @as(f32, @floatFromInt(world_x)) * biome_noise_scale,
                     @as(f32, @floatFromInt(world_z)) * biome_noise_scale,
@@ -92,7 +186,42 @@ pub const Chunk = struct {
                             break :blk .fromName("dirt");
                         }
                     };
-                    out_chunk.blocks[x][y][z] = BlockState.init(block_id);
+                    const bs = BlockState.init(block_id);
+                    const id_int = @intFromEnum(bs.block_id);
+                    const pal_idx = if (idx_lookup[id_int]) |idx| idx else blk: {
+                        const new_idx = @as(u32, @intCast(temp_pal.items.len));
+                        idx_lookup[id_int] = new_idx;
+                        temp_pal.append(out_chunk.allocator, bs) catch unreachable;
+                        break :blk new_idx;
+                    };
+                    temp_indices.appendAssumeCapacity(pal_idx);
+                }
+            }
+        }
+
+        // 第二阶段：一次性构建 palette + index_data
+        const palette_count = temp_pal.items.len;
+        out_chunk.index_bits = if (palette_count <= 1) 1 else @as(u5, @intCast(std.math.log2_int(usize, palette_count - 1) + 1));
+
+        out_chunk.palette.deinit(out_chunk.allocator);
+        out_chunk.palette = temp_pal;
+        // 阻止 defer 释放——所有权已转给 out_chunk.palette
+        temp_pal = .{};
+
+        const buf_size = (CHUNK_BLOCKS * out_chunk.index_bits + 7) / 8;
+        out_chunk.allocator.free(out_chunk.index_data);
+        out_chunk.index_data = out_chunk.allocator.alloc(u8, buf_size) catch unreachable;
+        @memset(out_chunk.index_data, 0);
+
+        // 用 temp_indices 填充 index_data，按正确的 (x,y,z) 偏移
+        // temp_indices 按 (x,z,y) 顺序存储，bitOffset 需按 (x,y,z) 重映射
+        for (0..CHUNK_WIDTH) |x| {
+            for (0..CHUNK_HEIGHT) |y| {
+                for (0..CHUNK_WIDTH) |z| {
+                    const noise_order_i = x * (CHUNK_WIDTH * CHUNK_HEIGHT) + z * CHUNK_HEIGHT + y;
+                    const idx = temp_indices.items[noise_order_i];
+                    const offset = (z + CHUNK_WIDTH * (y + CHUNK_HEIGHT * x)) * out_chunk.index_bits;
+                    writeBits(out_chunk.index_data, offset, idx, out_chunk.index_bits);
                 }
             }
         }
@@ -266,6 +395,7 @@ pub const BlockWorld = struct {
                     }
                 }
                 loaded.meshes.deinit();
+                loaded.chunk.deinit();
                 self.allocator.destroy(loaded.chunk);
             }
             self.chunks.clearAndFree();
@@ -327,6 +457,8 @@ pub const BlockWorld = struct {
         if (self.chunks.contains(origin)) return;
         const chunk = try self.allocator.create(Chunk);
         errdefer self.allocator.destroy(chunk);
+        chunk.* = Chunk.init(self.allocator);
+        errdefer chunk.deinit();
 
         if (chunk_io) |io| {
             if (!io.loadFn(io.ctx, origin, chunk)) {
@@ -340,6 +472,7 @@ pub const BlockWorld = struct {
         try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
         errdefer {
             meshes.deinit();
+            chunk.deinit();
             self.allocator.destroy(chunk);
         }
         // chunks 写独占锁；然后 pending 写入 mesh_mutex
@@ -408,6 +541,7 @@ pub const BlockWorld = struct {
                 }
             }
             loaded.meshes.deinit();
+            loaded.chunk.deinit();
             self.allocator.destroy(loaded.chunk);
             _ = self.chunks.remove(origin);
         }
@@ -420,7 +554,7 @@ pub const BlockWorld = struct {
             const lx: u32 = @intCast(world_pos.x - origin.x);
             const ly: u32 = @intCast(world_pos.y - origin.y);
             const lz: u32 = @intCast(world_pos.z - origin.z);
-            loaded.chunk.blocks[lx][ly][lz] = BlockState.init(block_id);
+            loaded.chunk.setBlock(lx, ly, lz, BlockState.init(block_id));
             loaded.dirty = true;
             try self.enqueueMeshBuild(origin);
 
@@ -1066,7 +1200,7 @@ pub const BlockWorld = struct {
             local_y >= 0 and local_y < CHUNK_HEIGHT and
             local_z >= 0 and local_z < CHUNK_WIDTH)
         {
-            return chunk.blocks[@intCast(local_x)][@intCast(local_y)][@intCast(local_z)].block_id;
+            return chunk.getBlockId(@intCast(local_x), @intCast(local_y), @intCast(local_z));
         }
         return .fromName("air");
     }

@@ -261,7 +261,7 @@ pub fn buildChunkMeshCPU(
     for (0..CHUNK_WIDTH) |x| {
         for (0..CHUNK_WIDTH) |z| {
             for (0..CHUNK_HEIGHT) |y| {
-                const block_state = chunk.blocks[x][y][z];
+                const block_state = chunk.getBlock(@intCast(x), @intCast(y), @intCast(z));
                 const block_id = block_state.block_id;
                 if (block_id == BlockId.fromName("air")) continue;
                 const proto = block_id.prototype();
@@ -282,7 +282,7 @@ pub fn buildChunkMeshCPU(
                         if (nx >= 0 and nx < CHUNK_WIDTH and
                             nz >= 0 and nz < CHUNK_WIDTH)
                         {
-                            neighbor = chunk.blocks[@intCast(nx)][@intCast(ny)][@intCast(nz)].block_id;
+                            neighbor = chunk.getBlockId(@intCast(nx), @intCast(ny), @intCast(nz));
                         } else {
                             const nb_chunk: ?*const Chunk = switch (world_dir) {
                                 .west => nb_west,
@@ -300,7 +300,7 @@ pub fn buildChunkMeshCPU(
                                 if (local_nx >= 0 and local_nx < CHUNK_WIDTH and
                                     local_nz >= 0 and local_nz < CHUNK_WIDTH)
                                 {
-                                    neighbor = nb.blocks[@intCast(local_nx)][@intCast(ny)][@intCast(local_nz)].block_id;
+                                    neighbor = nb.getBlockId(@intCast(local_nx), @intCast(ny), @intCast(local_nz));
                                 }
                             } else {
                                 continue;

@@ -21,10 +21,13 @@ pub const REGION_SIZE: i32 = 32; // 每个 region 包含 32×32 区块
 const CHUNK_WIDTH: u32 = BW.CHUNK_WIDTH;
 const CHUNK_HEIGHT: u32 = BW.CHUNK_HEIGHT;
 const CHUNK_BLOCKS: usize = CHUNK_WIDTH * CHUNK_WIDTH * CHUNK_HEIGHT;
+const MAX_BLOCK_STATES = BlockRegistry.MAX_BLOCKS * 6; // 方块数 × 6 朝向
 
 const bitstream = @import("bitstream.zig");
 const BitWriter = bitstream.BitWriter;
 const BitReader = bitstream.BitReader;
+const readBits = bitstream.readBits;
+const writeBits = bitstream.writeBits;
 
 /// 按区块坐标计算所在的 region 坐标
 fn chunkToRegion(cx: i32, cz: i32) struct { i32, i32 } {
@@ -328,23 +331,25 @@ pub const SaveManager = struct {
         const rx, const rz = chunkToRegion(cx, cz);
         var db = try self.getOrOpenRegion(rx, rz);
 
-        // 1. 扫描 65536 个方块，构建 block_id → palette_index 映射
-        var palette_map = std.AutoHashMap(u32, u32).init(self.allocator);
-        defer palette_map.deinit();
-        for (chunk.blocks) |plane|
-            for (plane) |col|
-                for (col) |bs|
-                    if (!palette_map.contains(@intFromEnum(bs.block_id)))
-                        try palette_map.put(@intFromEnum(bs.block_id), @intCast(palette_map.count()));
+        // 1. 从运行时 palette 构建存档 block_id 映射（仅 5-15 项，无需遍历 65536 方块）
+        var archive_lookup: [BlockRegistry.MAX_BLOCKS]?u32 = [_]?u32{null} ** BlockRegistry.MAX_BLOCKS;
+        var archive_count: u32 = 0;
+        for (chunk.palette.items) |bs| {
+            const bid = @intFromEnum(bs.block_id);
+            if (archive_lookup[bid] == null) {
+                archive_lookup[bid] = archive_count;
+                archive_count += 1;
+            }
+        }
 
-        const palette_count = palette_map.count();
+        const palette_count = archive_count;
 
-        // 2. 收集 palette 名字列表（临时数组按索引写入）
+        // 2. 收集 palette 名字列表（从固定数组按索引写入）
         var name_ptrs = try self.allocator.alloc([]const u8, palette_count);
         defer self.allocator.free(name_ptrs);
-        var iter = palette_map.iterator();
-        while (iter.next()) |entry|
-            name_ptrs[entry.value_ptr.*] = BlockRegistry.block_infos[entry.key_ptr.*].name;
+        for (archive_lookup, 0..) |opt_idx, bid| {
+            if (opt_idx) |idx| name_ptrs[idx] = BlockRegistry.block_infos[bid].name;
+        }
 
         // 序列化 palette: JSON 字符串数组
         var json_parts = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, 256);
@@ -365,17 +370,20 @@ pub const SaveManager = struct {
         const total_bits = CHUNK_BLOCKS * (bpi + 4);
         const buf_size = (total_bits + 7) / 8;
 
-        // 4. Bit-pack data
+        // 4. Bit-pack data（直接从 index_data 读运行时索引，避免 getBlock 的位偏移重算）
         var buf = try self.allocator.alloc(u8, buf_size);
         defer self.allocator.free(buf);
         @memset(buf, 0);
         var w = BitWriter{ .buf = buf };
-        for (chunk.blocks) |plane|
-            for (plane) |col|
-                for (col) |bs| {
-                    w.write(palette_map.get(@intFromEnum(bs.block_id)).?, bpi);
-                    w.write(@intFromEnum(bs.facing), 4);
-                };
+        const bits = chunk.index_bits;
+        const data = chunk.index_data;
+        const pal = chunk.palette.items;
+        for (0..CHUNK_BLOCKS) |flat_i| {
+            const runtime_idx = readBits(data, flat_i * bits, bits);
+            const bs = pal[runtime_idx];
+            w.write(archive_lookup[@intFromEnum(bs.block_id)].?, bpi);
+            w.write(@intFromEnum(bs.facing), 4);
+        }
         const actual = w.finish();
 
         // 5. 写入 DB
@@ -423,21 +431,62 @@ pub const SaveManager = struct {
             runtime_ids[i] = registries.block_name_to_id.get(name) orelse 0;
         }
 
-        // 2. 计算 bits_per_index
-        const bpi = if (palette_size <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, palette_size - 1) + 1));
+        // 2. 计算存档比特位宽
+        const save_bpi = if (palette_size <= 1) 1 else @as(u32, @intCast(std.math.log2_int(usize, palette_size - 1) + 1));
 
-        // 3. 解包 data
+        // 3. 第一遍解包 data：构建含 facing 的运行时 palette（不存储索引，
+        //    idx_buf 由第二遍替换）
         const col1 = try stmt.column(1);
         var r = BitReader{ .buf = col1.blob };
-        for (&chunk.blocks) |*plane|
-            for (plane) |*col|
-                for (col) |*bs| {
-                    const pal_idx = r.read(bpi);
-                    const facing_val = r.read(4);
-                    const id = if (pal_idx < palette_size) runtime_ids[pal_idx] else 0;
-                    bs.* = BlockState.init(BlockId.fromInt(id));
-                    bs.facing = @enumFromInt(facing_val);
-                };
+
+        var runtime_lookup: [MAX_BLOCK_STATES]?u32 = [_]?u32{null} ** MAX_BLOCK_STATES;
+        var final_palette = std.ArrayListUnmanaged(BlockState){};
+        defer final_palette.deinit(self.allocator);
+
+        {
+            var i: usize = 0;
+            while (i < CHUNK_BLOCKS) : (i += 1) {
+                const pal_idx = r.read(save_bpi);
+                const facing_val = r.read(4);
+                const id = if (pal_idx < palette_size) runtime_ids[pal_idx] else 0;
+                var bs = BlockState.init(BlockId.fromInt(id));
+                bs.facing = @enumFromInt(facing_val);
+                const key = @as(usize, @intCast(@intFromEnum(bs.facing))) * BlockRegistry.MAX_BLOCKS + @intFromEnum(bs.block_id);
+                if (runtime_lookup[key] == null) {
+                    runtime_lookup[key] = @as(u32, @intCast(final_palette.items.len));
+                    try final_palette.append(self.allocator, bs);
+                }
+            }
+        }
+
+        // 4. 用最终 palette 长度确定 index_bits，分配 index_data
+        const final_count = final_palette.items.len;
+        chunk.deinit();
+        chunk.palette = final_palette;
+        final_palette = .{}; // 阻止 defer 释放
+        chunk.index_bits = if (final_count <= 1) 1 else @as(u5, @intCast(std.math.log2_int(usize, final_count - 1) + 1));
+        const buf_size = (CHUNK_BLOCKS * chunk.index_bits + 7) / 8;
+        chunk.index_data = try chunk.allocator.alloc(u8, buf_size);
+        @memset(chunk.index_data, 0);
+
+        // 5. 第二遍重读存档 BLOB，直接 writeBits 到 index_data（无 idx_buf 中间数组）
+        var r2 = BitReader{ .buf = col1.blob };
+        for (0..CHUNK_BLOCKS) |j| {
+            const pal_idx = r2.read(save_bpi);
+            const facing_val = r2.read(4);
+            const id = if (pal_idx < palette_size) runtime_ids[pal_idx] else 0;
+            var bs = BlockState.init(BlockId.fromInt(id));
+            bs.facing = @enumFromInt(facing_val);
+            const key = @as(usize, @intCast(@intFromEnum(bs.facing))) * BlockRegistry.MAX_BLOCKS + @intFromEnum(bs.block_id);
+            const runtime_idx = runtime_lookup[key].?;
+            // 存档数据按 x,y,z 顺序排列，bitOffset 需按 (x,y,z) 重映射
+            const x = j / (CHUNK_HEIGHT * CHUNK_WIDTH);
+            const rem = j % (CHUNK_HEIGHT * CHUNK_WIDTH);
+            const y = rem / CHUNK_WIDTH;
+            const z = rem % CHUNK_WIDTH;
+            const bit_off = (z + CHUNK_WIDTH * (y + CHUNK_HEIGHT * x)) * chunk.index_bits;
+            writeBits(chunk.index_data, bit_off, runtime_idx, chunk.index_bits);
+        }
 
         return true;
     }

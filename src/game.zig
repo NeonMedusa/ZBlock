@@ -369,7 +369,6 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.camera = Camera3D.init(self);
     // 初始化ubo
     self.ubo = SceneUniform.init(self.window);
-    rebuildProjMatrix(self);
     // 初始化世界
     const registry = ECS.Registry.init(allocator);
     self.registry = registry;
@@ -405,6 +404,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 测试方块世界
     self.chunk_radius = 32;
+    rebuildProjMatrix(self);
     self.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.chunk_radius);
     try self.block_world.spawnWorker(); // mesh 生成线程
     try self.block_world.spawnAStarWorker(); // 寻路线程
