@@ -446,7 +446,7 @@ pub fn deinit(self: *@This()) void {
 
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
-    self.chunk_radius = 8;
+    self.chunk_radius = 32;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，需要重建 BlockWorld
@@ -978,11 +978,14 @@ fn updateChunks(self: *Game) !void {
         const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_WIDTH_I32);
 
         const load_range: i32 = self.chunk_radius;
+        const load_range_sq = load_range * load_range;
         const t_load_start = std.time.nanoTimestamp();
         var dx: i32 = -load_range;
         while (dx <= load_range) : (dx += 1) {
             var dz: i32 = -load_range;
             while (dz <= load_range) : (dz += 1) {
+                // 圆形加载区域：跳过四个角上的 chunk
+                if (dx * dx + dz * dz > load_range_sq) continue;
                 try self.block_world.loadChunk(.new(
                     player_origin.x + dx * BlockWorld.CHUNK_WIDTH_I32,
                     0,
@@ -993,15 +996,16 @@ fn updateChunks(self: *Game) !void {
         const t_unload_start = std.time.nanoTimestamp();
         const load_us = @as(u64, @intCast(@max(@as(i64, 0), t_unload_start - t_load_start))) / 1000;
 
-        // 卸载远处区块
+        // 卸载远处区块（圆形边界：半径 load_range + 2）
         var to_unload = std.ArrayListUnmanaged(Vec3i){};
         defer to_unload.deinit(self.allocator);
+        const unload_range_sq = (load_range + 2) * (load_range + 2);
         var chunk_it = self.block_world.chunks.keyIterator();
         while (chunk_it.next()) |key| {
             const kcx = @divFloor(key.x, BlockWorld.CHUNK_WIDTH_I32);
             const kcz = @divFloor(key.z, BlockWorld.CHUNK_WIDTH_I32);
-            const dist = @max(@abs(pcx - kcx), @abs(pcz - kcz));
-            if (dist > load_range + 2) {
+            const dd = (pcx - kcx) * (pcx - kcx) + (pcz - kcz) * (pcz - kcz);
+            if (dd > unload_range_sq) {
                 to_unload.append(self.allocator, key.*) catch continue;
             }
         }

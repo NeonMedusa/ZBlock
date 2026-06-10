@@ -27,7 +27,7 @@ pub fn init(window: Window) !@This() {
         .chain = Wgpu.WGPUChainedStruct{
             .sType = Wgpu.WGPUSType_InstanceExtras,
         },
-        .backends = Wgpu.WGPUInstanceBackend_DX12,
+        .backends = Wgpu.WGPUInstanceBackend_Vulkan,
     };
     // 创建主描述符，并将扩展结构体链入
     const instance_descriptor = Wgpu.WGPUInstanceDescriptor{
