@@ -1,7 +1,6 @@
 // chunk_mesh.zig
 const std = @import("std");
 const Imports = @import("imports.zig");
-const Vec2 = Imports.Vec2;
 const Vec3 = Imports.Vec3;
 const Vec3i = Imports.Vec3i;
 const Quat = Imports.Quat;
@@ -10,7 +9,6 @@ const Material = Imports.RendCTX.Material;
 const TextureRes = Imports.RendCTX.TextureRes;
 const Gctx = Imports.Gctx;
 const RenderPipeline = @import("render_pipeline.zig");
-const StaticVertex = Imports.RendCTX.StaticVertex;
 const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
 const BlockRegistry = @import("block_registry.zig");
 const BlockId = BlockRegistry.BlockId;
@@ -23,6 +21,7 @@ const Chunk = @import("block_world.zig").Chunk;
 const BlockWorld = @import("block_world.zig").BlockWorld;
 const CHUNK_WIDTH = @import("block_world.zig").CHUNK_WIDTH;
 const CHUNK_HEIGHT = @import("block_world.zig").CHUNK_HEIGHT;
+const ChunkVertex = @import("rend_ctx.zig").ChunkVertex;
 
 pub const MAX_VARIANTS = 8;
 
@@ -55,15 +54,11 @@ pub const GlobalMaterial = struct {
 };
 
 pub const ChunkMesh = struct {
-    /// GPU 端顶点/索引缓冲区 + CPU 端待上传数据。
-    /// 一个 ChunkMesh 对应一种材质。
+    /// GPU 端顶点缓冲区 + CPU 端待上传数据。无索引（非索引画法，每 quad 6 顶点）。
     vertex_buffer: Wgpu.WGPUBuffer,
-    index_buffer: Wgpu.WGPUBuffer,
     vertex_count: u32,
-    index_count: u32,
 
-    cpu_vertices: std.ArrayListUnmanaged(StaticVertex) = .{},
-    cpu_indices: std.ArrayListUnmanaged(u32) = .{},
+    cpu_vertices: std.ArrayListUnmanaged(u8) = .{}, // 原始顶点字节
 
     pub fn init(gctx: *Gctx) !ChunkMesh {
         const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
@@ -71,39 +66,26 @@ pub const ChunkMesh = struct {
             .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
             .mappedAtCreation = 0,
         });
-        const index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-            .size = 0,
-            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
-        });
         return .{
             .vertex_buffer = vertex_buffer,
-            .index_buffer = index_buffer,
             .vertex_count = 0,
-            .index_count = 0,
         };
     }
 
     pub fn deinit(self: *ChunkMesh, allocator: std.mem.Allocator) void {
         self.cpu_vertices.deinit(allocator);
-        self.cpu_indices.deinit(allocator);
         if (self.vertex_buffer) |b| Wgpu.wgpuBufferRelease(b);
-        if (self.index_buffer) |b| Wgpu.wgpuBufferRelease(b);
     }
 
     pub fn clearCpuData(self: *ChunkMesh, allocator: std.mem.Allocator) void {
         self.cpu_vertices.clearAndFree(allocator);
-        self.cpu_indices.clearAndFree(allocator);
     }
 
     pub fn uploadMeshData(self: *ChunkMesh, gctx: *Gctx) !void {
         if (self.vertex_buffer) |old| Wgpu.wgpuBufferRelease(old);
-        if (self.index_buffer) |old| Wgpu.wgpuBufferRelease(old);
 
         const vertices = self.cpu_vertices.items;
-        const indices = self.cpu_indices.items;
-
-        const vtx_size = @sizeOf(StaticVertex) * vertices.len;
+        const vtx_size = vertices.len;
         self.vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = vtx_size,
             .usage = Wgpu.WGPUBufferUsage_Vertex | Wgpu.WGPUBufferUsage_CopyDst,
@@ -113,18 +95,7 @@ pub const ChunkMesh = struct {
             Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.vertex_buffer, 0, vertices.ptr, vtx_size);
         }
 
-        const idx_size = @sizeOf(u32) * indices.len;
-        self.index_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
-            .size = idx_size,
-            .usage = Wgpu.WGPUBufferUsage_Index | Wgpu.WGPUBufferUsage_CopyDst,
-            .mappedAtCreation = 0,
-        });
-        if (idx_size > 0) {
-            Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.index_buffer, 0, indices.ptr, idx_size);
-        }
-
-        self.vertex_count = @intCast(vertices.len);
-        self.index_count = @intCast(indices.len);
+        self.vertex_count = @intCast(if (@sizeOf(ChunkVertex) > 0) vertices.len / @sizeOf(ChunkVertex) else 0);
     }
 };
 
@@ -230,13 +201,11 @@ pub const MaterialRegistry = struct {
 pub const MeshBuildResult = struct {
     origin: Vec3i,
     allocator: std.mem.Allocator,
-    vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(StaticVertex) = [_]std.ArrayListUnmanaged(StaticVertex){.{}} ** MAX_MATERIALS,
-    indices: [MAX_MATERIALS]std.ArrayListUnmanaged(u32) = [_]std.ArrayListUnmanaged(u32){.{}} ** MAX_MATERIALS,
+    vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(u8) = [_]std.ArrayListUnmanaged(u8){.{}} ** MAX_MATERIALS, // 原始顶点字节
 
     pub fn deinit(self: *MeshBuildResult) void {
         for (0..MAX_MATERIALS) |i| {
             self.vertices[i].deinit(self.allocator);
-            self.indices[i].deinit(self.allocator);
         }
     }
 };
@@ -333,20 +302,24 @@ pub fn buildChunkMeshCPU(
                         @as(f32, @floatFromInt(chunk_origin.z + @as(i32, @intCast(z)))) + 0.5,
                     );
 
-                    const start_vertex: u32 = @intCast(result.vertices[mat_idx].items.len);
-                    for (face_data.positions, face_data.uvs) |local_pos, uv| {
+                    // 非索引画法：每 quad 6 顶点（三角形 1: v0,v1,v2；三角形 2: v0,v3,v2）
+                    const face_positions = face_data.positions;
+                    // corner 顺序: v0=0, v1=1, v2=2, v3=3
+                    const tri_verts = [_]u32{ 0, 2, 1, 0, 3, 2 };
+                    for (tri_verts) |ci| {
+                        const local_pos = face_positions[ci];
                         const world_pos = rot.rotate(local_pos).add(center);
-                        const world_normal = rot.rotate(local_dir.normal());
-                        try result.vertices[mat_idx].append(allocator, StaticVertex{
-                            .position = world_pos,
-                            .normal = world_normal,
-                            .texcoord = uv,
-                        });
+
+                        const cv = ChunkVertex{
+                            .bx = @truncate(@as(u32, @intFromFloat(world_pos.x - @as(f32, @floatFromInt(chunk_origin.x))))),
+                            .by = @truncate(@as(u32, @intFromFloat(world_pos.y))),
+                            .bz = @truncate(@as(u32, @intFromFloat(world_pos.z - @as(f32, @floatFromInt(chunk_origin.z))))),
+                            .face_dir = @truncate(@as(u32, @intFromEnum(local_dir))),
+                            .world_dir = @truncate(@as(u32, @intFromEnum(world_dir))),
+                            .corner = @truncate(ci),
+                        };
+                        try result.vertices[mat_idx].appendSlice(allocator, std.mem.asBytes(&cv));
                     }
-                    try result.indices[mat_idx].appendSlice(allocator, &[_]u32{
-                        start_vertex, start_vertex + 2, start_vertex + 1,
-                        start_vertex, start_vertex + 3, start_vertex + 2,
-                    });
                 }
             }
         }
@@ -355,7 +328,7 @@ pub fn buildChunkMeshCPU(
     return result;
 }
 
-/// 在主线程调用：释放旧网格，acquire 材质，写入新顶点/索引到 Chunk 的 meshes HashMap，上传 GPU。
+/// 在主线程调用：释放旧网格，acquire 材质，写入新顶点到 Chunk 的 meshes HashMap，上传 GPU。
 pub fn applyMeshResult(
     meshes: *std.AutoHashMap(MaterialIdx, ChunkMesh),
     allocator: std.mem.Allocator,
@@ -387,7 +360,6 @@ pub fn applyMeshResult(
             mesh_entry.value_ptr.* = try ChunkMesh.init(gctx);
         }
         try mesh_entry.value_ptr.cpu_vertices.appendSlice(allocator, verts);
-        try mesh_entry.value_ptr.cpu_indices.appendSlice(allocator, result.indices[mat_idx_usize].items);
     }
 
     // 上传所有非空材质网格到 GPU，上传后清空 CPU 暂存

@@ -24,7 +24,11 @@ const fr = @import("fridge");
 const registries = @import("registries.zig");
 
 pub const CHUNK_WIDTH: u32 = 16;
-pub const CHUNK_HEIGHT: u32 = 256;
+pub const CHUNK_HEIGHT: u32 = 255;
+
+// 如需支持更高高度，两种方案（详见 DESIGN.md 议题五）：
+// A) 增大 CHUNK_HEIGHT（需同步增加 ChunkVertex.by 位数）
+// B) 用 Vec3i.y 分片叠层区块，保持 CHUNK_HEIGHT=255（此时 ChunkVertex.by 可缩回 u8）
 pub const CHUNK_WIDTH_I32: i32 = CHUNK_WIDTH;
 const CHUNK_BLOCKS: u32 = CHUNK_WIDTH * CHUNK_HEIGHT * CHUNK_WIDTH;
 
@@ -382,7 +386,7 @@ pub const BlockWorld = struct {
             .last_exact_targets = last_exact_targets,
             .astar_pending = .{},
             .astar_completed = .{},
-            .save_dir = save_name,
+            .save_dir = try std.fs.path.join(allocator, &.{ "saves", save_name }),
             .pending_saves = .{},
             .completed_saves = .{},
             .pending_loads = .{},
@@ -435,6 +439,7 @@ pub const BlockWorld = struct {
         self.completed_loads.deinit(self.allocator);
         self.pending_loads.deinit(self.allocator);
         self.io_active_loads.deinit();
+        self.allocator.free(self.save_dir);
 
         // 通知mesh worker停止
         self.running.store(false, .release);
@@ -1567,6 +1572,14 @@ fn ioWorkerFn(world: *BlockWorld) void {
     }
     const pa = std.heap.page_allocator;
 
+    // 确保 region 目录存在（fridge/SQLite 不会自动创建目录）
+    {
+        if (std.fmt.allocPrint(pa, "{s}/regions", .{world.save_dir})) |reg_dir| {
+            defer pa.free(reg_dir);
+            std.fs.cwd().makePath(reg_dir) catch {};
+        } else |_| {}
+    }
+
     while (world.save_running.load(.acquire)) {
         // 优先处理保存任务
         var save_task: ?SaveTask = null;
@@ -1588,17 +1601,17 @@ fn ioWorkerFn(world: *BlockWorld) void {
 
             const db = blk: {
                 if (region_caches.getPtr(key)) |sess| break :blk sess;
-                const path = std.fmt.allocPrint(pa, "saves/{s}/regions/r_{d}_{d}.db", .{ world.save_dir, rx, rz }) catch {
+                var db_path_buf: [512]u8 = undefined;
+                const db_path = std.fmt.bufPrint(&db_path_buf, "{s}/regions/r_{d}_{d}.db", .{ world.save_dir, rx, rz }) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
                     continue;
                 };
-                defer pa.free(path);
-                const path_z = pa.dupeZ(u8, path) catch {
+                const db_path_z = pa.dupeZ(u8, db_path) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
                     continue;
                 };
-                defer pa.free(path_z);
-                var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = path_z }) catch {
+                defer pa.free(db_path_z);
+                var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = db_path_z }) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
                     continue;
                 };
@@ -1650,27 +1663,30 @@ fn ioWorkerFn(world: *BlockWorld) void {
 
             // 打开或获取 region 数据库连接
             const db = blk: {
-                if (region_caches.getPtr(key)) |sess| break :blk sess;
-                const path = std.fmt.allocPrint(pa, "saves/{s}/regions/r_{d}_{d}.db", .{ world.save_dir, rx, rz }) catch {
+                var load_path_buf: [512]u8 = undefined;
+                const load_path = std.fmt.bufPrint(&load_path_buf, "{s}/regions/r_{d}_{d}.db", .{ world.save_dir, rx, rz }) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
                     continue;
                 };
-                defer pa.free(path);
-                const path_z = pa.dupeZ(u8, path) catch {
+                const load_path_z = pa.dupeZ(u8, load_path) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
                     continue;
                 };
-                defer pa.free(path_z);
-                var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = path_z }) catch {
-                    _ = world.pending_io_count.fetchSub(1, .release);
-                    continue;
-                };
-                sess.conn.execAll("CREATE TABLE IF NOT EXISTS \"Chunks\" (x INTEGER NOT NULL,z INTEGER NOT NULL,palette TEXT NOT NULL,data BLOB NOT NULL,PRIMARY KEY (x, z)); PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;") catch {};
-                region_caches.put(key, sess) catch {
-                    _ = world.pending_io_count.fetchSub(1, .release);
-                    continue;
-                };
-                break :blk region_caches.getPtr(key).?;
+                defer pa.free(load_path_z);
+                if (region_caches.getPtr(key)) |sess| {
+                    break :blk sess;
+                } else {
+                    var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = load_path_z }) catch {
+                        _ = world.pending_io_count.fetchSub(1, .release);
+                        continue;
+                    };
+                    sess.conn.execAll("CREATE TABLE IF NOT EXISTS \"Chunks\" (x INTEGER NOT NULL,z INTEGER NOT NULL,palette TEXT NOT NULL,data BLOB NOT NULL,PRIMARY KEY (x, z)); PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;") catch {};
+                    region_caches.put(key, sess) catch {
+                        _ = world.pending_io_count.fetchSub(1, .release);
+                        continue;
+                    };
+                    break :blk region_caches.getPtr(key).?;
+                }
             };
 
             // 尝试从 SQLite 加载

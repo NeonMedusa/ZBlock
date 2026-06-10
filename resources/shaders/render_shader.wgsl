@@ -72,6 +72,58 @@ struct VertexOutput {
     @location(3) color: vec4f,
 };
 
+// ChunkVertex: 紧凑区块顶点，4 字节（1 × u32 packed_pos）
+struct ChunkVertex {
+    @location(0) packed_pos: u32,
+};
+
+// 从 ChunkVertex 解码法线（6 方向，索引同 Direction 枚举定义）
+// Direction: up=0, down=1, north=2, south=3, west=4, east=5
+fn decodeChunkNormal(face_dir: u32) -> vec3f {
+    switch (face_dir) {
+        case 0u: { return vec3f(0.0, 1.0, 0.0); }   // up
+        case 1u: { return vec3f(0.0, -1.0, 0.0); }  // down
+        case 2u: { return vec3f(0.0, 0.0, -1.0); }  // north
+        case 3u: { return vec3f(0.0, 0.0, 1.0); }   // south
+        case 4u: { return vec3f(-1.0, 0.0, 0.0); }  // west
+        default: { return vec3f(1.0, 0.0, 0.0); }   // east
+    }
+}
+
+// 从 face_dir + corner 计算 UV（不存纹理坐标，靠面方向和角索引推导）
+// DEFAULT_UVS: (0,1),(1,1),(1,0),(0,0) — up/north/east/west
+// down: (0,0),(1,0),(1,1),(0,1)
+// south: (1,1),(0,1),(0,0),(1,0)
+fn computeChunkUV(face_dir: u32, corner: u32) -> vec2f {
+    // 公共分支：up(0), north(2), west(4), east(5) → DEFAULT_UVS
+    switch (face_dir) {
+        case 0u, 2u, 4u, 5u: {
+            switch (corner) {
+                case 0u: { return vec2f(0.0, 1.0); }
+                case 1u: { return vec2f(1.0, 1.0); }
+                case 2u: { return vec2f(1.0, 0.0); }
+                default: { return vec2f(0.0, 0.0); }
+            }
+        }
+        case 1u: { // down
+            switch (corner) {
+                case 0u: { return vec2f(0.0, 0.0); }
+                case 1u: { return vec2f(1.0, 0.0); }
+                case 2u: { return vec2f(1.0, 1.0); }
+                default: { return vec2f(0.0, 1.0); }
+            }
+        }
+        default: { // south=3u
+            switch (corner) {
+                case 0u: { return vec2f(1.0, 1.0); }
+                case 1u: { return vec2f(0.0, 1.0); }
+                case 2u: { return vec2f(0.0, 0.0); }
+                default: { return vec2f(1.0, 0.0); }
+            }
+        }
+    }
+}
+
 // --- 骨骼蒙皮 (CPU 计算变换矩阵后写入 storage buffer, GPU 按 bone_offset 索引) ---
 fn skinPosition(input_position: vec3f, bone_offset: i32, joint_indices: vec4u, joint_weights: vec4f) -> vec3f {
     var skin_matrix: mat4x4f;
@@ -199,6 +251,32 @@ fn vs_skinned(in: SkinnedVertex, @builtin(instance_index) ins_idx: u32) -> Verte
     var out: VertexOutput;
     out.position = out_position;
     out.texcoord = in.texcoord;
+    out.world_normal = world_normal;
+    out.world_position = world_pos.xyz;
+    out.color = vec4f(1.0, 1.0, 1.0, 1.0);
+    return out;
+}
+
+// --- vs_chunk: 紧凑区块顶点格式（1×u32，UV 从 corner+face_dir 推导） ---
+@vertex
+fn vs_chunk(in: ChunkVertex, @builtin(instance_index) ins_idx: u32) -> VertexOutput {
+    let pp = in.packed_pos;
+    let bx = f32(pp & 0x1Fu);
+    let by = f32((pp >> 5u) & 0xFFu);
+    let bz = f32((pp >> 13u) & 0x1Fu);
+    let face_dir = (pp >> 18u) & 0x7u;
+    let world_dir = (pp >> 21u) & 0x7u;
+    let corner = (pp >> 24u) & 0x3u;
+    let ins = ins_data[ins_idx];
+    let world_pos = ins.transform * vec4f(bx, by, bz, 1.0);
+
+    let out_position = scene_uniform.proj_matrix * scene_uniform.view_matrix * world_pos;
+    let world_normal = decodeChunkNormal(world_dir);
+    let texcoord = computeChunkUV(face_dir, corner);
+
+    var out: VertexOutput;
+    out.position = out_position;
+    out.texcoord = texcoord;
     out.world_normal = world_normal;
     out.world_position = world_pos.xyz;
     out.color = vec4f(1.0, 1.0, 1.0, 1.0);

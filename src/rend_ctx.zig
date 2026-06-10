@@ -737,8 +737,8 @@ pub const DrawBatch = struct {
 };
 
 pub const ResManager = struct {
-    const MAX_ENTITIES = 500;
-    const MAX_INSTANCES = 3 * MAX_ENTITIES;
+    const MAX_ENTITIES = 501; // 500 实体 + 1 区块占位
+    const MAX_INSTANCES = 3 * MAX_ENTITIES + 5000; // 实体 + 区块（~4225）
 
     scene_uniform_buffer: Wgpu.WGPUBuffer,
     entities_data: []EntityData,
@@ -875,14 +875,32 @@ pub const SceneUniform = struct {
     }
 };
 
-pub const VertexFormat = enum { static_model, skinned_model };
+pub const VertexFormat = enum { static_model, skinned_model, chunk };
 
-// 静态顶点：32 字节，用于方块/chunk。
+// 静态顶点：32 字节，用于无骨骼 glTF 模型。
 // 没有关节信息，只能用 pipeline_static 渲染。
 pub const StaticVertex = struct {
     position: Vec3 = Vec3.zero,
     normal: Vec3 = Vec3.new(0, 1, 0),
     texcoord: Vec2 = Vec2.zero,
+};
+
+// 紧凑区块顶点：4 字节（packed struct，GPU 侧以 u32 读取）。
+// bx:5  by:8  bz:5  face_dir:3  world_dir:3  corner:2  _pad:6  = 32 bits
+// face_dir 是局部面方向（UV用），world_dir 是世界面方向（法线用）
+// bx/bz 相对 chunk 原点（0~16 角点坐标），by 垂直坐标（0~255）
+pub const ChunkVertex = packed struct {
+    bx: u5,
+    by: u8,
+    bz: u5,
+    face_dir: u3,
+    world_dir: u3,
+    corner: u2,
+    _pad: u6 = 0,
+
+    comptime {
+        if (@sizeOf(@This()) != 4) @compileError("ChunkVertex must be 4 bytes");
+    }
 };
 
 // 蒙皮顶点：64 字节，用于带骨骼动画的模型。

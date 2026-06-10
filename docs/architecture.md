@@ -118,7 +118,7 @@ deinit()
 
 | Worker | 职责 | 通信方式 |
 |--------|------|---------|
-| **Mesh** | 脏区块 → 生成 greedy mesh → 上传 vertex/index buffer | `pending_builds` → `completed_builds` |
+| **Mesh** | 脏区块 → 生成 greedy mesh → 上传 vertex buffer（非索引，4B/顶点） | `pending_builds` → `completed_builds` |
 | **A\*** | 异步寻路计算 | `pending_pathfind` → `completed_paths` |
 | **IO** | 存档加载/保存（SQLite region 分片） | `pending_loads` + `pending_saves` → 统一 `pending_io_count` |
 
@@ -142,6 +142,25 @@ index_data: bit-packed u8[]           // 每个方块 palette_index
 - `BlockState` 包含 `block_id: BlockId(u16)` + `facing: Direction`
 - 朝向信息编码在调色板条目名称中（`"stone_5"`），存档自描述、版本无关
 - 相比固定 `u32` 方案，内存占用减少约 **237MB**（65k 区块场景）
+
+### 区块顶点压缩（ChunkVertex）
+
+每个方块面的顶点压缩到单个 `u32`（4 字节），位置/法线/UV 均通过 shader 推导：
+
+```
+packed_pos (32 bits):
+  [0-4]   bx           — chunk 局部 X (0~16)
+  [5-12]  by           — 垂直 Y (0~255)
+  [13-17] bz           — chunk 局部 Z (0~16)
+  [18-20] face_dir     — 局部面方向（UV用）
+  [21-23] world_dir    — 世界面方向（法线用）
+  [24-25] corner       — quad 角索引 (0-3)
+  [26-31] unused
+```
+
+- **无索引画法**：每 quad 写入 6 个顶点（24B），比索引画法（4 顶点+6 索引=40B）省 40%
+- **UV 推论**：`computeChunkUV()` 根据 `face_dir` + `corner` 在 shader 中计算 UV，不占用顶点空间
+- **对比原 32B `StaticVertex`**：显存占用降至 **87.5%**，全加载场景下节省约 **1.3GB**
 
 ---
 

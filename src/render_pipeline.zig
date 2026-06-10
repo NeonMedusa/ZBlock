@@ -1,7 +1,6 @@
 //render_pipeline.zig:
-// 主渲染管线管理。一个 shader module + 两个 vertex entry point (vs_static/vs_skinned)，
-// 通过两条不同 vertex attribute layout 的 pipeline 复用同一份片段着色器。
-// 静态物体 (chunk) 走 pipeline_static，蒙皮模型走 pipeline_skinned。
+// 主渲染管线管理。一个 shader module + 三个 vertex entry point (vs_static/vs_skinned/vs_chunk)，
+// 三个 vertex entry：vs_static / vs_skinned / vs_chunk 共享同一份片段着色器。
 global_bgl: Wgpu.WGPUBindGroupLayout,
 global_bind_group: Wgpu.WGPUBindGroup,
 material_bgl: Wgpu.WGPUBindGroupLayout,
@@ -11,6 +10,7 @@ pipeline_layout: Wgpu.WGPUPipelineLayout,
 shader_module: Wgpu.WGPUShaderModule,
 pipeline_static: Wgpu.WGPURenderPipeline,
 pipeline_skinned: Wgpu.WGPURenderPipeline,
+pipeline_chunk: Wgpu.WGPURenderPipeline,
 
 pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
     const shader_module = try game.gctx.createShaderModule(shader_file_path);
@@ -147,13 +147,17 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
     );
 
     // 两个管线共享 shader_module、pipeline_layout、bind groups，仅 vertex entry/attributes 不同
-    // 两条 pipeline：static（32B stride，无骨骼）和 skinned（64B stride，含关节索引/权重）。
-    // 共用同一个 vertex buffer —— chunk 只写前 32B 给 static 管线，模型写满 64B 给 skinned 管线。
+    // 三条 pipeline：static（32B stride，无骨骼）、skinned（64B stride，蒙皮）、chunk（4B stride，紧凑区块格式）
     const static_attrs = Gctx.generateVertexAttributes(RenderCTX.StaticVertex);
     const skinned_attrs = Gctx.generateVertexAttributes(RenderCTX.SkinnedVertex);
+    // ChunkVertex 是 packed struct，GPU 侧以单一 u32 读取
+    const chunk_attrs = [_]Wgpu.WGPUVertexAttribute{
+        .{ .format = Wgpu.WGPUVertexFormat_Uint32, .offset = 0, .shaderLocation = 0 },
+    };
 
     const pipe_static = createPipelineGctx(&game.gctx, pipeline_layout, shader_module, "vs_static", RenderCTX.StaticVertex, &static_attrs);
     const pipe_skinned = createPipelineGctx(&game.gctx, pipeline_layout, shader_module, "vs_skinned", RenderCTX.SkinnedVertex, &skinned_attrs);
+    const pipe_chunk = createPipelineGctx(&game.gctx, pipeline_layout, shader_module, "vs_chunk", RenderCTX.ChunkVertex, &chunk_attrs);
 
     return @This(){
         .global_bgl = global_bgl,
@@ -163,6 +167,7 @@ pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
         .shader_module = shader_module,
         .pipeline_static = pipe_static,
         .pipeline_skinned = pipe_skinned,
+        .pipeline_chunk = pipe_chunk,
         .shadow_bgl = shadow_bgl,
         .shadow_bind_group = null,
     };
@@ -237,6 +242,7 @@ pub fn setBoneBuffer(self: *@This(), game: *Game, bone_buffer: Wgpu.WGPUBuffer) 
 pub fn deinit(self: @This()) void {
     Wgpu.wgpuRenderPipelineRelease(self.pipeline_static);
     Wgpu.wgpuRenderPipelineRelease(self.pipeline_skinned);
+    Wgpu.wgpuRenderPipelineRelease(self.pipeline_chunk);
     Wgpu.wgpuBindGroupLayoutRelease(self.global_bgl);
     Wgpu.wgpuBindGroupRelease(self.global_bind_group);
     Wgpu.wgpuBindGroupLayoutRelease(self.material_bgl);

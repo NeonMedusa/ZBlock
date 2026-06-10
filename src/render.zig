@@ -7,6 +7,8 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     defer Wgpu.wgpuTextureViewRelease(surface_texture_view);
 
     const encoder = Wgpu.wgpuDeviceCreateCommandEncoder(game.gctx.device, null);
+    var chunk_instance_idx: u32 = 0; // 用于区块实例索引（阴影+主渲染共享）
+    const frustum = if (world) Frustum.fromViewProj(Mat4.mul(game.ubo.proj_matrix, game.ubo.view_matrix)) else undefined;
 
     const sky_time = @as(f32, @floatFromInt(game.tick_count)) * TICK_DT + game.accumulator;
     // 从天空状态同步光照数据到 ubo
@@ -37,59 +39,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         game.shadow_pipeline.updateUniform(&game.gctx);
         game.ubo.shadow_vp = game.shadow_pipeline.light_vp;
 
-        // === 阴影渲染通道 (Pass 1) ===
-        const shadow_pass_desc = Wgpu.WGPURenderPassDescriptor{
-            .colorAttachmentCount = 0,
-            .colorAttachments = null,
-            .depthStencilAttachment = &Wgpu.WGPURenderPassDepthStencilAttachment{
-                .view = game.shadow_pipeline.depth_texture_view,
-                .depthLoadOp = Wgpu.WGPULoadOp_Clear,
-                .depthStoreOp = Wgpu.WGPUStoreOp_Store,
-                .depthClearValue = 1.0,
-                .depthReadOnly = 0,
-                .stencilLoadOp = Wgpu.WGPULoadOp_Undefined,
-                .stencilStoreOp = Wgpu.WGPUStoreOp_Undefined,
-                .stencilClearValue = 0,
-                .stencilReadOnly = 1,
-            },
-        };
-        const shadow_pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &shadow_pass_desc);
-        Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.handle);
-        Wgpu.wgpuRenderPassEncoderSetBindGroup(shadow_pass, 0, game.shadow_pipeline.bind_group, 0, null);
-        const shadow_frustum = Frustum.fromViewProj(game.shadow_pipeline.light_vp); // 阴影视锥体裁剪
-        var s_chunk_it = game.block_world.chunks.iterator();
-        while (s_chunk_it.next()) |entry| {
-            const loaded = &entry.value_ptr.*;
-            const origin = entry.key_ptr.*;
-            const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
-            const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 256, @as(f32, @floatFromInt(origin.z + 16)));
-            if (!shadow_frustum.intersectsAABB(min, max)) continue;
-            var s_mesh_it = loaded.meshes.iterator();
-            while (s_mesh_it.next()) |mesh_entry| {
-                const mesh = mesh_entry.value_ptr;
-                if (mesh.vertex_count == 0) continue;
-                Wgpu.wgpuRenderPassEncoderSetVertexBuffer(shadow_pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
-                Wgpu.wgpuRenderPassEncoderSetIndexBuffer(shadow_pass, mesh.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(mesh.index_buffer));
-                Wgpu.wgpuRenderPassEncoderDrawIndexed(shadow_pass, mesh.index_count, 1, 0, 0, 0);
-            }
-        }
-        Wgpu.wgpuRenderPassEncoderEnd(shadow_pass);
-    }
-
-    // 写入 scene uniform（含最新 shadow_vp），阴影 pass 与主 pass 使用同一帧的 VP
-    Wgpu.wgpuQueueWriteBuffer(
-        game.gctx.queue,
-        game.res_manager.scene_uniform_buffer,
-        0,
-        &game.ubo,
-        Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
-    );
-
-    var chunk_instance_idx: u32 = 0;
-    const frustum = if (world) Frustum.fromViewProj(Mat4.mul(game.ubo.proj_matrix, game.ubo.view_matrix)) else undefined;
-    if (world) {
-
-        // ========== 单次遍历：收集实体/实例数据 + 构建DrawBatch ==========
+        // ========== 提前构建所有实例数据（实体 + 区块），供阴影和主渲染共享 ==========
         var entity_idx: u32 = 0;
         var ins_idx: u32 = 0;
         game.res_manager.draw_batch_count = 0;
@@ -156,19 +106,26 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             entity_idx += 1;
         }
 
-        // 为区块预留实体/实例
+        // 为区块预留 entity 占位
         const chunk_entity_idx: u32 = entity_idx;
         game.res_manager.entities_data[chunk_entity_idx] = EntityData{
             .transform = Mat4.fromTranslate(Vec3.new(0, 0, 0)),
         };
         entity_idx += 1;
 
+        // 为每个已加载的 chunk 生成一个实例（携带 chunk 原点偏移）
         chunk_instance_idx = ins_idx;
-        game.res_manager.instances_data[chunk_instance_idx] = InstanceData{
-            .transform = Mat4.identity,
-            .entity_idx = chunk_entity_idx,
-        };
-        ins_idx += 1;
+        {
+            var chunk_it = game.block_world.chunks.iterator();
+            while (chunk_it.next()) |entry| {
+                const origin = entry.key_ptr.*;
+                game.res_manager.instances_data[ins_idx] = InstanceData{
+                    .transform = Mat4.fromTranslate(Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)))),
+                    .entity_idx = chunk_entity_idx,
+                };
+                ins_idx += 1;
+            }
+        }
 
         // 上传 GPU 数据
         if (entity_idx > 0) {
@@ -189,7 +146,68 @@ fn drawFrame(game: *Game, comptime world: bool) void {
                 @sizeOf(InstanceData) * ins_idx,
             );
         }
+
+        // 设置阴影管线的 ins_data buffer
+        game.shadow_pipeline.setInsDataBuffer(&game.gctx, game.res_manager.instances_data_buffer);
+
+        // ========== 阴影渲染通道 (Pass 1) ==========
+        const shadow_pass_desc = Wgpu.WGPURenderPassDescriptor{
+            .colorAttachmentCount = 0,
+            .colorAttachments = null,
+            .depthStencilAttachment = &Wgpu.WGPURenderPassDepthStencilAttachment{
+                .view = game.shadow_pipeline.depth_texture_view,
+                .depthLoadOp = Wgpu.WGPULoadOp_Clear,
+                .depthStoreOp = Wgpu.WGPUStoreOp_Store,
+                .depthClearValue = 1.0,
+                .depthReadOnly = 0,
+                .stencilLoadOp = Wgpu.WGPULoadOp_Undefined,
+                .stencilStoreOp = Wgpu.WGPUStoreOp_Undefined,
+                .stencilClearValue = 0,
+                .stencilReadOnly = 1,
+            },
+        };
+        const shadow_pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &shadow_pass_desc);
+        Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.handle);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(shadow_pass, 0, game.shadow_pipeline.bind_group, 0, null);
+        const shadow_frustum = Frustum.fromViewProj(game.shadow_pipeline.light_vp); // 阴影视锥体裁剪
+
+        // 阴影 pass：使用 chunk_handle 渲染区块
+        {
+            var chunk_ins_idx = chunk_instance_idx;
+            var s_chunk_it = game.block_world.chunks.iterator();
+            Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.chunk_handle);
+            while (s_chunk_it.next()) |entry| {
+                const loaded = &entry.value_ptr.*;
+                const origin = entry.key_ptr.*;
+                const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
+                const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));
+                if (!shadow_frustum.intersectsAABB(min, max)) {
+                    chunk_ins_idx += 1;
+                    continue;
+                }
+                var s_mesh_it = loaded.meshes.iterator();
+                while (s_mesh_it.next()) |mesh_entry| {
+                    const mesh = mesh_entry.value_ptr;
+                    if (mesh.vertex_count == 0) continue;
+                    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(shadow_pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
+                    Wgpu.wgpuRenderPassEncoderDraw(shadow_pass, mesh.vertex_count, 1, 0, chunk_ins_idx);
+                }
+                chunk_ins_idx += 1;
+            }
+        }
+        Wgpu.wgpuRenderPassEncoderEnd(shadow_pass);
     }
+
+    // 写入 scene uniform（含最新 shadow_vp），阴影 pass 与主 pass 使用同一帧的 VP
+    Wgpu.wgpuQueueWriteBuffer(
+        game.gctx.queue,
+        game.res_manager.scene_uniform_buffer,
+        0,
+        &game.ubo,
+        Wgpu.wgpuBufferGetSize(game.res_manager.scene_uniform_buffer),
+    );
+
+    // 实体/区块实例已在阴影 pass 前构建完成
 
     // ========== 渲染通道 ==========
     const color_attachment = Wgpu.WGPURenderPassColorAttachment{
@@ -234,6 +252,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             const pipe = switch (batch.vertex_format) {
                 .static_model => game.render_pipeline.pipeline_static,
                 .skinned_model => game.render_pipeline.pipeline_skinned,
+                .chunk => unreachable, // chunk 不走 draw batch
             };
             Wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipe);
             Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, batch.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(batch.vertex_buffer));
@@ -242,27 +261,32 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, batch.index_count, 1, 0, 0, batch.instance_idx);
         }
 
-        // 绘制所有区块（使用 static pipeline）
-        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_static);
-        var chunk_it = game.block_world.chunks.iterator();
-        while (chunk_it.next()) |entry| {
-            const loaded = &entry.value_ptr.*;
-            const origin = entry.key_ptr.*;
-            const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
-            const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 256, @as(f32, @floatFromInt(origin.z + 16)));
-            if (!frustum.intersectsAABB(min, max)) continue; // 视锥体裁剪
-            var mesh_it = loaded.meshes.iterator();
-            while (mesh_it.next()) |mesh_entry| {
-                const mat_idx = mesh_entry.key_ptr.*;
-                const mesh = mesh_entry.value_ptr;
-                if (mesh.vertex_count == 0) continue;
-
-                if (game.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
-                    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
-                    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, mesh.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(mesh.index_buffer));
-                    Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, global_mat.material.bind_group, 0, null);
-                    Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, mesh.index_count, 1, 0, 0, chunk_instance_idx);
+        // 绘制所有区块（使用 chunk pipeline，紧凑顶点格式）
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_chunk);
+        {
+            var chunk_ins_idx = chunk_instance_idx;
+            var chunk_it = game.block_world.chunks.iterator();
+            while (chunk_it.next()) |entry| {
+                const loaded = &entry.value_ptr.*;
+                const origin = entry.key_ptr.*;
+                const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
+                const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));
+                if (!frustum.intersectsAABB(min, max)) {
+                    chunk_ins_idx += 1;
+                    continue;
                 }
+                var mesh_it = loaded.meshes.iterator();
+                while (mesh_it.next()) |mesh_entry| {
+                    const mat_idx = mesh_entry.key_ptr.*;
+                    const mesh = mesh_entry.value_ptr;
+                    if (mesh.vertex_count == 0) continue;
+                    if (game.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
+                        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
+                        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, global_mat.material.bind_group, 0, null);
+                        Wgpu.wgpuRenderPassEncoderDraw(pass, mesh.vertex_count, 1, 0, chunk_ins_idx);
+                    }
+                }
+                chunk_ins_idx += 1;
             }
         }
     }

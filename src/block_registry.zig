@@ -34,7 +34,7 @@ pub const block_infos = [_]BlockProtoType{
     .{
         .name = "grass",
         .face_variants = .{ 0, 1, 2, 2, 2, 2 },
-        .is_directional = false,
+        // .is_directional = false,
         .drops = &.{.{
             .item_name = "grass",
         }},

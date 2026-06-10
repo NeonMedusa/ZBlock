@@ -4,6 +4,8 @@ const Gctx = @import("gctx.zig");
 const Vec3 = @import("algebra.zig").Vec3;
 const Mat4 = @import("algebra.zig").Mat4;
 const StaticVertex = @import("rend_ctx.zig").StaticVertex;
+const ChunkVertex = @import("rend_ctx.zig").ChunkVertex;
+const InstanceData = @import("rend_ctx.zig").InstanceData;
 
 const LightUniform = extern struct {
     light_vp: [16]f32,
@@ -11,8 +13,10 @@ const LightUniform = extern struct {
 
 pub const ShadowPipeline = struct {
     handle: Wgpu.WGPURenderPipeline,
+    chunk_handle: Wgpu.WGPURenderPipeline, // 适配 ChunkVertex 紧凑格式
     bind_group_layout: Wgpu.WGPUBindGroupLayout,
     bind_group: Wgpu.WGPUBindGroup,
+    ins_data_buffer: ?Wgpu.WGPUBuffer = null,
     uniform_buffer: Wgpu.WGPUBuffer,
     depth_texture: Wgpu.WGPUTexture,
     depth_texture_view: Wgpu.WGPUTextureView,
@@ -23,8 +27,10 @@ pub const ShadowPipeline = struct {
         const shader_module = try gctx.createShaderModule("resources\\shaders\\shadow_shader.wgsl");
         const map_size: u32 = 2048; // 2048² 深度贴图
 
+        // BGL: binding 0 = LightUniform, binding 1 = ins_data (storage)
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
             .{ .binding = 0, .visibility = Wgpu.WGPUShaderStage_Vertex, .buffer = .{ .type = Wgpu.WGPUBufferBindingType_Uniform } },
+            .{ .binding = 1, .visibility = Wgpu.WGPUShaderStage_Vertex, .buffer = .{ .type = Wgpu.WGPUBufferBindingType_ReadOnlyStorage } },
         };
         const bind_group_layout = Wgpu.wgpuDeviceCreateBindGroupLayout(gctx.device, &.{
             .entryCount = bgl_entries.len,
@@ -46,13 +52,21 @@ pub const ShadowPipeline = struct {
         var u: LightUniform = .{ .light_vp = m };
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &u, @sizeOf(LightUniform));
 
+        // ins_data 用占位 buffer（后续通过 setInsDataBuffer 设置正式 buffer）
+        const dummy_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
+            .size = @sizeOf(InstanceData),
+            .usage = Wgpu.WGPUBufferUsage_Storage,
+            .mappedAtCreation = 0,
+        });
         const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
             .layout = bind_group_layout,
-            .entryCount = 1,
+            .entryCount = 2,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .offset = 0, .size = @sizeOf(LightUniform) },
+                .{ .binding = 1, .buffer = dummy_buffer, .offset = 0, .size = Wgpu.wgpuBufferGetSize(dummy_buffer) },
             },
         });
+        Wgpu.wgpuBufferRelease(dummy_buffer);
 
         const pipeline_layout = Wgpu.wgpuDeviceCreatePipelineLayout(gctx.device, &.{
             .bindGroupLayoutCount = 1,
@@ -124,8 +138,44 @@ pub const ShadowPipeline = struct {
             },
         });
 
+        // chunk 阴影管线：使用 ChunkVertex 紧凑格式（1 × u32）
+        const chunk_vertex_attribs = [_]Wgpu.WGPUVertexAttribute{
+            .{ .format = Wgpu.WGPUVertexFormat_Uint32, .offset = 0, .shaderLocation = 0 },
+        };
+        const chunk_vertex_buf_layout = Wgpu.WGPUVertexBufferLayout{
+            .arrayStride = @sizeOf(ChunkVertex),
+            .stepMode = Wgpu.WGPUVertexStepMode_Vertex,
+            .attributeCount = chunk_vertex_attribs.len,
+            .attributes = &chunk_vertex_attribs,
+        };
+        const chunk_pipeline = Wgpu.wgpuDeviceCreateRenderPipeline(gctx.device, &.{
+            .layout = pipeline_layout,
+            .vertex = .{
+                .module = shader_module,
+                .entryPoint = .{ .data = "vs_chunk", .length = 8 },
+                .bufferCount = 1,
+                .buffers = &chunk_vertex_buf_layout,
+            },
+            .fragment = null,
+            .primitive = .{ .topology = Wgpu.WGPUPrimitiveTopology_TriangleList, .cullMode = Wgpu.WGPUCullMode_None },
+            .multisample = .{ .count = 1, .mask = Wgpu.WGPUColorWriteMask_All },
+            .depthStencil = &Wgpu.WGPUDepthStencilState{
+                .format = Wgpu.WGPUTextureFormat_Depth32Float,
+                .depthWriteEnabled = 1,
+                .depthCompare = Wgpu.WGPUCompareFunction_Less,
+                .stencilFront = .{},
+                .stencilBack = .{},
+                .stencilReadMask = 0,
+                .stencilWriteMask = 0,
+                .depthBias = 0,
+                .depthBiasSlopeScale = 0,
+                .depthBiasClamp = 0.0,
+            },
+        });
+
         return ShadowPipeline{
             .handle = pipeline,
+            .chunk_handle = chunk_pipeline,
             .bind_group_layout = bind_group_layout,
             .bind_group = bind_group,
             .uniform_buffer = uniform_buffer,
@@ -175,8 +225,23 @@ pub const ShadowPipeline = struct {
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.uniform_buffer, 0, &u, @sizeOf(LightUniform));
     }
 
+    /// 设置实例数据 buffer（每帧更新，供 vs_chunk 读取 chunk origin）
+    pub fn setInsDataBuffer(self: *ShadowPipeline, gctx: *Gctx, buffer: Wgpu.WGPUBuffer) void {
+        self.ins_data_buffer = buffer;
+        if (self.bind_group) |old| Wgpu.wgpuBindGroupRelease(old);
+        self.bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
+            .layout = self.bind_group_layout,
+            .entryCount = 2,
+            .entries = &[_]Wgpu.WGPUBindGroupEntry{
+                .{ .binding = 0, .buffer = self.uniform_buffer, .offset = 0, .size = @sizeOf(LightUniform) },
+                .{ .binding = 1, .buffer = buffer, .offset = 0, .size = Wgpu.wgpuBufferGetSize(buffer) },
+            },
+        });
+    }
+
     pub fn deinit(self: *ShadowPipeline) void {
         Wgpu.wgpuRenderPipelineRelease(self.handle);
+        Wgpu.wgpuRenderPipelineRelease(self.chunk_handle);
         Wgpu.wgpuBindGroupLayoutRelease(self.bind_group_layout);
         Wgpu.wgpuBindGroupRelease(self.bind_group);
         Wgpu.wgpuBufferRelease(self.uniform_buffer);

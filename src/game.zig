@@ -446,7 +446,7 @@ pub fn deinit(self: *@This()) void {
 
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
-    self.chunk_radius = 32;
+    self.chunk_radius = 8;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，需要重建 BlockWorld
@@ -747,7 +747,7 @@ fn tryPlaceBlock(self: *Game) !void {
     const facing: Direction = blk: {
         const fn_ = hit.face_normal;
         if (fn_.y != 0) break :blk if (fn_.y > 0) .up else .down;
-        if (fn_.x != 0) break :blk if (fn_.x > 0) .east else .west;
+        if (fn_.x != 0) break :blk if (fn_.x > 0) .west else .east;
         break :blk if (fn_.z > 0) .south else .north;
     };
     try self.block_world.setBlock(place_pos, BlockState{ .block_id = block_id, .facing = facing });

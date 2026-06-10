@@ -151,55 +151,60 @@ UV 范围外返回 1.0（无阴影）。
 
 ---
 
-## 双管线顶点架构
+## 三管线顶点架构
 
-管线和 vertex 格式按"是否带骨骼"分拆，核心思路是用一个 vertex buffer 承载两种格式，两
-条 pipeline 读各自需要的 attribute。
+三种 vertex 格式分三条 pipeline 独立渲染，互不干扰。一个 `render_shader.wgsl` module 包含三个 `@vertex` 入口：
 
-### Vertex 格式
+| Pipeline | 顶点格式 | 顶点大小 | 用途 |
+|----------|---------|---------|------|
+| `pipeline_static` | `StaticVertex` | 32B (pos+normal+texcoord) | 无骨骼 glTF 模型 |
+| `pipeline_skinned` | `SkinnedVertex` | 64B (以上+joints+weights) | 骨骼动画模型 |
+| `pipeline_chunk` | `ChunkVertex` | **4B** (packed struct) | 区块（方块世界） |
 
+### ChunkVertex：极致紧凑的区块顶点
+
+区块顶点使用 `packed struct` 压缩到一个 u32 中，位置/法线/UV 全部靠 shader 推导：
+
+```zig
+pub const ChunkVertex = packed struct {
+    bx: u5,        // bits 0-4:   chunk 局部 X (0~16)
+    by: u8,        // bits 5-12:  垂直 Y (0~255)
+    bz: u5,        // bits 13-17: chunk 局部 Z (0~16)
+    face_dir: u3,  // bits 18-20: 局部面方向（UV用）
+    world_dir: u3, // bits 21-23: 世界面方向（法线用）
+    corner: u2,    // bits 24-25: quad 角索引 (0-3)
+    _pad: u6 = 0,  // bits 26-31
+};
 ```
-StaticVertex (32B)          SkinnedVertex (64B)
-┌────────────────┐          ┌────────────────┐
-│ position (12B) │          │ position (12B) │  ← 前三个字段与 Static 完全一致
-├────────────────┤          ├────────────────┤
-│ normal   (12B) │          │ normal   (12B) │
-├────────────────┤          ├────────────────┤
-│ texcoord ( 8B) │          │ texcoord ( 8B) │
-└────────────────┘          ├────────────────┤
-                             │ joint_indices  │  ← [4]u32, 16B
-                             ├────────────────┤
-                             │ joint_weights  │  ← [4]f32, 16B
-                             └────────────────┘
 ```
 
-两种 vertex 各自上传到独立的 vertex buffer，无空位浪费。static pipeline 读前
-32B（stride=32），skinned pipeline 读全部 64B（stride=64）。chunk 和模型各
-自的 buffer 内顶点连续排列。
+- **坐标**：通过 per-chunk instance 的 `translate(origin)` 转换为世界坐标
+- **法线**：`face_dir` 解码为 `vec3f`
+- **UV**：`corner` + `face_dir`，`computeChunkUV()` 直接算出整张纹理的 UV
+
+### 无索引画法
+
+区块使用非索引画法（`Draw()` 代替 `DrawIndexed()`），每 quad 直接写入 6 个顶点：
+
+```python
+三角形 1: v0(4B), v2(4B), v1(4B)    # face_data.positions[0,2,1]
+三角形 2: v0(4B), v3(4B), v2(4B)    # face_data.positions[0,3,2]
+= 6 × 4B = 24B  # 索引画法 4×4B + 6×4B = 40B，无索引节省 40%
+```
+
+- 无索引 → 无索引溢出风险、无 index buffer 显存占用
+- 顶点从 32B 降至 4B → 每 chunk 顶点显存下降 **87.5%**
 
 ### 动静模型的分化
 
 模型加载时通过 `gltf.data.skins.len > 0` 分支决定顶点类型：
 
-- **无骨骼（静态模型）** → `loadPrimitiveVertices(StaticVertex, ...)`，每顶点 32B，无浪费
+- **无骨骼（静态模型）** → `loadPrimitiveVertices(StaticVertex, ...)`，每顶点 32B
 - **有骨骼（蒙皮模型）** → `loadPrimitiveVertices(SkinnedVertex, ...)`，每顶点 64B
 
 底层使用泛型函数 `fn loadPrimitiveVertices(comptime V: type, ...)`，
 `.joints` / `.weights` 属性用 `if (V != StaticVertex)` 包裹——编译期
 消除，零运行时开销。
-
-chunk mesh 与静态模型共享同样的 `StaticVertex` 布局（32B），通过
-`chunk_mesh.zig` 独立上传，不走模型加载路径。
-
-### 两个 entry point + 两个 pipeline
-
-一个 `render_shader.wgsl` module 包含两个 `@vertex` 入口：
-
-- `vs_static(in: StaticVertex)` → `pipe_static`（attribute location 0-2，stride=32）
-- `vs_skinned(in: SkinnedVertex)` → `pipe_skinned`（attribute location 0-4，stride=64）
-
-共享同一个 `fs_main` 片段着色器。draw batch 通过 `vertex_format` 枚举
-（`static_model` / `skinned_model`）路由到对应 pipeline。
 
 ### 骨骼矩阵 storage buffer
 
