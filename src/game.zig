@@ -477,7 +477,7 @@ pub fn deinit(self: *@This()) void {
 
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
-    self.chunk_radius = 8;
+    self.chunk_radius = 16;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，需要重建 BlockWorld

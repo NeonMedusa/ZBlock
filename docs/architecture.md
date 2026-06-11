@@ -126,11 +126,21 @@ deinit()
 |--------|------|---------|
 | **Mesh** | 脏区块 → 生成 greedy mesh → 上传 vertex buffer（非索引，4B/顶点） | `pending` → `completed` |
 | **A\*** | 异步寻路计算 | `astar_pending` → `astar_completed` |
-| **IO** | 存档加载/保存（SQLite region 分片） | `pending_loads` / `pending_saves` → 统一 `pending_io_count` |
+| **IO** | 存档加载/保存（SQLite region 分片） | `io_queue_mutex` + `io_cond` 保护 `pending_saves` / `pending_loads` |
+
+### Worker 空闲阻塞机制
+
+三个 worker 在无任务时均使用**条件变量**（`std.Thread.Condition`）阻塞等待，而非轮询：
+
+- 有新任务入队时，入队方持有对应 mutex 并调用 `signal()` 唤醒 worker；worker 醒来后在 `while (队列空 and running)` 循环中重新判断，防止虚假唤醒
+- 避免了 `yield()` 空转（线程立即被重新调度，占满 CPU）和 `sleep()` 轮询（醒来后可能仍无任务）的问题
+- `deinit()` 停止 worker 时：先设 `running = false`，再 `signal()` 确保卡在 `wait()` 上的 worker 能退出
+- 三条 worker 独立使用各自的锁 + 条件变量：`mesh_mutex`+`mesh_cond`、`astar_pending_mutex`+`astar_cond`、`io_queue_mutex`+`io_cond`
 
 ### IO Worker 细节
 
 - 同时处理 save 和 load，通过 `pending_io_count` 原子计数器跟踪未完成任务
+- 两条队列共用一把 `io_queue_mutex`：`pending_saves` 和 `pending_loads` 在同一锁保护下访问，省去跨锁双重检查
 - 按 region（32×32 chunks）缓存 SQLite 连接（`region_caches` HashMap）
 - `saveAllChunks` + `flushIO()` 模式确保退出前所有脏数据落盘
 - 保存不执行 WAL checkpoint（已验证非必要开销）
