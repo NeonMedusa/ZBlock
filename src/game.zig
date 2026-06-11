@@ -257,17 +257,37 @@ fn initGame(self: *Game) !void {
     //     self.registry.add(debug_entity, Comps.Collider{ .width = 1.0, .height = 1.0 });
     // }
 
-    // 加载初始区块（异步 IO，入队后等待完成）
+    // 先恢复玩家存档位置（如果有存档）--- 必须在加载区块之前
+    // 原因：区块需要围绕玩家实际所在位置加载，而不是硬编码的 (8,8)。
+    // 如果调换顺序，玩家位置附近的区块未加载 → getBlockAt 全返回 air → 自由落体。
+    if (try self.save_manager.loadPlayer(&self.hotbar, &self.inventory, &self.registry)) |tc| {
+        self.tick_count = tc;
+    }
+
+    // 以玩家实际位置为中心加载区块
     {
+        const player_center: Vec3 = blk: {
+            var pv = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+            var pi = pv.entityIterator();
+            if (pi.next()) |entity| {
+                const p = pv.get(Comps.Player, entity);
+                if (p.id == self.player_id) {
+                    break :blk pv.get(Comps.Position, entity).vec;
+                }
+            }
+            break :blk Vec3.new(8, 130, 8);
+        };
         const player_origin = BlockWorld.BlockWorld.chunkOrigin(
-            @intFromFloat(@floor(8.0)),
-            @intFromFloat(@floor(8.0)),
+            @intFromFloat(@floor(player_center.x)),
+            @intFromFloat(@floor(player_center.z)),
         );
-        const range: i32 = 1;
-        var dx: i32 = -range;
-        while (dx <= range) : (dx += 1) {
-            var dz: i32 = -range;
-            while (dz <= range) : (dz += 1) {
+        const load_range: i32 = self.chunk_radius;
+        const load_range_sq = load_range * load_range;
+        var dx: i32 = -load_range;
+        while (dx <= load_range) : (dx += 1) {
+            var dz: i32 = -load_range;
+            while (dz <= load_range) : (dz += 1) {
+                if (dx * dx + dz * dz > load_range_sq) continue;
                 try self.block_world.loadChunk(.new(
                     player_origin.x + dx * BlockWorld.CHUNK_WIDTH_I32,
                     0,
@@ -277,26 +297,37 @@ fn initGame(self: *Game) !void {
         }
     }
 
-    if (try self.save_manager.loadPlayer(&self.hotbar, &self.inventory, &self.registry)) |tc| {
-        self.tick_count = tc;
+    // 同步等待所有异步 IO + mesh 构建完成
+    // pollEvents 确保加载期间窗口仍可拖拽缩放，不会被 Windows 标记为"无响应"
+    {
+        const Loading = @import("ui/loading_screen.zig");
+        var last_pending: usize = 0;
+        while (self.block_world.pendingIOCount() > 0 or self.block_world.pendingCount() > 0) {
+            self.window.pollEvents();
+            self.block_world.processCompletedLoads() catch {};
+            self.block_world.processCompletedBuilds() catch {};
+            self.block_world.processCompletedSaves();
+            std.Thread.yield() catch {};
+            const cur = self.block_world.pendingIOCount();
+            if (cur != last_pending) {
+                last_pending = cur;
+                self.ui_system.beginFrame();
+                Loading.draw(self);
+                self.ui_system.endFrame(&self.gctx) catch {};
+                Render.drawUI(self);
+            }
+        }
     }
 
-    var view = self.registry.view(.{ Comps.Player, Comps.Flying }, .{});
-    var iter = view.entityIterator();
-    if (iter.next()) |_| self.flying = true;
-
-    // 等待异步 IO 加载完成 + mesh 构建完成
-    while (self.block_world.pendingIOCount() > 0 or self.block_world.pendingCount() > 0) {
-        try self.block_world.processCompletedLoads();
-        try self.block_world.processCompletedBuilds();
-        std.Thread.yield() catch {};
+    {
+        var view = self.registry.view(.{ Comps.Player, Comps.Flying }, .{});
+        var iter = view.entityIterator();
+        if (iter.next()) |_| self.flying = true;
     }
-    try self.block_world.processCompletedLoads();
-    try self.block_world.processCompletedBuilds();
 
     self.save_manager.loadAllEntities(&self.registry) catch |err| std.debug.print("loadEntities error: {}\n", .{err});
 
-    // 为存档加载的实体补加动画状态（不持久化到存档）
+    // 为存档加载的实体补加动画状态
     {
         var anim_view = self.registry.view(.{Comps.ModelName}, .{});
         var anim_iter = anim_view.entityIterator();
@@ -446,7 +477,7 @@ pub fn deinit(self: *@This()) void {
 
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
-    self.chunk_radius = 32;
+    self.chunk_radius = 8;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，需要重建 BlockWorld

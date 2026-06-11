@@ -19,6 +19,7 @@ src/
 │
 ├── ui_system.zig          — UI 系统（SDF 文字 + 矩形渲染）
 ├── ui/
+│   ├── loading_screen.zig — 世界生成/加载等待界面（仅文字提示）
 │   ├── main_menu.zig
 │   ├── pause_menu.zig
 │   ├── save_menu.zig
@@ -95,7 +96,12 @@ main()
       └─ Game.start()     ← 主循环，显示主菜单
           └─ 用户选存档
               └─ startSave(name)  ← 初始化存档 + BlockWorld + worker 线程
-                  └─ initGame()   ← 加载玩家/实体/区块
+                  └─ initGame()   ← ①创建玩家 → ②loadPlayer(恢复位置)
+                                    → ③以玩家位置为中心加载区块(同步等待)
+                                    → ④loadAllEntities → ⑤游戏循环启动
+
+**关键：先恢复玩家位置，再加载区块。**
+否则区块会围绕硬编码的 (8,8) 加载，玩家实际位置附近无区块 → 自由落体。
 
 returnToMenu()
   └─ 保存当前状态 → registry.deinit() → block_world.deinit()
@@ -118,9 +124,9 @@ deinit()
 
 | Worker | 职责 | 通信方式 |
 |--------|------|---------|
-| **Mesh** | 脏区块 → 生成 greedy mesh → 上传 vertex buffer（非索引，4B/顶点） | `pending_builds` → `completed_builds` |
-| **A\*** | 异步寻路计算 | `pending_pathfind` → `completed_paths` |
-| **IO** | 存档加载/保存（SQLite region 分片） | `pending_loads` + `pending_saves` → 统一 `pending_io_count` |
+| **Mesh** | 脏区块 → 生成 greedy mesh → 上传 vertex buffer（非索引，4B/顶点） | `pending` → `completed` |
+| **A\*** | 异步寻路计算 | `astar_pending` → `astar_completed` |
+| **IO** | 存档加载/保存（SQLite region 分片） | `pending_loads` / `pending_saves` → 统一 `pending_io_count` |
 
 ### IO Worker 细节
 
