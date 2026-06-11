@@ -139,6 +139,7 @@ pub fn start(self: *Game) !void {
                     }
                     self.block_world.updateAI(&self.registry, TICK_DT);
                     try updateEntities(self);
+                    try updateChunks(self);
                     // 动画更新（物理 tick 层）
                     self.animation_system.update(&self.registry, &self.res_manager, TICK_DT);
                 }
@@ -162,7 +163,6 @@ pub fn start(self: *Game) !void {
                 // 骨骼矩阵插值并上传到 GPU
                 self.animation_system.upload(self.gctx.queue, self.accumulator / TICK_DT);
                 syncCameraFromPlayer(self);
-                try updateChunks(self);
             }
 
             if (self.menu_state == .Gameplay) {
@@ -1007,6 +1007,16 @@ fn updateChunks(self: *Game) !void {
         );
         const pcx = @divFloor(player_origin.x, BlockWorld.CHUNK_WIDTH_I32);
         const pcz = @divFloor(player_origin.z, BlockWorld.CHUNK_WIDTH_I32);
+
+        // 用 prev 算上一次物理 tick 时的区块坐标
+        // 如果玩家没有跨区块移动，直接跳过加载/卸载
+        const prev_origin = BlockWorld.BlockWorld.chunkOrigin(
+            @intFromFloat(@floor(pos.prev.x)),
+            @intFromFloat(@floor(pos.prev.z)),
+        );
+        const prev_cx = @divFloor(prev_origin.x, BlockWorld.CHUNK_WIDTH_I32);
+        const prev_cz = @divFloor(prev_origin.z, BlockWorld.CHUNK_WIDTH_I32);
+        if (pcx == prev_cx and pcz == prev_cz) break;
 
         const load_range: i32 = self.chunk_radius;
         const load_range_sq = load_range * load_range;
