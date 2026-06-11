@@ -350,8 +350,8 @@ pub const BlockWorld = struct {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
         errdefer material_registry.deinit();
 
-        const count = (2 * chunk_radius + 1) * (2 * chunk_radius + 1);
-        const max_chunks = count * 2; // 2x 预分配余量，覆盖加载 + 异步排队等场景
+        const count = (chunk_radius + 1) * (chunk_radius + 1);
+        const max_chunks = count * 3; // 3x 预分配余量，覆盖加载 + 异步排队等场景
 
         var chunks = std.AutoHashMap(Vec3i, LoadedChunk).init(allocator);
         errdefer chunks.deinit();
@@ -1518,9 +1518,11 @@ fn meshWorkerFn(world: *BlockWorld) void {
                 world.completed_mutex.unlock();
             }
         } else {
-            std.Thread.yield() catch {};
+            std.Thread.sleep(3_000_000); // 空闲休眠 3ms，避免 yield 空转
+            continue;
         }
-        std.Thread.yield() catch {}; // 每轮让步主线程上传 mesh 数据到 GPU
+        // 完成工作后短暂让步，让主线程有机会处理 completed
+        std.Thread.yield() catch {};
     }
 }
 
@@ -1556,7 +1558,11 @@ fn astarWorkerFn(world: *BlockWorld) void {
                 active = null;
             }
         }
-        std.Thread.yield() catch {};
+        if (active == null) {
+            std.Thread.sleep(3_000_000); // 空闲休眠 3ms
+        } else {
+            std.Thread.yield() catch {};
+        }
     }
     if (active) |*t| Pathfind.deinitAStar(&t.state);
 }
@@ -1780,7 +1786,7 @@ fn ioWorkerFn(world: *BlockWorld) void {
             world.completed_loads_mutex.unlock();
             _ = world.pending_io_count.fetchSub(1, .release);
         } else {
-            std.Thread.yield() catch {};
+            std.Thread.sleep(3_000_000); // 空闲休眠 3ms
         }
     }
 }
