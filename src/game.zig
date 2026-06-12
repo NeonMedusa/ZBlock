@@ -674,7 +674,7 @@ fn handleLeftClick(self: *Game) !void {
     const ray = self.camera.getCursorRay();
 
     // 同时检测实体和方块，比较距离：谁近打谁（防止隔墙攻击实体）
-    const entity_hit = Raycast.raycastEntities(&self.registry, ray, 8.0);
+    const entity_hit = Raycast.raycastEntities(&self.registry, &self.block_world.bvh, ray, 8.0);
     const block_hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
 
     if (entity_hit.hit and (!block_hit.hit or entity_hit.distance < block_hit.distance)) {
@@ -947,7 +947,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 0;
+        const MAX_ENEMIES: u32 = 10;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

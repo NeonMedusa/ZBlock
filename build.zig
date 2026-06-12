@@ -81,6 +81,18 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("fridge", fridge_dep.module("fridge"));
 
+    // ─── 测试 ───
+    const test_exe = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/bvh.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const run_test = b.addRunArtifact(test_exe);
+    const test_step = b.step("test", "Run BVH tests");
+    test_step.dependOn(&run_test.step);
+
     // 复制资源文件
     b.installDirectory(.{
         .source_dir = b.path("resources"),

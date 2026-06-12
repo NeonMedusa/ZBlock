@@ -52,6 +52,7 @@ src/
 │   └── health_system.zig  — 实体伤害/回复系统
 │
 ├── aabb.zig               — 轴对齐包围盒
+├── bvh.zig                — 动态 AABB 树（BVH 宽相位碰撞检测，含测试）
 ├── algebra.zig            — 线性代数类型（Vec3/Mat4/Quat）
 ├── direction.zig          — 朝向枚举（6 方向）
 ├── sparse_set.zig         — 稀疏集（ECS 底层存储）
@@ -199,6 +200,17 @@ render(alpha = accumulator / TICK_DT)  ← 插值渲染
 - 天空时间 = `tick_count × TICK_DT + accumulator`，与渲染插值一致
 - Pause 模式下 `tick_count` 不递增，时间冻结
 - Inventory 模式下时间继续，`syncCameraFromPlayer` 同步视角
+
+### 实体碰撞检测与射线检测（BVH）
+
+使用**动态 AABB 树（BVH）**加速实体间碰撞和射线检测（`src/bvh.zig`）：
+
+- **排斥力宽相位**：每个物理 tick 开头清空并重建 BVH，遍历所有实体插入紧凑 AABB
+  - 胖 AABB（margin=50%）粗筛候选对 → 紧凑 AABB 二次精筛 → 施加排斥力
+  - 将 O(n²) 降至接近 O(n log n)
+- **射线检测**：物理 tick 之间 BVH 保持有效，射线遍历树（O(log n)）取代线性扫描全部实体
+  - BVH 节点 AABB 粗筛 → 叶子节点的紧凑 AABB 精测 → 返回最近实体
+- 树结构采用增量插入 + SAH 启发式搜索兄弟节点
 
 ---
 

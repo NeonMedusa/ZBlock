@@ -18,6 +18,7 @@ const BlockState = @import("block_registry.zig").BlockState;
 const MAX_BLOCKS = @import("block_registry.zig").MAX_BLOCKS;
 const Pathfind = @import("pathfind.zig");
 const bitstream = @import("bitstream.zig");
+const Bvh = @import("bvh.zig").Bvh;
 const readBits = bitstream.readBits;
 const writeBits = bitstream.writeBits;
 const fr = @import("fridge");
@@ -349,6 +350,8 @@ pub const BlockWorld = struct {
     io_cond: std.Thread.Condition = .{}, // 有新的 IO 任务时 signal
     pending_io_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
+    bvh: Bvh = undefined, // 实体宽相位碰撞检测（物理 tick 内重建）
+
     pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, pipeline: *RenderPipeline, chunk_radius: i32, save_name: []const u8) !BlockWorld {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
         errdefer material_registry.deinit();
@@ -395,6 +398,7 @@ pub const BlockWorld = struct {
             .pending_loads = .{},
             .completed_loads = .{},
             .io_active_loads = std.AutoHashMap(Vec3i, void).init(allocator),
+            .bvh = Bvh.init(allocator, 0.5),
         };
     }
 
@@ -498,6 +502,7 @@ pub const BlockWorld = struct {
             self.stale_targets.deinit();
         }
         self.last_exact_targets.deinit();
+        self.bvh.deinit();
 
         _ = self.worker_gpa.deinit();
     }
@@ -934,52 +939,64 @@ pub const BlockWorld = struct {
         }
 
         // ============================================================
-        // 第二阶段：实体间碰撞排斥
-        // 对发生 AABB 重叠的实体对施加水平排斥力（不修改位置，仅调整速度）
+        // 第二阶段：实体间碰撞排斥（BVH 宽相位加速）
         // ============================================================
         {
             const REPEL_FORCE: f32 = 3.0;
-            var push_view = registry.view(.{ Comps.Position, Comps.Collider, Comps.Velocity }, .{});
-            var push_iter_a = push_view.entityIterator();
-            while (push_iter_a.next()) |entity_a| {
-                const pos_a = push_view.get(Comps.Position, entity_a);
-                const col_a = push_view.get(Comps.Collider, entity_a);
-                const vel_a = push_view.get(Comps.Velocity, entity_a);
-                const box_a = getEntityAABB(pos_a.vec, col_a);
+            var ent_view = registry.view(.{ Comps.Position, Comps.Collider, Comps.Velocity }, .{});
 
-                var push_iter_b = push_view.entityIterator();
-                while (push_iter_b.next()) |entity_b| {
-                    // 跳过自身以及已处理过的实体对
-                    if (@as(u32, @bitCast(entity_b)) <= @as(u32, @bitCast(entity_a))) continue;
-                    const pos_b = push_view.get(Comps.Position, entity_b);
-                    const col_b = push_view.get(Comps.Collider, entity_b);
-                    const vel_b = push_view.get(Comps.Velocity, entity_b);
-                    const box_b = getEntityAABB(pos_b.vec, col_b);
-
-                    // AABB 相交检测
-                    if (box_a.min_x < box_b.max_x and box_a.max_x > box_b.min_x and
-                        box_a.min_y < box_b.max_y and box_a.max_y > box_b.min_y and
-                        box_a.min_z < box_b.max_z and box_a.max_z > box_b.min_z)
-                    {
-                        // 水平排斥方向（A → B）
-                        const dx = pos_b.vec.x - pos_a.vec.x;
-                        const dz = pos_b.vec.z - pos_a.vec.z;
-                        const dist = @max(@sqrt(dx * dx + dz * dz), 0.001);
-                        const nx = dx / dist;
-                        const nz = dz / dist;
-
-                        // 排斥力大小与重叠深度成正比
-                        const overlap_x = @min(box_a.max_x - box_b.min_x, box_b.max_x - box_a.min_x);
-                        const overlap_z = @min(box_a.max_z - box_b.min_z, box_b.max_z - box_a.min_z);
-                        const push = @max(overlap_x, overlap_z) * REPEL_FORCE;
-
-                        vel_a.vec.x -= nx * push;
-                        vel_a.vec.z -= nz * push;
-                        vel_b.vec.x += nx * push;
-                        vel_b.vec.z += nz * push;
-                    }
+            // 构建 BVH（重建前先清空旧树）
+            self.bvh.clear();
+            {
+                var it = ent_view.entityIterator();
+                while (it.next()) |entity| {
+                    const pos = ent_view.get(Comps.Position, entity);
+                    const col = ent_view.get(Comps.Collider, entity);
+                    const aabb = getEntityAABB(pos.vec, col);
+                    self.bvh.insert(@as(u32, @bitCast(entity)), aabb) catch {};
                 }
             }
+
+            // BVH 查询 + 施加排斥力
+            const Ctx = struct {
+                registry: *ECS.Registry,
+                repel: f32,
+                fn callback(ctx: @This(), a: u32, b: u32) void {
+                    const ea: ECS.Entity = @bitCast(a);
+                    const eb: ECS.Entity = @bitCast(b);
+                    const pos_a = ctx.registry.get(Comps.Position, ea);
+                    const pos_b = ctx.registry.get(Comps.Position, eb);
+                    const vel_a = ctx.registry.get(Comps.Velocity, ea);
+                    const vel_b = ctx.registry.get(Comps.Velocity, eb);
+                    const col_a = ctx.registry.get(Comps.Collider, ea);
+                    const col_b = ctx.registry.get(Comps.Collider, eb);
+
+                    const box_a = getEntityAABB(pos_a.vec, col_a);
+                    const box_b = getEntityAABB(pos_b.vec, col_b);
+
+                    // 只处理紧凑 AABB 真正重叠的对（BVH 的胖 AABB 粗筛后二次精筛）
+                    if (!(box_a.min_x < box_b.max_x and box_a.max_x > box_b.min_x and
+                          box_a.min_y < box_b.max_y and box_a.max_y > box_b.min_y and
+                          box_a.min_z < box_b.max_z and box_a.max_z > box_b.min_z)) return;
+
+                    // 水平排斥方向（A → B）
+                    const dx = pos_b.vec.x - pos_a.vec.x;
+                    const dz = pos_b.vec.z - pos_a.vec.z;
+                    const dist = @max(@sqrt(dx * dx + dz * dz), 0.001);
+                    const nx = dx / dist;
+                    const nz = dz / dist;
+
+                    const overlap_x = @min(box_a.max_x - box_b.min_x, box_b.max_x - box_a.min_x);
+                    const overlap_z = @min(box_a.max_z - box_b.min_z, box_b.max_z - box_a.min_z);
+                    const push = @max(overlap_x, overlap_z) * ctx.repel;
+
+                    vel_a.vec.x -= nx * push;
+                    vel_a.vec.z -= nz * push;
+                    vel_b.vec.x += nx * push;
+                    vel_b.vec.z += nz * push;
+                }
+            };
+            self.bvh.queryPairs(Ctx{ .registry = registry, .repel = REPEL_FORCE }, Ctx.callback);
         }
     }
 
