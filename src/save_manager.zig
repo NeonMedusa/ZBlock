@@ -20,35 +20,32 @@ fn chunkToRegion(cx: i32, cz: i32) struct { i32, i32 } {
 }
 
 // ═══════════════════════════════════════════════════════════
+//  玩家数据 JSON 格式
+// ═══════════════════════════════════════════════════════════
+
+const PlayerJson = struct {
+    pos: [3]f32,
+    health: f32,
+    flying: bool,
+    facing: [2]f32,
+    hotbar: [9]?ItemSlotJson,
+    inventory: [27]?ItemSlotJson,
+};
+
+const ItemSlotJson = struct {
+    id: []const u8,
+    count: u32,
+};
+
+// ═══════════════════════════════════════════════════════════
 //  世界元数据（world.db）
 // ═══════════════════════════════════════════════════════════
 
-const WorldRow = struct {
+const WorldMeta = struct {
     id: ?i64 = null,
     created_at: []const u8,
     last_played: []const u8,
-    player_pos_x: f32,
-    player_pos_y: f32,
-    player_pos_z: f32,
-    player_health: f32,
-    is_flying: i64,
     tick_count: i64 = 0,
-    player_facing_yaw: f32 = 0,
-    player_facing_pitch: f32 = 0,
-};
-
-const HotbarRow = struct {
-    id: ?i64 = null,
-    slot: u32,
-    item_name: []const u8,
-    count: u32,
-};
-
-const InventoryRow = struct {
-    id: ?i64 = null,
-    slot: u32,
-    item_name: []const u8,
-    count: u32,
 };
 
 const EntityRow = struct {
@@ -85,6 +82,9 @@ pub const SaveManager = struct {
         const reg_dir = try std.fs.path.join(allocator, &.{ save_dir, "regions" });
         defer allocator.free(reg_dir);
         std.fs.cwd().makePath(reg_dir) catch {};
+        const players_dir = try std.fs.path.join(allocator, &.{ save_dir, "players" });
+        defer allocator.free(players_dir);
+        std.fs.cwd().makePath(players_dir) catch {};
 
         const world_tmp = try std.fs.path.join(allocator, &.{ save_dir, "world.db" });
         defer allocator.free(world_tmp);
@@ -92,21 +92,11 @@ pub const SaveManager = struct {
         defer allocator.free(world_path);
         var wdb = try fr.Session.open(fr.SQLite3, allocator, .{ .filename = world_path });
         try wdb.conn.execAll(
-            \\CREATE TABLE IF NOT EXISTS "WorldRow" (
+            \\CREATE TABLE IF NOT EXISTS "WorldMeta" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
             \\  created_at TEXT NOT NULL DEFAULT (datetime('now')),
             \\  last_played TEXT NOT NULL DEFAULT (datetime('now')),
-            \\  player_pos_x REAL NOT NULL, player_pos_y REAL NOT NULL, player_pos_z REAL NOT NULL,
-            \\  player_health REAL NOT NULL,
-            \\  is_flying INTEGER NOT NULL DEFAULT 0,
-            \\  tick_count INTEGER NOT NULL DEFAULT 0,
-            \\  player_facing_yaw REAL NOT NULL DEFAULT 0, player_facing_pitch REAL NOT NULL DEFAULT 0);
-            \\CREATE TABLE IF NOT EXISTS "HotbarRow" (
-            \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
-            \\  item_name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1);
-            \\CREATE TABLE IF NOT EXISTS "InventoryRow" (
-            \\  id INTEGER PRIMARY KEY AUTOINCREMENT, slot INTEGER NOT NULL,
-            \\  item_name TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 1);
+            \\  tick_count INTEGER NOT NULL DEFAULT 0);
             \\CREATE TABLE IF NOT EXISTS "EntityRow" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT, type_id TEXT NOT NULL,
             \\  pos_x REAL NOT NULL, pos_y REAL NOT NULL, pos_z REAL NOT NULL,
@@ -132,128 +122,191 @@ pub const SaveManager = struct {
         self.world_db.deinit();
     }
 
-    // ── 玩家 ──
+    // ── 玩家（JSON 文件：players/<player_id>.json）──
 
-    pub fn savePlayer(self: *SaveManager, hotbar: *const Hotbar, inventory: *const PlayerInventory, registry: *ECS.Registry, tick_count: u64) !void {
-        // 清空旧的 Hotbar
-        {
-            var stmt = try self.world_db.conn.prepare("DELETE FROM HotbarRow", &.{});
-            defer stmt.deinit();
-            try stmt.exec();
-        }
-        // 写入热键栏
-        for (&hotbar.slots, 0..) |*item, i| {
-            if (item.item_id == 0) continue;
-            var ins = try self.world_db.conn.prepare("INSERT INTO HotbarRow (slot, item_name, count) VALUES (?, ?, ?)", &.{});
-            defer ins.deinit();
-            try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
-            try ins.bind(1, fr.Value{ .string = item_infos[item.item_id].name });
-            try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
-            try ins.exec();
-        }
+    fn playerPath(self: *const SaveManager, player_id: []const u8) ![]u8 {
+        return std.fmt.allocPrint(self.allocator, "{s}/players/{s}.json", .{ self.save_dir, player_id });
+    }
 
-        // 写入背包
-        {
-            var del = try self.world_db.conn.prepare("DELETE FROM InventoryRow", &.{});
-            defer del.deinit();
-            try del.exec();
-        }
-        for (&inventory.slots, 0..) |*item, i| {
-            if (item.item_id == 0) continue;
-            var ins = try self.world_db.conn.prepare("INSERT INTO InventoryRow (slot, item_name, count) VALUES (?, ?, ?)", &.{});
-            defer ins.deinit();
-            try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(i)) });
-            try ins.bind(1, fr.Value{ .string = item_infos[item.item_id].name });
-            try ins.bind(2, fr.Value{ .int = @as(i64, @intCast(item.count)) });
-            try ins.exec();
-        }
+    pub fn savePlayer(self: *SaveManager, player_id: []const u8, hotbar: *const Hotbar, inventory: *const PlayerInventory, registry: *ECS.Registry, tick_count: u64) !void {
+        var pj = PlayerJson{
+            .pos = undefined,
+            .health = 100,
+            .flying = false,
+            .facing = .{ 0, 0 },
+            .hotbar = .{null} ** 9,
+            .inventory = .{null} ** 27,
+        };
 
-        // 查找玩家实体获取位置和生命（先删后插，保持单行）
-        {
-            var del = try self.world_db.conn.prepare("DELETE FROM WorldRow", &.{});
-            defer del.deinit();
-            try del.exec();
-        }
         var view = registry.view(.{ Comps.Player, Comps.Position, Comps.Health }, .{});
         var iter = view.entityIterator();
         if (iter.next()) |entity| {
             const pos = view.get(Comps.Position, entity);
             const hp = view.get(Comps.Health, entity);
-            const flying: i64 = @intFromBool(registry.has(Comps.Flying, entity));
-            const facing_yaw: f64 = if (registry.tryGet(Comps.Facing, entity)) |f| @floatCast(f.yaw) else 0.0;
-            const facing_pitch: f64 = if (registry.tryGet(Comps.Facing, entity)) |f| @floatCast(f.pitch) else 0.0;
-            var ins = try self.world_db.conn.prepare(
-                \\INSERT INTO WorldRow (created_at, last_played,
-                \\  player_pos_x, player_pos_y, player_pos_z, player_health, is_flying,
-                \\  tick_count, player_facing_yaw, player_facing_pitch)
-                \\  VALUES (datetime('now'), datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)
-            , &.{});
-            defer ins.deinit();
-            try ins.bind(0, fr.Value{ .float = @as(f64, @floatCast(pos.vec.x)) });
-            try ins.bind(1, fr.Value{ .float = @as(f64, @floatCast(pos.vec.y)) });
-            try ins.bind(2, fr.Value{ .float = @as(f64, @floatCast(pos.vec.z)) });
-            try ins.bind(3, fr.Value{ .float = @as(f64, @floatCast(hp.current)) });
-            try ins.bind(4, fr.Value{ .int = flying });
-            try ins.bind(5, fr.Value{ .int = @as(i64, @intCast(tick_count)) });
-            try ins.bind(6, fr.Value{ .float = facing_yaw });
-            try ins.bind(7, fr.Value{ .float = facing_pitch });
-            try ins.exec();
+            pj.pos = .{ pos.vec.x, pos.vec.y, pos.vec.z };
+            pj.health = hp.current;
+            pj.flying = registry.has(Comps.Flying, entity);
+            if (registry.tryGet(Comps.Facing, entity)) |f| {
+                pj.facing = .{ f.yaw, f.pitch };
+            }
         }
+
+        for (&hotbar.slots, 0..) |*item, i| {
+            if (item.item_id == 0) continue;
+            pj.hotbar[i] = ItemSlotJson{ .id = item_infos[item.item_id].name, .count = item.count };
+        }
+        for (&inventory.slots, 0..) |*item, i| {
+            if (item.item_id == 0) continue;
+            pj.inventory[i] = ItemSlotJson{ .id = item_infos[item.item_id].name, .count = item.count };
+        }
+
+        var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(self.allocator);
+        const w = buf.writer(self.allocator);
+        try w.print("pos:{d:.1},{d:.1},{d:.1}\n", .{ pj.pos[0], pj.pos[1], pj.pos[2] });
+        try w.print("health:{d:.1}\n", .{pj.health});
+        try w.print("flying:{}\n", .{pj.flying});
+        try w.print("facing:{d:.4},{d:.4}\n", .{ pj.facing[0], pj.facing[1] });
+        for (&pj.hotbar, 0..) |*slot, i| {
+            try w.print("h{}", .{i});
+            if (slot.*) |s| {
+                try w.print(":{s},{d}\n", .{ s.id, s.count });
+            } else {
+                try w.print(":\n", .{});
+            }
+        }
+        for (&pj.inventory, 0..) |*slot, i| {
+            try w.print("i{}", .{i});
+            if (slot.*) |s| {
+                try w.print(":{s},{d}\n", .{ s.id, s.count });
+            } else {
+                try w.print(":\n", .{});
+            }
+        }
+        const bytes = try buf.toOwnedSlice(self.allocator);
+
+        const path = try self.playerPath(player_id);
+        defer self.allocator.free(path);
+
+        var file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        try file.writeAll(bytes);
+        self.allocator.free(bytes);
+
+        // 更新世界元数据的 last_played 和 tick_count
+        {
+            var del = try self.world_db.conn.prepare("DELETE FROM WorldMeta", &.{});
+            defer del.deinit();
+            try del.exec();
+        }
+        var ins = try self.world_db.conn.prepare(
+            \\INSERT INTO WorldMeta (created_at, last_played, tick_count)
+            \\  VALUES (datetime('now'), datetime('now'), ?)
+        , &.{});
+        defer ins.deinit();
+        try ins.bind(0, fr.Value{ .int = @as(i64, @intCast(tick_count)) });
+        try ins.exec();
     }
 
     /// 加载玩家数据，返回 tick_count（如果存档有记录）
-    pub fn loadPlayer(self: *SaveManager, hotbar: *Hotbar, inventory: *PlayerInventory, registry: *ECS.Registry) !?u64 {
-        // WorldInfo — 恢复位置、血量、飞行、物理状态
-        const rows = try self.world_db.query(WorldRow).findAll();
-        if (rows.len > 0) {
-            const info = rows[0];
+    pub fn loadPlayer(self: *SaveManager, player_id: []const u8, hotbar: *Hotbar, inventory: *PlayerInventory, registry: *ECS.Registry) !?u64 {
+        const path = blk: {
+            const p = self.playerPath(player_id) catch |err| {
+                std.debug.print("loadPlayer path error: {}\n", .{err});
+                break :blk null;
+            };
+            break :blk p;
+        };
+        if (path) |p| {
+            defer self.allocator.free(p);
+            const file = std.fs.cwd().readFileAlloc(self.allocator, p, 1024 * 64) catch {
+                return self.loadWorldTickCount();
+            };
+            defer self.allocator.free(file);
+
+            var pj = PlayerJson{
+                .pos = .{ 8, 130, 8 },
+                .health = 100,
+                .flying = false,
+                .facing = .{ 0, 0 },
+                .hotbar = .{null} ** 9,
+                .inventory = .{null} ** 27,
+            };
+            // 解析前清空，确保未在文件中出现的槽位保持空
+            @memset(hotbar.slots[0..], @import("inventory.zig").ItemStack{});
+            @memset(inventory.slots[0..], @import("inventory.zig").ItemStack{});
+            var lines = std.mem.splitScalar(u8, file, '\n');
+            while (lines.next()) |line| {
+                if (line.len == 0) continue;
+                if (std.mem.startsWith(u8, line, "pos:")) {
+                    var parts = std.mem.splitScalar(u8, line[4..], ',');
+                    pj.pos[0] = std.fmt.parseFloat(f32, parts.next() orelse "0") catch 0;
+                    pj.pos[1] = std.fmt.parseFloat(f32, parts.next() orelse "0") catch 0;
+                    pj.pos[2] = std.fmt.parseFloat(f32, parts.next() orelse "0") catch 0;
+                } else if (std.mem.startsWith(u8, line, "health:")) {
+                    pj.health = std.fmt.parseFloat(f32, line[7..]) catch 100;
+                } else if (std.mem.startsWith(u8, line, "flying:")) {
+                    pj.flying = std.mem.eql(u8, line[7..], "true");
+                } else if (std.mem.startsWith(u8, line, "facing:")) {
+                    var parts = std.mem.splitScalar(u8, line[7..], ',');
+                    pj.facing[0] = std.fmt.parseFloat(f32, parts.next() orelse "0") catch 0;
+                    pj.facing[1] = std.fmt.parseFloat(f32, parts.next() orelse "0") catch 0;
+                } else if (line.len > 1 and line[0] == 'h' and line[1] >= '0' and line[1] <= '8') {
+                    const idx = line[1] - '0';
+                    if (line.len > 3 and line[2] == ':') {
+                        var parts = std.mem.splitScalar(u8, line[3..], ',');
+                        pj.hotbar[idx] = ItemSlotJson{ .id = parts.next() orelse "", .count = std.fmt.parseInt(u32, parts.next() orelse "0", 10) catch 0 };
+                    }
+                } else if (line.len > 1 and line[0] == 'i') {
+                    const colon_pos = std.mem.indexOfScalar(u8, line, ':') orelse continue;
+                    const idx = std.fmt.parseInt(u5, line[1..colon_pos], 10) catch continue;
+                    if (idx >= 27) continue;
+                    const after_colon = line[colon_pos + 1 ..];
+                    if (after_colon.len > 0) {
+                        var parts = std.mem.splitScalar(u8, after_colon, ',');
+                        pj.inventory[idx] = ItemSlotJson{ .id = parts.next() orelse "", .count = std.fmt.parseInt(u32, parts.next() orelse "0", 10) catch 0 };
+                    }
+                }
+            }
+
             var view = registry.view(.{ Comps.Player, Comps.Position, Comps.Health }, .{});
             var iter = view.entityIterator();
             if (iter.next()) |entity| {
                 var pos = view.get(Comps.Position, entity);
-                pos.vec = Vec3.new(info.player_pos_x, info.player_pos_y + 0.01, info.player_pos_z);
+                pos.vec = Vec3.new(pj.pos[0], pj.pos[1] + 0.01, pj.pos[2]);
                 var health = view.get(Comps.Health, entity);
-                health.current = info.player_health;
+                health.current = pj.health;
                 if (registry.tryGet(Comps.Velocity, entity)) |vel| vel.vec = Vec3.zero;
                 if (registry.tryGet(Comps.OnGround, entity)) |og| og.value = true;
                 if (registry.tryGet(Comps.Facing, entity)) |facing| {
-                    facing.yaw = info.player_facing_yaw;
-                    facing.pitch = info.player_facing_pitch;
+                    facing.yaw = pj.facing[0];
+                    facing.pitch = pj.facing[1];
                 }
-                if (info.is_flying != 0) registry.add(entity, Comps.Flying{});
+                if (pj.flying) registry.add(entity, Comps.Flying{});
             }
-        }
 
-        // Hotbar
-        {
-            const slots = try self.world_db.query(HotbarRow).findAll();
-            for (slots) |s| {
-                if (s.slot < 9) {
-                    const id = registries.item_name_to_id.get(s.item_name) orelse 0;
-                    hotbar.slots[@as(usize, @intCast(s.slot))] = .{
-                        .item_id = id,
-                        .count = s.count,
-                    };
+            for (pj.hotbar, 0..) |maybe_slot, i| {
+                if (maybe_slot) |slot| {
+                    const id = registries.item_name_to_id.get(slot.id) orelse 0;
+                    hotbar.slots[i] = .{ .item_id = id, .count = slot.count };
                 }
             }
-        }
-
-        // 背包
-        {
-            const slots = try self.world_db.query(InventoryRow).findAll();
-            for (slots) |s| {
-                if (s.slot < 27) {
-                    const id = registries.item_name_to_id.get(s.item_name) orelse 0;
-                    inventory.slots[@as(usize, @intCast(s.slot))] = .{
-                        .item_id = id,
-                        .count = s.count,
-                    };
+            for (pj.inventory, 0..) |maybe_slot, i| {
+                if (maybe_slot) |slot| {
+                    const id = registries.item_name_to_id.get(slot.id) orelse 0;
+                    inventory.slots[i] = .{ .item_id = id, .count = slot.count };
                 }
             }
-        }
 
-        // 返回 tick_count（如果有）
-        if (rows.len > 0) return @as(u64, @intCast(rows[0].tick_count));
+            return self.loadWorldTickCount();
+        }
+        return self.loadWorldTickCount();
+    }
+
+    /// 从世界元数据读取 tick_count（无玩家文件时也调用）
+    fn loadWorldTickCount(self: *SaveManager) ?u64 {
+        const rows = self.world_db.query(WorldMeta).findAll() catch return null;
+        if (rows.len > 0) return @intCast(rows[0].tick_count);
         return null;
     }
 
@@ -326,7 +379,6 @@ pub const SaveManager = struct {
                 save_count += 1;
             }
         }
-        std.debug.print("saveAllChunks: {d} dirty\n", .{save_count});
         world.flushIO();
     }
 
@@ -422,7 +474,7 @@ pub const SaveManager = struct {
         defer std.heap.page_allocator.free(path_z);
         var db = fr.Session.open(fr.SQLite3, std.heap.page_allocator, .{ .filename = path_z }) catch return null;
         defer db.deinit();
-        const rows = db.query(WorldRow).findAll() catch return null;
+        const rows = db.query(WorldMeta).findAll() catch return null;
         if (rows.len == 0) return null;
         return std.heap.page_allocator.dupe(u8, rows[0].last_played) catch null;
     }

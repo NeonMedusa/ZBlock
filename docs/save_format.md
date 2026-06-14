@@ -2,63 +2,30 @@
 
 ## 总览
 
-游戏存档使用 SQLite 数据库，分两层存储：
+存档分为三层存储：
 
-- **world.db** — 世界元数据（玩家、热栏、背包、实体）
-- **region/r\_x\_z.db** — 区块数据（按 32×32 chunk 分片）
+- **world.db** — 世界元数据（tick_count、创建时间、实体）
+- **players/\<player_id\>.dat** — 玩家数据（位置、血量、热栏、背包）
+- **regions/r\_x\_z.db** — 区块数据（按 32×32 chunk 分片）
 
-所有方块/物品/实体均按**字符串名称**存储，不依赖游戏版本号。任何版本的游戏都能正确读取任何版本的存档。
+所有方块/物品/实体均按**字符串名称**存储，不依赖游戏版本号。
 
 ---
 
 ## 世界元数据（world.db）
 
-### WorldRow
+### WorldMeta
 
 ```sql
-CREATE TABLE "WorldRow" (
+CREATE TABLE "WorldMeta" (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     last_played TEXT NOT NULL DEFAULT (datetime('now')),
-    player_pos_x  REAL NOT NULL,
-    player_pos_y  REAL NOT NULL,
-    player_pos_z  REAL NOT NULL,
-    player_health REAL NOT NULL,
-    is_flying   INTEGER NOT NULL DEFAULT 0,
-    tick_count  INTEGER NOT NULL DEFAULT 0,
-    player_facing_yaw   REAL NOT NULL DEFAULT 0,
-    player_facing_pitch REAL NOT NULL DEFAULT 0
+    tick_count  INTEGER NOT NULL DEFAULT 0
 );
 ```
 
-存储单行玩家状态。每次保存先 `DELETE` 再 `INSERT`，始终保持一行。
-
-### HotbarRow
-
-```sql
-CREATE TABLE "HotbarRow" (
-    id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    slot   INTEGER NOT NULL,
-    item_name TEXT NOT NULL,
-    count  INTEGER NOT NULL DEFAULT 1
-);
-```
-
-- `slot`: 0-8，对应热栏 9 格
-- `item_name`: 字符串名称（如 `"stone"`、`"apple"`），非整数 ID
-
-### InventoryRow
-
-```sql
-CREATE TABLE "InventoryRow" (
-    id     INTEGER PRIMARY KEY AUTOINCREMENT,
-    slot   INTEGER NOT NULL,
-    item_name TEXT NOT NULL,
-    count  INTEGER NOT NULL DEFAULT 1
-);
-```
-
-- `slot`: 0-26，对应背包 27 格
+存储单行世界数据（不含玩家信息）。每次保存先 `DELETE` 再 `INSERT`。
 
 ### EntityRow
 
@@ -75,17 +42,42 @@ CREATE TABLE "EntityRow" (
 );
 ```
 
-- `type_name`: 实体类型字符串名称（如 `"zombie"`、`"wolf"`），非整数 ID
-- `facing_yaw` / `facing_pitch`: 实体朝向（弧度），`DEFAULT 0` 兼容旧存档
+存储 AI 实体（非玩家）。
 
-### 版本兼容
+---
 
-背包、热栏、实体不存整数 ID。游戏版本升级时，即使 `block_infos` / `item_infos` / `entity_infos` 发生增删改，加载时通过 `fromNameRuntime` 查找：
+## 玩家数据（players/\<用户名\>.json）
 
-- 名称存在 → 正常加载
-- 名称不存在（已被删除）→ 跳过或替代为空气
+每个玩家一个独立文件，以玩家名命名（如 `players/NeonMedsua.json`），自定义文本格式：
 
-**不需要任何迁移工具或版本号。**
+用户名由 `config/user_name.json` 配置：`{ "name": "NeonMedsua" }`，首次启动自动生成 `user_\<随机数字\>`。
+
+```
+pos:8.0,130.0,8.0
+health:100.0
+flying:false
+facing:0.0000,0.0000
+h0:stone,64
+h1:
+h2:dirt,32
+h3:
+h4:
+h5:
+h6:
+h7:
+h8:
+i0:
+i1:
+...（共 27 行背包）
+i26:
+```
+
+- `pos`: 脚底坐标 x,y,z
+- `flying`: `true` / `false`
+- `facing`: yaw, pitch（弧度）
+- `h0` ~ `h8`: 热栏 9 格，`h0:stone,64` 表示物品名称和数量，`h0:` 表示空格
+- `i0` ~ `i26`: 背包 27 格，格式同上
+- 物品用字符串名称（非整数 ID），保证版本兼容
 
 ---
 

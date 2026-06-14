@@ -87,4 +87,9 @@ pub fn update(self: *@This(), game: *Game) void {
         game.startSave(name) catch {};
         game.menu_state = .Gameplay;
     }
+
+    // 左下角显示当前用户
+    var name_buf: [128]u8 = undefined;
+    const name_str = std.fmt.bufPrint(&name_buf, "当前用户：{s}", .{game.player_name}) catch "当前用户：?";
+    game.ui_system.drawText(&game.gctx, 8, win_h - 24, name_str, 18, .{ 1, 1, 1, 1 });
 }

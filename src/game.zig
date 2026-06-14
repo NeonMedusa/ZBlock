@@ -13,6 +13,7 @@ shadow_pipeline: ShadowPipeline,
 camera: Camera3D,
 ubo: SceneUniform,
 player_id: u32 = 0,
+player_name: []const u8 = "", // 当前用户名（由 config/user_name.json 加载）
 hotbar: Hotbar,
 inventory: PlayerInventory = .{},
 selected_item: ?SelectedItem = null,
@@ -260,7 +261,7 @@ fn initGame(self: *Game) !void {
     // 先恢复玩家存档位置（如果有存档）--- 必须在加载区块之前
     // 原因：区块需要围绕玩家实际所在位置加载，而不是硬编码的 (8,8)。
     // 如果调换顺序，玩家位置附近的区块未加载 → getBlockAt 全返回 air → 自由落体。
-    if (try self.save_manager.loadPlayer(&self.hotbar, &self.inventory, &self.registry)) |tc| {
+    if (try self.save_manager.loadPlayer(self.player_name, &self.hotbar, &self.inventory, &self.registry)) |tc| {
         self.tick_count = tc;
     }
 
@@ -434,6 +435,39 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
     // 存档系统、BlockWorld、worker 线程在用户选择存档后才初始化（initGame/startSave）
 
+    // 加载/创建用户配置
+    {
+        const cfg_dir = "config";
+        const cfg_path = "config/user_name.json";
+        var file = std.fs.cwd().readFileAlloc(allocator, cfg_path, 1024) catch {
+            // 不存在则创建
+            const random_suffix = std.crypto.random.int(u32) % 10000;
+            const default_name = try std.fmt.allocPrint(allocator, "user_{d}", .{random_suffix});
+            defer allocator.free(default_name);
+            var buf = std.ArrayListUnmanaged(u8){};
+            defer buf.deinit(allocator);
+            try buf.writer(allocator).print("{{ \"name\": \"{s}\" }}", .{default_name});
+            std.fs.cwd().makePath(cfg_dir) catch {};
+            var f = try std.fs.cwd().createFile(cfg_path, .{});
+            defer f.close();
+            try f.writeAll(buf.items);
+            self.player_name = try allocator.dupe(u8, default_name);
+            return self;
+        };
+        defer allocator.free(file);
+        // 简易 JSON 解析：找 "name": "..."
+        const name_mark = std.mem.indexOf(u8, file, "\"name\": \"") orelse {
+            self.player_name = try allocator.dupe(u8, "Player");
+            return self;
+        };
+        const name_start = name_mark + 9; // 跳过 "name": "
+        const name_end = std.mem.indexOfScalar(u8, file[name_start..], '"') orelse {
+            self.player_name = try allocator.dupe(u8, "Player");
+            return self;
+        };
+        self.player_name = try allocator.dupe(u8, file[name_start .. name_start + name_end]);
+    }
+
     // 返回实例
     return self;
 }
@@ -451,12 +485,13 @@ pub fn deinit(self: *@This()) void {
     self.sky_pipeline.deinit();
     self.wireframe_pipeline.deinit();
     self.ui_system.deinit();
+    if (self.player_name.len > 0) self.allocator.free(self.player_name);
     self.icon_atlas.deinit();
 
     if (!self.game_cleaned) {
         if (self.save_initialized) {
             // 退出前保存
-            self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+            self.save_manager.savePlayer(self.player_name, &self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
             self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
             self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
             {
@@ -488,6 +523,8 @@ pub fn startSave(self: *Game, name: []const u8) !void {
     try self.block_world.spawnWorker();
     try self.block_world.spawnAStarWorker();
     try self.block_world.spawnSaveWorker();
+    self.hotbar = .{};
+    self.inventory = .{};
     self.game_cleaned = false;
     try self.initGame();
 }
@@ -495,9 +532,11 @@ pub fn startSave(self: *Game, name: []const u8) !void {
 /// 返回主菜单（由暂停菜单调用）
 pub fn returnToMenu(self: *Game) void {
     // 保存当前游戏状态
-    self.save_manager.savePlayer(&self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
+    self.save_manager.savePlayer(self.player_name, &self.hotbar, &self.inventory, &self.registry, self.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
     self.save_manager.saveAllEntities(&self.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
     self.save_manager.saveAllChunks(&self.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
+    self.hotbar = .{};
+    self.inventory = .{};
     // 清理 AI 实体的寻路状态和路径内存
     {
         var view = self.registry.view(.{Comps.AIAgent}, .{});
@@ -947,7 +986,7 @@ fn updateEntities(self: *Game) !void {
             enemy_count += 1;
         }
 
-        const MAX_ENEMIES: u32 = 10;
+        const MAX_ENEMIES: u32 = 0;
         if (enemy_count < MAX_ENEMIES and std.crypto.random.int(u32) % 60 == 0) {
             var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
             var piter = pview.entityIterator();

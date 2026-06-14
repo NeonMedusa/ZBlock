@@ -2,6 +2,7 @@
 //
 // 游标式 UI API 示例 —— 不需要手动计算每个按钮的精确像素坐标，
 // 只需要设定一个"初始位置"，按钮会自动排列下去。
+const std = @import("std");
 const Game = @import("../game.zig");
 
 pub fn update(_: *@This(), game: *Game) void {
@@ -46,4 +47,9 @@ pub fn update(_: *@This(), game: *Game) void {
     //   所以第二颗按钮自然地排在下面，间距 40px
     if (ui.button("退出", 240, 56, 22))
         game.window.setWindowShouldClose(); // 关闭窗口
+
+    // ── 左下角显示当前用户 ──
+    var name_buf: [128]u8 = undefined;
+    const name_str = std.fmt.bufPrint(&name_buf, "当前用户：{s}", .{game.player_name}) catch "当前用户：?";
+    ui.drawText(&game.gctx, 8, game.window.height - 24, name_str, 18, .{ 1, 1, 1, 1 });
 }
