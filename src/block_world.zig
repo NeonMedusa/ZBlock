@@ -516,7 +516,7 @@ pub const BlockWorld = struct {
         );
     }
 
-    fn enqueueMeshBuild(self: *BlockWorld, origin: Vec3i) !void {
+    pub fn enqueueMeshBuild(self: *BlockWorld, origin: Vec3i) !void {
         self.mesh_mutex.lock();
         defer self.mesh_mutex.unlock();
         try self.pending.put(origin, {});
@@ -681,6 +681,112 @@ pub const BlockWorld = struct {
 
     pub fn loadChunk(self: *BlockWorld, origin: Vec3i) !void {
         try self.enqueueLoadTask(origin);
+    }
+
+    /// 同步构建指定 chunk 的网格（用于客户端模式，没有 worker 线程）
+    pub fn buildMeshSync(self: *BlockWorld, origin: Vec3i) void {
+        const loaded = self.chunks.getPtr(origin) orelse return;
+        const nb_w = self.chunks.getPtr(Vec3i.new(origin.x - CHUNK_WIDTH_I32, 0, origin.z));
+        const nb_e = self.chunks.getPtr(Vec3i.new(origin.x + CHUNK_WIDTH_I32, 0, origin.z));
+        const nb_n = self.chunks.getPtr(Vec3i.new(origin.x, 0, origin.z - CHUNK_WIDTH_I32));
+        const nb_s = self.chunks.getPtr(Vec3i.new(origin.x, 0, origin.z + CHUNK_WIDTH_I32));
+        var result = buildChunkMeshCPU(self.allocator, origin, loaded.chunk,
+            if (nb_w) |n| n.chunk else null,
+            if (nb_e) |n| n.chunk else null,
+            if (nb_n) |n| n.chunk else null,
+            if (nb_s) |n| n.chunk else null,
+        ) catch return;
+        applyMeshResult(&loaded.meshes, self.allocator, self.gctx, &self.material_registry, &result) catch {};
+        result.deinit();
+    }
+
+    /// 从网络接收的 palette JSON + index_data 更新或创建 chunk
+    pub fn insertChunkFromNetwork(self: *BlockWorld, origin_x: i32, origin_z: i32, palette_json: []const u8, index_data: []const u8) !void {
+        const origin = Vec3i.new(origin_x, 0, origin_z);
+
+        // 解析 palette
+        var palette_list = std.ArrayListUnmanaged(BlockState){};
+        defer palette_list.deinit(self.allocator);
+        var i: usize = 1;
+        while (i < palette_json.len and palette_json[i] != ']') : (i += 1) {
+            if (palette_json[i] == '"') {
+                const start = i + 1;
+                const end = std.mem.indexOfScalarPos(u8, palette_json, start, '"') orelse break;
+                const name = palette_json[start..end];
+                const lu = std.mem.lastIndexOfScalar(u8, name, '_');
+                const bn = if (lu) |p| name[0..p] else name;
+                const fi: u3 = if (lu) |p| blk: { break :blk if (p + 1 < name.len) @as(u3, @intCast(name[p + 1] - '0')) else 0; } else 0;
+                const id = registries.block_name_to_id.get(bn) orelse 0;
+                try palette_list.append(self.allocator, BlockState{ .block_id = BlockId.fromInt(id), .facing = @enumFromInt(fi) });
+                i = end;
+            }
+        }
+        const fc = palette_list.items.len;
+        const bpi: u5 = if (fc <= 1) 1 else @intCast(std.math.log2_int(usize, fc - 1) + 1);
+        const ds = (CHUNK_BLOCKS * bpi + 7) / 8;
+
+        self.chunk_mutex.lock();
+
+        if (self.chunks.getPtr(origin)) |loaded| {
+            // 原地更新已有区块：不分配新 Chunk，mesh worker 仍持有合法指针
+            const chunk = loaded.chunk;
+            // 交换 palette
+            const old_pal = chunk.palette;
+            chunk.palette = palette_list;
+            palette_list = old_pal; // defer 会释放旧数据
+            // 交换 index_data
+            const old_idx = chunk.index_data;
+            chunk.index_data = self.allocator.alloc(u8, ds) catch @panic("OOM");
+            chunk.index_bits = bpi;
+            @memcpy(chunk.index_data, index_data[0..@min(ds, index_data.len)]);
+            if (index_data.len < ds) @memset(chunk.index_data[index_data.len..], 0);
+            self.allocator.free(old_idx);
+            // 清空旧 mesh
+            {
+                var m_it = loaded.meshes.valueIterator();
+                while (m_it.next()) |m| m.deinit(self.allocator);
+            }
+            loaded.meshes.deinit();
+            loaded.meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
+            loaded.meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
+            loaded.dirty = false;
+
+            self.chunk_mutex.unlock();
+
+            self.enqueueMeshBuild(origin) catch {};
+            for (NEIGHBOR_OFFSETS[1..]) |noff| {
+                const nb = Vec3i.new(origin.x + noff.x * CHUNK_WIDTH_I32, 0, origin.z + noff.z * CHUNK_WIDTH_I32);
+                if (self.chunks.contains(nb)) self.enqueueMeshBuild(nb) catch {};
+            }
+            // palette_list 的 defer 会释放旧 palette
+            return;
+        }
+
+        // 区块不存在（首次加载），创建新 chunk
+        const ds_new = ds;
+        var chunk = self.allocator.create(Chunk) catch @panic("OOM");
+        errdefer self.allocator.destroy(chunk);
+        chunk.* = Chunk.init(self.allocator);
+        chunk.palette.deinit(self.allocator);
+        chunk.palette = palette_list;
+        palette_list = .{};
+        chunk.index_bits = bpi;
+        self.allocator.free(chunk.index_data);
+        chunk.index_data = self.allocator.alloc(u8, ds_new) catch @panic("OOM");
+        @memcpy(chunk.index_data, index_data[0..@min(ds_new, index_data.len)]);
+        if (index_data.len < ds_new) @memset(chunk.index_data[index_data.len..], 0);
+
+        var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
+        meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
+
+        try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .dirty = false });
+        self.chunk_mutex.unlock();
+
+        self.enqueueMeshBuild(origin) catch {};
+        for (NEIGHBOR_OFFSETS[1..]) |noff| {
+            const nb = Vec3i.new(origin.x + noff.x * CHUNK_WIDTH_I32, 0, origin.z + noff.z * CHUNK_WIDTH_I32);
+            if (self.chunks.contains(nb)) self.enqueueMeshBuild(nb) catch {};
+        }
     }
 
     pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
@@ -1467,6 +1573,22 @@ pub const BlockWorld = struct {
     pub fn isSolidOrSwimmable(self: *BlockWorld, x: i32, y: i32, z: i32) bool {
         const proto = self.peekBlockAt(x, y, z).prototype();
         return proto.is_solid or proto.is_swimmable;
+    }
+
+    /// 世界坐标 → 地表 Y（从上往下扫描第一个非空气方块）
+    pub fn getSurfaceY(self: *BlockWorld, x: i32, z: i32) ?i32 {
+        const origin = BlockWorld.chunkOrigin(x, z);
+        {
+            self.chunk_mutex.lockShared();
+            defer self.chunk_mutex.unlockShared();
+            _ = self.chunks.getPtr(origin) orelse return null;
+        }
+        var y: i32 = 256;
+        while (y >= 0) : (y -= 1) {
+            const pos = Vec3.new(@as(f32, @floatFromInt(x)) + 0.5, @as(f32, @floatFromInt(y)) + 0.5, @as(f32, @floatFromInt(z)) + 0.5);
+            if (self.getBlockAt(pos).prototype().is_solid) return y + 1;
+        }
+        return null;
     }
 };
 

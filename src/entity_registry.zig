@@ -21,6 +21,20 @@ pub const EntityTypeInfo = struct {
 
 pub const entity_infos = [_]EntityTypeInfo{
     .{
+        .name = "player",
+        .model_id = ModelId.fromName("CesiumMan"),
+        .health = 100,
+        .move_speed = 4.0,
+        .jump_vel = 14.0,
+        .attack_damage = 0,
+        .attack_range = 0,
+        .attack_interval = 0,
+        .wander_interval = 0,
+        .detect_range = 0,
+        .collider_width = 0.6,
+        .collider_height = 1.8,
+    },
+    .{
         .name = "zombie",
         .model_id = ModelId.fromName("CesiumMan"),
         .health = 50,

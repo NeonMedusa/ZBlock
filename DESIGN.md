@@ -1,5 +1,78 @@
 # DESIGN.md
 
+## 当前架构（2026-06-17）
+
+### 进程架构
+
+所有模式（单人/主机/客机）共享同一份可执行文件。三种运行模式由 `Game.network_mode` 区分：
+
+| 模式 | `network_mode` | 服务端线程 | 网络线程 | 渲染 |
+|------|---------------|-----------|---------|------|
+| 单人 | `.single` | 运行（物理/AI/动画） | 无 | 同步相机 |
+| 主机 | `.host` | 运行 | 接受 TCP + 收发 | 同步相机 |
+| 客机 | `.client` | 运行（仅 tick） | 无（TCP 在主线程收） | state 包驱动 |
+
+### 线程模型
+
+```
+主线程:
+  collectPlayerInput(player_id) → pushInput(队列)
+  tick(): clientReceivePackets() / host 逻辑
+  渲染: getSnapPos() → lerp(prev, curr, accumulator/TICK_DT)
+
+服务端线程(独立线程, 固定 30Hz):
+  1. timedWait 等够 33ms
+  2. drain 所有输入
+  3. 处理每个输入 → MoveIntent/朝向/break/place/fly
+  4. updatePhysics (30Hz 固定, 与输入数量无关)
+  5. updateAI (最近玩家追踪)
+  6. animation_system.update
+  7. updateEntities (生命值/消失)
+  8. updateChunks (所有玩家的区块加载/卸载)
+  9. publishSnapshot → 快照缓冲区(mutex保护)
+
+网络线程(独立线程, 仅 host 模式):
+  accept → 创建远程玩家实体
+  循环: recvInput → pushInput(player_id=1)
+        读 server.snapshots → sendState
+        读 server.pending_chunks → sendChunk
+        读 server.pending_unloads → sendChunkUnload
+```
+
+### 玩家平等性
+
+主机玩家和远程客机的输入路径完全统一：
+
+- **输入**：`collectPlayerInput` → `pushInput`（主机走队列，客机走 TCP → 网络线程 → 队列）
+- **处理**：服务端线程根据 `input.player_id` 找到对应实体，统一处理 MoveIntent/朝向/break/place/fly
+- **渲染**：都从快照缓冲区读数，用 `accumulator/TICK_DT` 做累计器插值
+- **区块**：`updateChunks` 遍历所有玩家，主机从磁盘加载/卸载，远程通过 `pending_chunks` 发送
+
+### 快照与插值
+
+```
+服务端 tick 结束 → publishSnapshot() → snapshots[64] (mutex 保护, 含所有实体的位置/朝向)
+  ↓
+网络线程: 读 snapshots → 组 state 包 → 发客机
+主线程:  pollServerSnapshot() (主机) / clientTick state (客机)
+  → pushSnapshot() → snap_prev, snap_curr
+  → 渲染: lerp(snap_prev, snap_curr, accumulator/TICK_DT)
+```
+
+### 联机数据流
+
+```
+主机:
+  clientTick (30Hz): sendInput → clientReceivePackets (每帧)
+  clientReceivePackets: poll(0) → peekTag → 收 state/chunk/unload → 更新插值
+
+客机收到: state 包 (tag=1) → 更新 snap_prev/snap_curr → 累计器插值
+          chunk 包 (tag=2) → insertChunkFromNetwork → enqueueMeshBuild
+          unload 包 (tag=3) → unloadChunk
+```
+
+---
+
 设计文档：方块物理精细化相关议题。
 
 ---
@@ -166,4 +239,90 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 
 **优点**：现有数据结构和渲染管线基本不变、可按需只加载玩家所在层的区块
 **缺点**：跨层移动有衔接问题、噪声生成需处理层间连续性
+
+---
+
+## 议题四：联机物理状态同步策略
+
+### 背景
+
+当前实现中，主机通过 TCP 每 tick（30Hz）发送所有实体的 `(position, yaw, pitch)`，客机收到后创建/更新本地 ECS 实体，且**骨骼动画在客机本地计算**（主机不传骨骼矩阵）。
+
+### 现状
+
+- ✅ 客机相机跟随主机第一人称视角
+- ✅ 实体位置/朝向同步（主机→客机）
+- ✅ 实体模型渲染（CesiumMan/zombie）
+- ✅ 骨骼动画在客机本地用 `animation_system.update()` 计算
+- ❌ 没有物理交互同步（推力、击飞、攀爬等）
+- ❌ 没有动画状态同步（clip 切换、播放速度）
+
+### 设计目标
+
+- **带宽优先**：让 LAN 联机也能流畅运行，未来扩展到公网
+- **主机权威**（Server Authoritative）：主机是物理和游戏的最终裁决者，客机不做预测
+- **客机本地动画**：骨骼姿势由 clip + 时间决定，不需要同步矩阵
+
+### 同步分层
+
+#### 第一层：刚性变换（已实现）
+
+| 字段 | 类型 | 频率 | 说明 |
+|------|------|------|------|
+| `position` | Vec3 (12B) | 30 Hz | 实体位置 |
+| `yaw` | f32 (4B) | 30 Hz | 水平朝向 |
+| `pitch` | f32 (4B) | 30 Hz | 垂直朝向 |
+
+每实体 ≈ 20 字节，50 实体 = 1KB/tick = **30KB/s**。
+
+#### 第二层：运动状态（按需添加）
+
+| 字段 | 类型 | 频率 | 说明 |
+|------|------|------|------|
+| `velocity` | Vec3 (12B) | 30 Hz | 用于客机本地插值预测 |
+| `on_ground` | bool (1B) | 30 Hz | 接地状态，影响动画切换 |
+| `health` | f32 (4B) | 事件触发 | 受伤/治疗时发送 |
+
+#### 第三层：动画状态（将来）
+
+| 字段 | 类型 | 频率 | 说明 |
+|------|------|------|------|
+| `clip_name` | u8 (1B) | 切换时 | 动画剪辑索引（idle/walk/run/jump/attack） |
+| `time` | f32 (4B) | 定期校对 | 动画时间戳，避免漂移 |
+| `speed` | f32 (4B) | 切换时 | 播放倍率 |
+
+### 物理约束同步策略
+
+参考 Source Engine 的做法，按实体重要性分层：
+
+#### 玩家 / 重要实体（主机权威，状态同步）
+
+- **主机**：运行完整物理模拟（重力、碰撞、推力），每 tick 发送 position + velocity
+- **客机**：收到后直接设置 position，velocity 可用于插值（可选）
+- 不做客户端预测（避免实现复杂度），100ms 以内的延迟对 LAN 玩家可接受
+
+#### 小型物理物体（客机本地模拟）
+
+- 石头、瓶子、碎片等不影响玩法的物体
+- **不通过网络同步**，客机各自独立模拟
+- `EntityTypeInfo` 中加 `physics_mode` 字段：`.server` / `.client`
+- 条件：体积小于阈值（如 0.5³）、质量小于阈值（如 10kg）
+
+#### 物理动画事件（叠加动画）
+
+- 受击、爆炸、攀爬等触发式效果
+- 主机发送事件包（`event_type, direction, force`）
+- 客机收到后在当前动画上叠加物理效果（如受击后仰、爆炸飞出去）
+- 用 `AnimationState.blend_weight` 控制叠加权重
+
+### 网络协议演进方向
+
+1. **当前**：TCP，全量状态每 tick 发送（30Hz）
+2. **短期**：增加 delta 压缩（只发送变化的字段）
+3. **中期**：迁移到 UDP，序列号 + ACK，支持丢包重传
+4. **长期**：状态同步 + 事件帧双通道（可靠通道发状态，不可靠通道发位置更新）
+
+### 讨论记录
+
+- 2026-06-15：决定骨骼动画在客机本地计算，不传输矩阵。状态同步为主机权威。物理物体按重要性分层处理。
 

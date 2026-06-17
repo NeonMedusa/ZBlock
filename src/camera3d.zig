@@ -3,9 +3,9 @@ position: Vec3 = Vec3.zero,
 front: Vec3 = Vec3.forward,
 up: Vec3 = Vec3.up,
 world_up: Vec3 = Vec3.up,
-yaw: f32 = -90.0,
+yaw: f32 = -1.5708, // 弧度，初始朝 -Z（北），≈ -π/2
 pitch: f32 = 0.0,
-sensitivity: f32 = 0.1,
+sensitivity: f32 = 0.001745, // 0.1°/像素 转弧度
 movement_speed: f32 = 5.0,
 game: *Game,
 // 初始化
@@ -15,9 +15,9 @@ pub fn init(game: *Game) @This() {
         .front = Vec3.forward,
         .up = Vec3.up,
         .world_up = Vec3.up,
-        .yaw = -90.0,
+        .yaw = -1.5708,
         .pitch = 0.0,
-        .sensitivity = 0.1,
+        .sensitivity = 0.001745, // 0.1°/像素 转弧度
         .movement_speed = 5.0,
         .game = game,
     };
@@ -31,8 +31,9 @@ pub fn updateFromMouse(self: *@This(), game: *Game) void {
     input.setCursorToCenter();
     self.yaw += (mousePos.x - window.center_x) * self.sensitivity;
     self.pitch -= (mousePos.y - window.center_y) * self.sensitivity;
-    if (self.pitch > 89.0) self.pitch = 89.0;
-    if (self.pitch < -89.0) self.pitch = -89.0;
+    const max_pitch = 1.5533; // ≈ 89° 弧度
+    if (self.pitch > max_pitch) self.pitch = max_pitch;
+    if (self.pitch < -max_pitch) self.pitch = -max_pitch;
     self.updateVectors();
 }
 
@@ -58,11 +59,9 @@ pub fn update(self: *@This(), game: *Game) void {
     self.updateFromKeyboard(game);
 }
 
-// 更新相机方向向量
+// 更新相机方向向量（yaw/pitch 已为弧度）
 fn updateVectors(self: *@This()) void {
-    const yawRad = Algebra.toRadians(self.yaw);
-    const pitchRad = Algebra.toRadians(self.pitch);
-    self.front = Vec3.new(@cos(yawRad) * @cos(pitchRad), @sin(pitchRad), @sin(yawRad) * @cos(pitchRad)).norm();
+    self.front = Vec3.new(@cos(self.yaw) * @cos(self.pitch), @sin(self.pitch), @sin(self.yaw) * @cos(self.pitch)).norm();
     self.up = self.front.cross(self.world_up).norm().cross(self.front).norm();
 }
 
@@ -110,10 +109,9 @@ pub fn getForwardRay(self: *@This()) Raycast.Ray {
 }
 // 引用
 const Imports = @import("imports.zig");
-const Algebra = Imports.Algebra;
-const Vec3 = Algebra.Vec3;
-const Vec4 = Algebra.Vec4;
-const Mat4 = Algebra.Mat4;
+const Vec3 = Imports.Algebra.Vec3;
+const Vec4 = Imports.Algebra.Vec4;
+const Mat4 = Imports.Algebra.Mat4;
 const Glfw = Imports.Glfw;
 const Game = Imports.Game;
 const Raycast = @import("raycast.zig");

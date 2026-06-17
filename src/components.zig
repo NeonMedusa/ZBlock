@@ -56,8 +56,8 @@ pub const Components = struct {
     pub const SpawnPos = struct { pos: Vec3 }; // 重生点
 
     pub const Facing = struct {
-        yaw: f32 = 0,   // 弧度，0=+Z，顺时针递增
-        pitch: f32 = 0, // 弧度，0=水平，正=朝下（未来用于 AI 视野检测）
+        yaw: f32 = 0,   // 弧度
+        pitch: f32 = 0, // 弧度
     };
 
     pub const AnimationState = struct {

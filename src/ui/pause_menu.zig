@@ -23,7 +23,11 @@ pub fn update(_: *@This(), game: *Game) void {
 
     ui.spacing(20);
     if (ui.button("返回主菜单", 240, 56, 22)) {
-        game.returnToMenu();
-        game.menu_state = .MainMenu;
+        if (game.network_mode == .client) {
+            game.disconnectClient();
+        } else {
+            game.returnToMenu();
+            game.menu_state = .MainMenu;
+        }
     }
 }

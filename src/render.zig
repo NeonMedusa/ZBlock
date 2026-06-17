@@ -10,7 +10,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     var chunk_instance_idx: u32 = 0; // 用于区块实例索引（阴影+主渲染共享）
     const frustum = if (world) Frustum.fromViewProj(Mat4.mul(game.ubo.proj_matrix, game.ubo.view_matrix)) else undefined;
 
-    const sky_time = @as(f32, @floatFromInt(game.tick_count)) * TICK_DT + game.accumulator;
+    const sky_time = @as(f32, @floatFromInt(game.server.tick_count)) * TICK_DT + game.accumulator;
     // 从天空状态同步光照数据到 ubo
     game.ubo.sun_direction = game.sky_pipeline.state.sun_direction;
     game.ubo.sun_intensity = game.sky_pipeline.state.sun_intensity;
@@ -48,7 +48,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         var anim_map = std.AutoHashMap(u32, i32).init(game.allocator);
         defer anim_map.deinit();
         {
-            var view = game.registry.view(.{Comps.AnimationState}, .{});
+            var view = game.server.registry.view(.{Comps.AnimationState}, .{});
             var it = view.entityIterator();
             while (it.next()) |e| {
                 const state = view.get(e);
@@ -56,7 +56,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             }
         }
 
-        var view = game.registry.view(.{ Comps.ModelName, Comps.Position, Comps.Collider }, .{});
+        var view = game.server.registry.view(.{ Comps.ModelName, Comps.Position, Comps.Collider }, .{});
         var iter = view.entityIterator();
         while (iter.next()) |entity| {
             const entity_pos = view.getConst(Comps.Position, entity);
@@ -67,10 +67,14 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             const aabb_min = Vec3.new(render_pos.x - half_w, render_pos.y, render_pos.z - half_w);
             const aabb_max = Vec3.new(render_pos.x + half_w, render_pos.y + col.height, render_pos.z + half_w);
             if (!frustum.intersectsAABB(aabb_min, aabb_max)) continue;
+            // 跳过本地玩家模型（第一人称不渲染自己）
+            if (game.server.registry.tryGet(Comps.Player, entity)) |player| {
+                if (player.id == game.server.player_id) continue;
+            }
             const bone_off = anim_map.get(@as(u32, @intCast(entity.index))) orelse -1;
             var entity_transform = Mat4.fromTranslate(render_pos);
-            if (game.registry.tryGet(Comps.Facing, entity)) |facing| {
-                entity_transform = Mat4.mul(entity_transform, Mat4.fromRotationY(facing.yaw));
+            if (game.server.registry.tryGet(Comps.Facing, entity)) |facing| {
+                entity_transform = Mat4.mul(entity_transform, Mat4.fromRotationY(facing.yaw)); // facing 已为弧度
             }
             game.res_manager.entities_data[entity_idx] = EntityData{
                 .transform = entity_transform,
@@ -116,7 +120,9 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         // 为每个已加载的 chunk 生成一个实例（携带 chunk 原点偏移）
         chunk_instance_idx = ins_idx;
         {
-            var chunk_it = game.block_world.chunks.iterator();
+            game.server.block_world.chunk_mutex.lockShared();
+            defer game.server.block_world.chunk_mutex.unlockShared();
+            var chunk_it = game.server.block_world.chunks.iterator();
             while (chunk_it.next()) |entry| {
                 const origin = entry.key_ptr.*;
                 game.res_manager.instances_data[ins_idx] = InstanceData{
@@ -174,7 +180,9 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         // 阴影 pass：使用 chunk_handle 渲染区块
         {
             var chunk_ins_idx = chunk_instance_idx;
-            var s_chunk_it = game.block_world.chunks.iterator();
+            game.server.block_world.chunk_mutex.lockShared();
+            defer game.server.block_world.chunk_mutex.unlockShared();
+            var s_chunk_it = game.server.block_world.chunks.iterator();
             Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.chunk_handle);
             while (s_chunk_it.next()) |entry| {
                 const loaded = &entry.value_ptr.*;
@@ -265,7 +273,9 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_chunk);
         {
             var chunk_ins_idx = chunk_instance_idx;
-            var chunk_it = game.block_world.chunks.iterator();
+            game.server.block_world.chunk_mutex.lockShared();
+            defer game.server.block_world.chunk_mutex.unlockShared();
+            var chunk_it = game.server.block_world.chunks.iterator();
             while (chunk_it.next()) |entry| {
                 const loaded = &entry.value_ptr.*;
                 const origin = entry.key_ptr.*;
@@ -280,7 +290,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
                     const mat_idx = mesh_entry.key_ptr.*;
                     const mesh = mesh_entry.value_ptr;
                     if (mesh.vertex_count == 0) continue;
-                    if (game.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
+                    if (game.server.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
                         Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
                         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, global_mat.material.bind_group, 0, null);
                         Wgpu.wgpuRenderPassEncoderDraw(pass, mesh.vertex_count, 1, 0, chunk_ins_idx);

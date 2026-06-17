@@ -59,9 +59,73 @@ src/
 ├── imports.zig            — 统一 re-export（Vec3, ECS 等）
 ```
 
-## 核心架构设计
+## E/S 彻底分离（2026-06-17）
 
-### 注册表系统
+### 架构概述
+
+服务端逻辑（物理、AI、动画）在独立线程运行，与渲染/输入完全分离。
+所有玩家（主机和远程客机）的输入通过统一的 `pushInput` 队列进入服务端线程。
+
+```
+主线程:
+  collectPlayerInput(player_id) → pushInput(队列)
+  tick(): clientReceivePackets() (客机) / host 逻辑
+  渲染: getSnapPos() → lerp(snap_prev, snap_curr, accumulator/TICK_DT)
+
+服务端线程(独立线程, 固定 30Hz):
+  1. timedWait 等够 33ms
+  2. drain 所有输入
+  3. 处理每个输入 → MoveIntent/朝向/break/place/fly
+  4. updatePhysics (30Hz 固定)
+  5. updateAI → updateEntities → updateChunks
+  6. publishSnapshot → 快照缓冲区(mutex)
+
+网络线程(仅 host 模式):
+  accept → 创建远程玩家实体
+  循环: recvInput → pushInput(player_id=1)
+        读 server.snapshots → sendState
+        读 server.pending_chunks → sendChunk
+        读 server.pending_unloads → sendChunkUnload
+```
+
+### 玩家平等
+
+| 操作 | 主机 | 远程客机 |
+|------|------|---------|
+| 输入来源 | `collectPlayerInput → pushInput` | TCP → 网络线程 → `pushInput` |
+| MoveIntent/朝向/飞行 | 服务端 tick | 服务端 tick |
+| break/place | 服务端 tick | 服务端 tick |
+| 区块加载 | `updateChunks`（磁盘） | `updateChunks`（网络发送） |
+| 渲染 | 快照缓冲区 + 累计器插值 | 快照缓冲区 + 累计器插值 |
+
+### 快照与插值
+
+```
+服务端 tick 结束 → publishSnapshot()
+  → snapshots[64] (mutex 保护, 含所有实体的位置/朝向)
+  → 网络线程读 snapshots → sendState
+  → 主线程: pollServerSnapshot (主机) / clientTick state (客机)
+  → pushSnapshot() → snap_prev/snap_curr
+  → 渲染: lerp(snap_prev, snap_curr, accumulator/TICK_DT)
+```
+
+### 动态区块加载/卸载
+
+- `updateChunks` 遍历所有玩家，主机从磁盘加载/卸载
+- 远程玩家：计算所需区块范围，与已发送列表对比
+  - 未发送的区块 → `enqueueChunkUpdate`（网络线程发 `sendChunk`）
+  - 已远离的区块 → `enqueueChunkUnload`（网络线程发 `sendChunkUnload`）
+- 主机卸载前检查是否有其他玩家仍然需要该区块
+
+### 客机收包
+
+- `clientReceivePackets()` 每帧非阻塞调用（`poll(0)`）
+- 统一处理 tag=2（chunk）、tag=1（state）、tag=3（unload）
+- 解决 `clientTick` 只能 30Hz 收包导致的插值停顿
+
+---
+
+## 注册表系统
 
 三张独立注册表 + 一个聚合层：
 

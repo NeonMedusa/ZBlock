@@ -16,7 +16,7 @@ pub fn draw(game: *Game) void {
     const h = game.window.height;
     ui.drawRect(0, 0, w, h, .{ 0, 0, 0, 1 });
 
-    const text: []const u8 = if (game.block_world.pendingIOCount() > 0)
+    const text: []const u8 = if (game.server.block_world.pendingIOCount() > 0)
         "正在加载世界..."
     else
         "正在生成世界...";

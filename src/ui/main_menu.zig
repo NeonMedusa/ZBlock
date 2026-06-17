@@ -31,22 +31,25 @@ pub fn update(_: *@This(), game: *Game) void {
     //
     // 因为是同一个"自然行"里的第一个按钮（没有 sameLine），
     // button 会把 cursor_x 重置到 cursor_col_x 对齐。
-    if (ui.button("开始", 240, 56, 22))
-        game.menu_state = .SaveSelect; // 点击后进入存档选择
+    if (ui.button("单人游戏", 240, 56, 22))
+        game.menu_state = .SaveSelect;
 
-    // ── 4. 在两个按钮之间留出 40px 垂直间距 ──
-    //
-    // spacing(h):
-    //   把 cursor_y 推到 row_bottom_y（第一颗按钮的底部）+ h
-    //   相当于"空一行"，下一个 widget 从这里开始
+    ui.spacing(16);
+    if (ui.button("开房间", 240, 56, 22)) {
+        game.network_mode = .host;
+        game.menu_state = .SaveSelect;
+    }
+
+    ui.spacing(16);
+    if (ui.button("加入游戏", 240, 56, 22)) {
+        game.startClient(.{ 127, 0, 0, 1 }) catch |err| {
+            std.debug.print("client: start failed: {}\n", .{err});
+        };
+    }
+
     ui.spacing(40);
-
-    // 第二个按钮：
-    //   因为是新的一行（没有 sameLine），cursor_x 再次对齐到 cursor_col_x
-    //   cursor_y 已经在 spacing 时被推到 row_bottom_y + 40，
-    //   所以第二颗按钮自然地排在下面，间距 40px
     if (ui.button("退出", 240, 56, 22))
-        game.window.setWindowShouldClose(); // 关闭窗口
+        game.window.setWindowShouldClose();
 
     // ── 左下角显示当前用户 ──
     var name_buf: [128]u8 = undefined;
