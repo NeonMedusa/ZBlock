@@ -67,33 +67,23 @@ pub const entity_infos = [_]EntityTypeInfo{
 
 pub const MAX_ENTITY_TYPES = entity_infos.len;
 
-pub const EntityTypeNames = blk: {
-    var fields: [MAX_ENTITY_TYPES]std.builtin.Type.EnumField = undefined;
-    for (&fields, entity_infos, 0..) |*field, def, i|
-        field.* = .{ .name = def.name, .value = i };
-    break :blk @Type(.{ .@"enum" = .{
-        .tag_type = u32,
-        .fields = &fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
-};
-
-pub const EntityTypeId = enum(u32) {
-    _,
+pub const EntityTypeId = packed struct(u32) {
+    id: u32,
     pub fn fromInt(i: anytype) EntityTypeId {
-        return @enumFromInt(i);
+        return .{ .id = @intCast(i) };
     }
     pub fn fromName(comptime str: []const u8) EntityTypeId {
-        return @enumFromInt(@intFromEnum(@field(EntityTypeNames, str)));
+        inline for (&entity_infos, 0..) |ent, i| {
+            if (comptime std.mem.eql(u8, ent.name, str)) return .{ .id = i };
+        }
+        @compileError("unknown entity: " ++ str);
     }
     pub fn info(self: EntityTypeId) EntityTypeInfo {
-        return entity_infos[@intFromEnum(self)];
+        return entity_infos[self.id];
     }
-    /// 运行时按字符串名查找，用于数据库反序列化（fromName 是 comptime 的）
     pub fn fromNameRuntime(name: []const u8) ?EntityTypeId {
         for (&entity_infos, 0..) |ent, i| {
-            if (std.mem.eql(u8, ent.name, name)) return @enumFromInt(i);
+            if (std.mem.eql(u8, ent.name, name)) return .{ .id = i };
         }
         return null;
     }

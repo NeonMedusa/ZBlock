@@ -141,7 +141,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .allocator = allocator,
         .start = start,
         .end = end,
-        .open_pq = std.PriorityQueue(HeapEntry, void, heapLess).init(allocator, {}),
+        .open_pq = .empty,
         .nodes = .{},
         .steps_done = 0,
         .max_steps = 0, // 由调用方覆盖
@@ -150,12 +150,12 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
         .max_step_up = max_step_up,
     };
     errdefer {
-        state.open_pq.deinit();
+        state.open_pq.deinit(allocator);
         state.nodes.deinit(allocator);
     }
 
     const start_h = heuristic(start, end);
-    try state.open_pq.add(.{ .pos = start, .g = 0, .f = start_h });
+    try state.open_pq.push(state.allocator, .{ .pos = start, .g = 0, .f = start_h });
     try state.nodes.put(allocator, start, .{ .g = 0, .parent = null });
 
     return state;
@@ -163,7 +163,7 @@ pub fn initAStar(allocator: std.mem.Allocator, world: *BlockWorld, from: Vec3, t
 
 /// 释放 A* 状态的内部内存
 pub fn deinitAStar(state: *AStarState) void {
-    state.open_pq.deinit();
+    state.open_pq.deinit(state.allocator);
     state.nodes.deinit(state.allocator);
 }
 
@@ -178,7 +178,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
         // 从堆中弹出最小 F 节点，跳过过期条目（g 值已被更优路径更新的老记录）
         var current: GridPos = undefined;
         var pop_ok: bool = false;
-        while (state.open_pq.removeOrNull()) |entry| {
+        while (state.open_pq.pop()) |entry| {
             const n = state.nodes.get(entry.pos).?;
             if (n.g == entry.g) { current = entry.pos; pop_ok = true; break; }
         }
@@ -270,7 +270,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
                         return;
                     };
                     const h = heuristic(neighbor, state.end);
-                    state.open_pq.add(.{ .pos = neighbor, .g = tent_g, .f = tent_g + h }) catch {
+                    state.open_pq.push(state.allocator, .{ .pos = neighbor, .g = tent_g, .f = tent_g + h }) catch {
                         state.result = .failed;
                         return;
                     };
@@ -305,7 +305,7 @@ pub fn stepAStar(state: *AStarState, world: *BlockWorld, max_steps_this_frame: u
 /// 路径包含从起点之后的第一步到终点，不含起点（实体已在起点位置）。
 /// waypoint 位于方块中心 (x+0.5, foot_y, z+0.5)。
 pub fn buildAStarPath(state: *AStarState) !std.ArrayListUnmanaged(Vec3) {
-    var path = std.ArrayListUnmanaged(Vec3){};
+    var path: std.ArrayListUnmanaged(Vec3) = .empty;
     errdefer path.deinit(state.allocator);
 
     var node: GridPos = state.end;

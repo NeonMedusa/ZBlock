@@ -5,11 +5,11 @@ pub const DEFAULT_BUFFER_SIZE = 4096;
 
 pub const ReadStream = union(enum) {
     memory: std.Io.Reader,
-    file: std.fs.File.Reader,
+    file: std.Io.File.Reader,
 
     pub const Error = SeekError || EndPosError || std.Io.Reader.Error || std.Io.Reader.StreamError;
-    pub const SeekError = std.fs.File.Reader.SeekError;
-    pub const EndPosError = std.fs.File.Reader.SizeError;
+    pub const SeekError = std.Io.File.Reader.SeekError;
+    pub const EndPosError = std.Io.File.Reader.SizeError;
 
     pub fn initMemory(buffer: []const u8) ReadStream {
         return .{
@@ -17,9 +17,9 @@ pub const ReadStream = union(enum) {
         };
     }
 
-    pub fn initFile(file: std.fs.File, buffer: []u8) ReadStream {
+    pub fn initFile(io: std.Io, file: std.Io.File, buffer: []u8) ReadStream {
         return .{
-            .file = file.reader(buffer),
+            .file = file.reader(io, buffer),
         };
     }
 
@@ -58,32 +58,23 @@ pub const ReadStream = union(enum) {
             .memory => |*memory| {
                 const new_pos: i64 = @as(i64, @intCast(memory.seek)) + offset;
                 if (new_pos < 0 or new_pos >= memory.end) {
-                    return std.fs.File.SeekError.Unseekable;
+                    return std.Io.File.SeekError.Unseekable;
                 }
 
                 memory.seek = @intCast(new_pos);
             },
             .file => |*file_reader| {
-                // Workaround seekBy not working properly (https://github.com/ziglang/zig/issues/25020)
-                var new_pos: i64 = @intCast(@as(i64, @intCast(file_reader.interface.seek)) + offset);
-                if (new_pos >= 0 and new_pos < file_reader.interface.end) {
-                    file_reader.interface.seek = @intCast(new_pos);
-                } else {
-                    file_reader.interface.seek = 0;
-                    file_reader.interface.end = 0;
+                const file_size = file_reader.getSize() catch {
+                    return SeekError.Unseekable;
+                };
 
-                    new_pos = @as(i64, @intCast(file_reader.pos)) + offset;
+                const new_pos = @as(i64, @intCast(file_reader.logicalPos())) + offset;
 
-                    const file_size = file_reader.getSize() catch {
-                        return std.fs.File.SeekError.Unseekable;
-                    };
-
-                    if (new_pos < 0 or new_pos >= file_size) {
-                        return std.fs.File.SeekError.Unseekable;
-                    }
-
-                    file_reader.pos = @intCast(new_pos);
+                if (new_pos < 0 or new_pos > file_size) {
+                    return SeekError.Unseekable;
                 }
+
+                try file_reader.seekBy(offset);
             },
         }
     }
@@ -105,10 +96,10 @@ pub const ReadStream = union(enum) {
 
 pub const WriteStream = union(enum) {
     memory: std.Io.Writer,
-    file: std.fs.File.Writer,
+    file: std.Io.File.Writer,
 
     pub const Error = SeekError || std.Io.Writer.Error;
-    pub const SeekError = std.fs.File.SeekError;
+    pub const SeekError = std.Io.File.SeekError;
 
     pub fn initMemory(buffer: []u8) WriteStream {
         return .{
@@ -116,9 +107,9 @@ pub const WriteStream = union(enum) {
         };
     }
 
-    pub fn initFile(file: std.fs.File, buffer: []u8) WriteStream {
+    pub fn initFile(io: std.Io, file: std.Io.File, buffer: []u8) WriteStream {
         return .{
-            .file = file.writer(buffer),
+            .file = file.writer(io, buffer),
         };
     }
 
@@ -129,7 +120,7 @@ pub const WriteStream = union(enum) {
         };
     }
 
-    pub fn seekTo(self: *WriteStream, offset: u64) SeekError!void {
+    pub fn seekTo(self: *WriteStream, offset: u64) Error!void {
         switch (self.*) {
             .memory => |*memory| {
                 if (offset >= memory.buffer.len) {
@@ -202,7 +193,7 @@ pub fn BitReader(comptime endian: std.builtin.Endian) type {
         }
 
         fn initBits(comptime T: type, out: anytype, num: u16) Bits(T) {
-            const UT = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const UT = @Int(.unsigned, @bitSizeOf(T));
             return .{
                 @bitCast(@as(UT, @intCast(out))),
                 num,
@@ -231,7 +222,7 @@ pub fn BitReader(comptime endian: std.builtin.Endian) type {
         ///  containing them in the least significant end, and the number of bits successfully
         ///  read. Reaching the end of the stream is not an error.
         pub fn readBitsTuple(self: *@This(), comptime T: type, num: u16) !Bits(T) {
-            const UT = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const UT = @Int(.unsigned, @bitSizeOf(T));
             const U = if (@bitSizeOf(T) < 8) u8 else UT; //it is a pain to work with <u8
 
             //dump any bits in our buffer first
@@ -421,7 +412,7 @@ pub fn BitWriter(comptime endian: std.builtin.Endian) type {
         ///  are enough to fill a byte.
         pub fn writeBits(self: *@This(), value: anytype, num: u16) !void {
             const T = @TypeOf(value);
-            const UT = std.meta.Int(.unsigned, @bitSizeOf(T));
+            const UT = @Int(.unsigned, @bitSizeOf(T));
             const U = if (@bitSizeOf(T) < 8) u8 else UT; //<u8 is a pain to work with
 
             var in: U = @as(UT, @bitCast(value));
@@ -504,8 +495,8 @@ pub fn BitWriter(comptime endian: std.builtin.Endian) type {
 }
 
 test "BitWriter: api coverage" {
-    var mem_be = [_]u8{0} ** 2;
-    var mem_le = [_]u8{0} ** 2;
+    var mem_be: [2]u8 = @splat(0);
+    var mem_le: [2]u8 = @splat(0);
 
     var mem_out_be = std.Io.Writer.fixed(mem_be[0..]);
     var bit_stream_be: BitWriter(.big) = .{

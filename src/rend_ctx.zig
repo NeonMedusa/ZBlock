@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 const Mesh = struct {
     primitives: []Primitive,
 };
@@ -87,13 +88,14 @@ pub const TextureRes = struct {
     }
     /// 从文件路径加载纹理
     pub fn loadFromFile(allocator: std.mem.Allocator, gctx: *Gctx, path: []const u8) !TextureRes {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
 
-        const file_size = try file.getEndPos();
+        const file_size = try file.length(io);
         const data = try allocator.alloc(u8, file_size);
         defer allocator.free(data);
-        _ = try file.readAll(data);
+        const n2 = try file.readStreaming(io, &.{data});
+        _ = n2;
 
         return loadFromMemory(allocator, gctx, data);
     }
@@ -258,29 +260,19 @@ const model_infos = [_]ModelInfo{
 
 pub const MAX_MODELS = model_infos.len;
 
-pub const ModelNames = blk: {
-    var fields: [MAX_MODELS]std.builtin.Type.EnumField = undefined;
-    for (&fields, model_infos, 0..) |*field, def, i|
-        field.* = .{ .name = def.name, .value = i };
-    break :blk @Type(.{ .@"enum" = .{
-        .tag_type = u32,
-        .fields = &fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
-};
-
-pub const ModelId = enum(u32) {
-    _,
+pub const ModelId = packed struct(u32) {
+    id: u32,
     pub fn fromInt(i: anytype) ModelId {
-        return @enumFromInt(i);
+        return .{ .id = @intCast(i) };
     }
     pub fn fromName(comptime str: []const u8) ModelId {
-        const model_name_val = @field(ModelNames, str);
-        return @enumFromInt(@intFromEnum(model_name_val));
+        inline for (&model_infos, 0..) |m, i| {
+            if (comptime std.mem.eql(u8, m.name, str)) return .{ .id = i };
+        }
+        @compileError("unknown model: " ++ str);
     }
     pub fn info(self: ModelId) ModelInfo {
-        return model_infos[@intFromEnum(self)];
+        return model_infos[self.id];
     }
     pub fn name(self: ModelId) [:0]const u8 {
         return self.info().name;
@@ -309,18 +301,11 @@ pub const Model = struct {
         defer allocator.free(model_file_path);
 
         // 加载
-        const model_file_buf = try std.fs.cwd().readFileAllocOptions(
-            allocator,
-            model_file_path,
-            std.math.maxInt(usize),
-            null,
-            .@"16",
-            null,
-        );
+        const model_file_buf = try std.Io.Dir.cwd().readFileAlloc(io, model_file_path, allocator, .unlimited);
         defer allocator.free(model_file_buf);
         var gltf = Gltf.init(allocator);
         defer gltf.deinit();
-        try gltf.parse(model_file_buf);
+        try gltf.parse(@as([]align(4) const u8, @alignCast(model_file_buf)));
 
         var model: Model = undefined;
 
@@ -512,7 +497,7 @@ pub const Model = struct {
             };
             for (gltf_mesh.primitives, 0..) |gltf_prim, prim_idx| {
                 // 索引
-                var index_data = std.ArrayList(u32){};
+                var index_data: std.ArrayList(u32) = .empty;
                 defer index_data.deinit(allocator);
                 if (gltf_prim.indices) |indices_accessor_index| {
                     const accessor = gltf.data.accessors[indices_accessor_index];
@@ -565,7 +550,7 @@ pub const Model = struct {
     }
 
     fn loadPrimitiveVertices(comptime V: type, allocator: std.mem.Allocator, gctx: *Gctx, gltf: *Gltf, gltf_prim: anytype, prim: *Primitive) !void {
-        var vertex_data = std.ArrayList(V){};
+        var vertex_data: std.ArrayList(V) = .empty;
         defer vertex_data.deinit(allocator);
         for (gltf_prim.attributes) |attribute| {
             switch (attribute) {
@@ -703,12 +688,10 @@ fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
 fn loadAnimMapping(allocator: std.mem.Allocator, path: []const u8) !std.StringHashMapUnmanaged([]const u8) {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
-    var file = std.fs.cwd().openFile(path_z, .{}) catch |err| switch (err) {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, path_z, allocator, .limited(8192)) catch |err| switch (err) {
         error.FileNotFound => return error.FileNotFound,
         else => return err,
     };
-    defer file.close();
-    const data = try file.readToEndAlloc(allocator, 8192);
     defer allocator.free(data);
 
     const parsed = try std.json.parseFromSlice(std.json.Value, allocator, data, .{ .ignore_unknown_fields = true });
@@ -757,7 +740,7 @@ pub const ResManager = struct {
     pipeline: *RenderPipeline,
 
     pub fn getOrLoadModel(self: *ResManager, id: ModelId) *const Model {
-        const idx = @intFromEnum(id);
+        const idx = @as(u32, @bitCast(id));
         self.ref_counts[idx] += 1;
         if (!self.active_models.has(idx)) {
             self.models[idx] = Model.load(
@@ -927,22 +910,19 @@ pub const InstanceData = struct {
     _padding: [2]i32 = undefined,
 };
 
-const Imports = @import("imports.zig");
-
 const std = @import("std");
-const Gctx = Imports.Gctx;
+const Gctx = @import("gctx.zig");
+const Algebra = @import("algebra.zig");
+const Window = @import("window.zig");
+const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
+const RenderPipeline = @import("render_pipeline.zig");
 
-const Algebra = Imports.Algebra;
 const Vec2 = Algebra.Vec2;
 const Vec3 = Algebra.Vec3;
 const Vec4 = Algebra.Vec4;
 const Quat = Algebra.Quat;
 const Mat4 = Algebra.Mat4;
 
-const Window = Imports.Window;
-const Gltf = Imports.Gltf;
-const Wgpu = Imports.Wgpu;
-const zigimg = Imports.zigimg;
-
-const SparseIndexSet = Imports.SparseIndexSet;
-const RenderPipeline = Imports.RenderPipeline;
+const Gltf = @import("imports.zig").Gltf;
+const Wgpu = @import("imports.zig").Wgpu;
+const zigimg = @import("zigimg");

@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 // save_manager.zig — Region 分片存档引擎 (fridge/SQLite)
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -78,19 +79,19 @@ pub const SaveManager = struct {
 
     pub fn init(allocator: Allocator, save_name: []const u8) !SaveManager {
         const save_dir = try std.fs.path.join(allocator, &.{ "saves", save_name });
-        std.fs.cwd().makePath(save_dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, save_dir) catch {};
         const reg_dir = try std.fs.path.join(allocator, &.{ save_dir, "regions" });
         defer allocator.free(reg_dir);
-        std.fs.cwd().makePath(reg_dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, reg_dir) catch {};
         const players_dir = try std.fs.path.join(allocator, &.{ save_dir, "players" });
         defer allocator.free(players_dir);
-        std.fs.cwd().makePath(players_dir) catch {};
+        std.Io.Dir.cwd().createDirPath(io, players_dir) catch {};
 
         const world_tmp = try std.fs.path.join(allocator, &.{ save_dir, "world.db" });
         defer allocator.free(world_tmp);
         const world_path = try allocator.dupeZ(u8, world_tmp);
         defer allocator.free(world_path);
-        var wdb = try fr.Session.open(fr.SQLite3, allocator, .{ .filename = world_path });
+        var wdb = try fr.Session.open(fr.SQLite3, allocator, io, .{ .filename = world_path });
         try wdb.conn.execAll(
             \\CREATE TABLE IF NOT EXISTS "WorldMeta" (
             \\  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -160,27 +161,48 @@ pub const SaveManager = struct {
             pj.inventory[i] = ItemSlotJson{ .id = item_infos[item.item_id].name, .count = item.count };
         }
 
-        var buf = std.ArrayListUnmanaged(u8){};
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
         defer buf.deinit(self.allocator);
-        const w = buf.writer(self.allocator);
-        try w.print("pos:{d:.1},{d:.1},{d:.1}\n", .{ pj.pos[0], pj.pos[1], pj.pos[2] });
-        try w.print("health:{d:.1}\n", .{pj.health});
-        try w.print("flying:{}\n", .{pj.flying});
-        try w.print("facing:{d:.4},{d:.4}\n", .{ pj.facing[0], pj.facing[1] });
+        {
+            const str = try std.fmt.allocPrint(self.allocator, "pos:{d:.1},{d:.1},{d:.1}\n", .{ pj.pos[0], pj.pos[1], pj.pos[2] });
+            defer self.allocator.free(str);
+            try buf.appendSlice(self.allocator, str);
+        }
+        {
+            const str = try std.fmt.allocPrint(self.allocator, "health:{d:.1}\n", .{pj.health});
+            defer self.allocator.free(str);
+            try buf.appendSlice(self.allocator, str);
+        }
+        {
+            const str = try std.fmt.allocPrint(self.allocator, "flying:{}\n", .{pj.flying});
+            defer self.allocator.free(str);
+            try buf.appendSlice(self.allocator, str);
+        }
+        {
+            const str = try std.fmt.allocPrint(self.allocator, "facing:{d:.4},{d:.4}\n", .{ pj.facing[0], pj.facing[1] });
+            defer self.allocator.free(str);
+            try buf.appendSlice(self.allocator, str);
+        }
         for (&pj.hotbar, 0..) |*slot, i| {
-            try w.print("h{}", .{i});
             if (slot.*) |s| {
-                try w.print(":{s},{d}\n", .{ s.id, s.count });
+                const str = try std.fmt.allocPrint(self.allocator, "h{}:{s},{d}\n", .{ i, s.id, s.count });
+                defer self.allocator.free(str);
+                try buf.appendSlice(self.allocator, str);
             } else {
-                try w.print(":\n", .{});
+                const str = try std.fmt.allocPrint(self.allocator, "h{}:\n", .{i});
+                defer self.allocator.free(str);
+                try buf.appendSlice(self.allocator, str);
             }
         }
         for (&pj.inventory, 0..) |*slot, i| {
-            try w.print("i{}", .{i});
             if (slot.*) |s| {
-                try w.print(":{s},{d}\n", .{ s.id, s.count });
+                const str = try std.fmt.allocPrint(self.allocator, "i{}:{s},{d}\n", .{ i, s.id, s.count });
+                defer self.allocator.free(str);
+                try buf.appendSlice(self.allocator, str);
             } else {
-                try w.print(":\n", .{});
+                const str = try std.fmt.allocPrint(self.allocator, "i{}:\n", .{i});
+                defer self.allocator.free(str);
+                try buf.appendSlice(self.allocator, str);
             }
         }
         const bytes = try buf.toOwnedSlice(self.allocator);
@@ -188,9 +210,9 @@ pub const SaveManager = struct {
         const path = try self.playerPath(player_id);
         defer self.allocator.free(path);
 
-        var file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
-        try file.writeAll(bytes);
+        var file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, bytes);
         self.allocator.free(bytes);
 
         // 更新世界元数据的 last_played 和 tick_count
@@ -219,7 +241,7 @@ pub const SaveManager = struct {
         };
         if (path) |p| {
             defer self.allocator.free(p);
-            const file = std.fs.cwd().readFileAlloc(self.allocator, p, 1024 * 64) catch {
+            const file = std.Io.Dir.cwd().readFileAlloc(io, p, self.allocator, .limited(1024 * 64)) catch {
                 return self.loadWorldTickCount();
             };
             defer self.allocator.free(file);
@@ -413,7 +435,7 @@ pub const SaveManager = struct {
     pub fn exists(save_name: []const u8) bool {
         const path = std.fs.path.join(std.heap.page_allocator, &.{ "saves", save_name, "world.db" }) catch return false;
         defer std.heap.page_allocator.free(path);
-        std.fs.cwd().access(path, .{}) catch return false;
+        std.Io.Dir.cwd().access(io, path, .{}) catch return false;
         return true;
     }
 
@@ -421,18 +443,18 @@ pub const SaveManager = struct {
     pub fn deleteSave(save_name: []const u8) !void {
         const dir = try std.fs.path.join(std.heap.page_allocator, &.{ "saves", save_name });
         defer std.heap.page_allocator.free(dir);
-        std.fs.cwd().deleteTree(dir) catch {};
+        std.Io.Dir.cwd().deleteTree(io, dir) catch {};
     }
 
     /// 列出所有存档（按最后游玩时间降序）
     pub fn listSaves(allocator: Allocator) ![]SaveEntry {
-        var list = std.ArrayListUnmanaged(SaveEntry){};
+        var list: std.ArrayListUnmanaged(SaveEntry) = .empty;
         errdefer list.deinit(allocator);
 
-        var dir = std.fs.cwd().openDir("saves", .{ .iterate = true }) catch return &.{};
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(io, "saves", .{ .iterate = true }) catch return &.{};
+        defer dir.close(io);
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(io)) |entry| {
             if (entry.kind != .directory) continue;
             const db_path = try std.fs.path.join(allocator, &.{ "saves", entry.name, "world.db" });
             const last_played = getLastPlayed(db_path) orelse "";
@@ -454,10 +476,10 @@ pub const SaveManager = struct {
     /// 自动生成下一个存档名（world_1, world_2, …）
     pub fn autoName(allocator: Allocator) ![]const u8 {
         var max_n: u32 = 0;
-        var dir = std.fs.cwd().openDir("saves", .{ .iterate = true }) catch return allocator.dupe(u8, "world_1");
-        defer dir.close();
+        var dir = std.Io.Dir.cwd().openDir(io, "saves", .{ .iterate = true }) catch return allocator.dupe(u8, "world_1");
+        defer dir.close(io);
         var it = dir.iterate();
-        while (try it.next()) |entry| {
+        while (try it.next(io)) |entry| {
             if (entry.kind != .directory) continue;
             if (std.mem.startsWith(u8, entry.name, "world_")) {
                 const num_str = entry.name["world_".len..];
@@ -472,7 +494,7 @@ pub const SaveManager = struct {
     fn getLastPlayed(path: []const u8) ?[]const u8 {
         const path_z = std.heap.page_allocator.dupeZ(u8, path) catch return null;
         defer std.heap.page_allocator.free(path_z);
-        var db = fr.Session.open(fr.SQLite3, std.heap.page_allocator, .{ .filename = path_z }) catch return null;
+        var db = fr.Session.open(fr.SQLite3, std.heap.page_allocator, io, .{ .filename = path_z }) catch return null;
         defer db.deinit();
         const rows = db.query(WorldMeta).findAll() catch return null;
         if (rows.len == 0) return null;

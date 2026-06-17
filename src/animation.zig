@@ -1,5 +1,6 @@
 // animation.zig — CPU 骨骼动画更新系统
 const std = @import("std");
+const ECS = @import("zigecs");
 const Allocator = std.mem.Allocator;
 const Mat4 = @import("algebra.zig").Mat4;
 const Vec3 = @import("algebra.zig").Vec3;
@@ -13,8 +14,6 @@ const MAX_ANIM_ENTITIES = rend_ctx.MAX_ANIM_ENTITIES;
 const TOTAL_BONES = rend_ctx.TOTAL_BONES;
 const Comps = @import("components.zig").Components;
 const ResManager = rend_ctx.ResManager;
-const Imports = @import("imports.zig");
-const ECS = Imports.ECS;
 
 pub const AnimationSystem = struct {
     allocator: Allocator,

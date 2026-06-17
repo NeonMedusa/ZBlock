@@ -157,5 +157,4 @@ const Mat4 = Algebra.Mat4;
 const Vec2_f64 = Algebra.Vec2_f64;
 const Input = @import("input.zig");
 const std = @import("std");
-const Imports = @import("imports.zig");
-const Game = Imports.Game;
+const Game = @import("game.zig");

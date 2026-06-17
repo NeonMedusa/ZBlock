@@ -100,7 +100,7 @@ pub fn SparseSet(comptime T: type, comptime MAX_ENTITIES: usize) type {
 pub fn SparseIndexSet(comptime MAX: usize) type {
     return struct {
         const Self = @This();
-        keys: std.ArrayListUnmanaged(usize) = .{},
+        keys: std.ArrayListUnmanaged(usize) = .empty,
         key_to_index: [MAX]usize = [_]usize{NULL_INDEX} ** MAX,
 
         pub fn init() Self {

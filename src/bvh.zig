@@ -35,7 +35,7 @@ pub const Bvh = struct {
 
     pub fn init(allocator: std.mem.Allocator, margin_ratio: f32) Self {
         return .{
-            .nodes = .{},
+            .nodes = .empty,
             .root = NULL_NODE,
             .margin_ratio = margin_ratio,
             .allocator = allocator,

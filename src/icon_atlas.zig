@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 // icon_atlas.zig — RingBuffer 缓存的方块图标图集 + 渲染管线
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -290,7 +291,7 @@ pub const IconAtlas = struct {
 
 fn loadAndScale(path: []const u8, dst: *[ICON_SLOT * ICON_SLOT * 4]u8) void {
     var read_buf: [8192]u8 = undefined;
-    var img = zigimg.Image.fromFilePath(std.heap.page_allocator, path, &read_buf) catch return;
+    var img = zigimg.Image.fromFilePath(std.heap.page_allocator, io, path, &read_buf) catch return;
     defer img.deinit(std.heap.page_allocator);
     if (img.pixels != .rgba32) img.convert(std.heap.page_allocator, .rgba32) catch return;
     const rgba = img.pixels.rgba32;

@@ -374,7 +374,7 @@ fn RunLengthSIMDEncoder(
         const VectorType = @Vector(VectorLength, IntType);
         const BytesPerPixels = (@typeInfo(IntType).int.bits + 7) / 8;
         const IndexStep = VectorLength * BytesPerPixels;
-        const MaskType = std.meta.Int(.unsigned, VectorLength);
+        const MaskType = @Int(.unsigned, VectorLength);
 
         comptime {
             if (!std.math.isPowerOfTwo(@typeInfo(IntType).int.bits)) {
@@ -612,18 +612,38 @@ pub const TGA = struct {
     id: utils.FixedStorage(u8, 256) = .{},
     extension: ?TGAExtension = null,
 
+    // align(1) inside an union cause the union to not assign the right active tag
+    // see https://codeberg.org/ziglang/zig/issues/31962
     pub const EncoderOptions = struct {
         rle_compressed: bool = true,
         top_to_bottom_image: bool = true,
         color_map_depth: u8 = 24,
         image_id: []const u8 = &.{},
         author_name: [:0]const u8 = &.{},
-        author_comment: TGAExtensionComment = .{},
-        timestamp: TGAExtensionTimestamp = .{},
+        author_comment: [:0]const u8 = &.{},
+        //author_comment: TGAExtensionComment = .{},
+        timestamp: struct {
+            month: u16 = 0,
+            day: u16 = 0,
+            year: u16 = 0,
+            hour: u16 = 0,
+            minute: u16 = 0,
+            second: u16 = 0,
+        } = .{},
+        //timestamp: TGAExtensionTimestamp = .{},
         job_id: [:0]const u8 = &.{},
-        job_time: TGAExtensionJobTime = .{},
+        job_time: struct {
+            hours: u16 = 0,
+            minutes: u16 = 0,
+            seconds: u16 = 0,
+        } = .{},
+        //job_time: TGAExtensionJobTime = .{},
         software_id: [:0]const u8 = &.{},
-        software_version: TGAExtensionSoftwareVersion = .{},
+        software_version: struct {
+            number: u16 = 0,
+            letter: u8 = ' ',
+        } = .{},
+        // software_version: TGAExtensionSoftwareVersion = .{},
     };
 
     pub fn formatInterface() FormatInterface {
@@ -695,8 +715,7 @@ pub const TGA = struct {
     }
 
     pub fn writeImage(allocator: std.mem.Allocator, write_stream: *io.WriteStream, image: Image, encoder_options: Image.EncoderOptions) Image.WriteError!void {
-        _ = allocator;
-
+        _ = allocator; // autofix
         const tga_encoder_options = encoder_options.tga;
 
         const image_width = image.width;
@@ -748,16 +767,42 @@ pub const TGA = struct {
                 return Image.WriteError.Unsupported;
             }
 
-            std.mem.copyForwards(u8, extension.author_name[0..], tga_encoder_options.author_name[0..]);
-            extension.author_comment = tga_encoder_options.author_comment;
+            @memcpy(extension.author_name[0..tga_encoder_options.author_name.len], tga_encoder_options.author_name);
 
-            extension.timestamp = tga_encoder_options.timestamp;
+            var remaining_comment_length = @min(tga_encoder_options.author_comment.len, 4 * 80);
+            var line: usize = 0;
+            var start_index: usize = 0;
+            while (remaining_comment_length > 0) {
+                const line_length = std.math.clamp(remaining_comment_length, 0, 80);
 
-            std.mem.copyForwards(u8, extension.job_id[0..], tga_encoder_options.job_id[0..]);
-            extension.job_time = tga_encoder_options.job_time;
+                @memcpy(&extension.author_comment.lines[line], tga_encoder_options.author_comment[start_index..(start_index + line_length)]);
 
-            std.mem.copyForwards(u8, extension.software_id[0..], tga_encoder_options.software_id[0..]);
-            extension.software_version = tga_encoder_options.software_version;
+                remaining_comment_length -= line_length;
+                start_index += line_length;
+                line += 1;
+            }
+
+            extension.timestamp = .{
+                .day = tga_encoder_options.timestamp.day,
+                .hour = tga_encoder_options.timestamp.hour,
+                .minute = tga_encoder_options.timestamp.minute,
+                .month = tga_encoder_options.timestamp.month,
+                .second = tga_encoder_options.timestamp.second,
+                .year = tga_encoder_options.timestamp.year,
+            };
+
+            @memcpy(extension.job_id[0..tga_encoder_options.job_id.len], tga_encoder_options.job_id);
+            extension.job_time = .{
+                .hours = tga_encoder_options.job_time.hours,
+                .minutes = tga_encoder_options.job_time.minutes,
+                .seconds = tga_encoder_options.job_time.seconds,
+            };
+
+            @memcpy(extension.software_id[0..tga_encoder_options.software_id.len], tga_encoder_options.software_id);
+            extension.software_version = .{
+                .letter = tga_encoder_options.software_version.letter,
+                .number = tga_encoder_options.software_version.number,
+            };
         }
 
         switch (image.pixels) {
@@ -1180,7 +1225,7 @@ pub const TGA = struct {
 
         var footer = TGAFooter{};
         footer.extension_offset = extension_offset;
-        std.mem.copyForwards(u8, footer.signature[0..], TGASignature[0..]);
+        footer.signature = TGASignature.*;
         try writer.writeStruct(footer, .little);
 
         try write_stream.flush();
@@ -1197,7 +1242,7 @@ pub const TGA = struct {
         if (self.header.image_type.run_length) {
             // The TGA spec recommend that the RLE compression should be done on scanline per scanline basis
             inline for (1..(4 + 1)) |bpp| {
-                const IntType = std.meta.Int(.unsigned, bpp * 8);
+                const IntType = @Int(.unsigned, bpp * 8);
 
                 if (bytes_per_pixel == bpp) {
                     if (comptime std.math.isPowerOfTwo(bpp)) {

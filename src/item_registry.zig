@@ -33,26 +33,17 @@ pub const item_infos = blk: {
 pub const MAX_ITEMS = item_infos.len;
 
 /// 物品名称枚举（编译期查找用）
-pub const ItemNames = blk: {
-    var fields: [MAX_ITEMS]std.builtin.Type.EnumField = undefined;
-    for (&fields, item_infos, 0..) |*f, info, i|
-        f.* = .{ .name = info.name, .value = i };
-    break :blk @Type(.{ .@"enum" = .{
-        .tag_type = u32,
-        .fields = &fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
-};
-
 /// 编译期物品名→ID
 pub fn itemFromName(comptime name: [:0]const u8) u32 {
-    return @intFromEnum(@field(ItemNames, name));
+    inline for (&item_infos, 0..) |info, i| {
+        if (comptime std.mem.eql(u8, info.name, name)) return i;
+    }
+    @compileError("unknown item: " ++ name);
 }
 
 /// 物品 ID
-pub const ItemId = enum(u32) {
-    _,
+pub const ItemId = packed struct(u32) {
+    id: u32,
     pub fn fromInt(i: anytype) ItemId {
         return @enumFromInt(i);
     }

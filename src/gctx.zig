@@ -206,18 +206,15 @@ fn requestDeviceCallback(
 }
 
 // 创建shader模块
-pub fn createShaderModule(gctx: *Gctx, shader_file_path: []const u8) !Wgpu.WGPUShaderModule {
-    const code_file = try std.fs.cwd().openFile(shader_file_path, .{});
-    defer code_file.close();
-
-    var shader_code: [128 * 4096]u8 = undefined;
-    var reader = code_file.reader(&shader_code);
-    const size = try reader.file.read(&shader_code);
+pub fn createShaderModule(gctx: *Gctx, io: std.Io, shader_file_path: []const u8) !Wgpu.WGPUShaderModule {
+    const allocator = std.heap.page_allocator;
+    const shader_code = try std.Io.Dir.cwd().readFileAlloc(io, shader_file_path, allocator, .unlimited);
+    defer allocator.free(shader_code);
 
     const shader_source = Wgpu.struct_WGPUShaderSourceWGSL{
         .code = .{
-            .data = shader_code[0..size].ptr,
-            .length = size,
+            .data = shader_code.ptr,
+            .length = shader_code.len,
         },
         .chain = .{
             .sType = Wgpu.WGPUSType_ShaderSourceWGSL,

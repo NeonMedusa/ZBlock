@@ -16,6 +16,13 @@ const MAX_BLOCKS = @import("utils.zig").MAX_BLOCKS;
 const Block = @import("utils.zig").Block;
 
 const Frame = @This();
+const IDCT1DResult = struct { i32, i32, i32, i32, i32, i32, i32, i32 };
+
+// 30610 is the largest absolute coefficient sum in a guarded 1-D IDCT pass,
+// including the recombination before the shift.
+const IDCT_COEFFICIENT_SUM_MAX = 30610;
+const IDCT_ROUNDING_MAX = (1 << 17) / 2;
+const IDCT_INPUT_MAX = (std.math.maxInt(i32) - IDCT_ROUNDING_MAX) / IDCT_COEFFICIENT_SUM_MAX;
 
 allocator: std.mem.Allocator,
 frame_header: FrameHeader,
@@ -192,9 +199,9 @@ pub fn yCbCrToRgbBlock(self: *Frame, y_block: *[3]Block, cbcr_block: *[3]Block, 
         g_vec = std.math.clamp(g_vec, vec_0, vec_255);
         b_vec = std.math.clamp(b_vec, vec_0, vec_255);
 
-        y_vec_i32 = @intFromFloat(r_vec);
-        cb_vec_i32 = @intFromFloat(g_vec);
-        cr_vec_i32 = @intFromFloat(b_vec);
+        y_vec_i32 = @trunc(r_vec);
+        cb_vec_i32 = @trunc(g_vec);
+        cr_vec_i32 = @trunc(b_vec);
 
         simd.store(i32, y_block[0][y * 8 ..][0..8], y_vec_i32, 8);
         simd.store(i32, y_block[1][y * 8 ..][0..8], cb_vec_i32, 8);
@@ -256,10 +263,20 @@ pub fn dequantizeBlocks(self: *Frame) Image.ReadError!void {
                         const block = &self.block_storage[block_id][component_id];
                         if (y + v >= self.block_height) {
                             @memset(block, 0);
-                        } else {
-                            for (0..64) |sample_id| {
-                                block[sample_id] = block[sample_id] * quantization_table.q8[sample_id];
-                            }
+                            continue;
+                        }
+
+                        switch (quantization_table) {
+                            .q8 => |q8| {
+                                for (0..64) |sample_id| {
+                                    block[sample_id] = std.math.mul(
+                                        i32,
+                                        block[sample_id],
+                                        q8[sample_id],
+                                    ) catch return Image.ReadError.Unsupported;
+                                }
+                            },
+                            .q16 => return Image.ReadError.Unsupported,
                         }
                     }
                 }
@@ -268,7 +285,7 @@ pub fn dequantizeBlocks(self: *Frame) Image.ReadError!void {
     }
 }
 
-pub fn idctBlocks(self: *Frame) void {
+pub fn idctBlocks(self: *Frame) Image.ReadError!void {
     const y_step = self.vertical_sampling_factor_max;
     const x_step = self.horizontal_sampling_factor_max;
 
@@ -284,7 +301,7 @@ pub fn idctBlocks(self: *Frame) void {
                     for (0..h_max) |h| {
                         const block_id = (y + v) * self.block_width_actual + (x + h);
                         const block = &self.block_storage[block_id][component_id];
-                        idctBlock(block);
+                        try idctBlock(block);
                     }
                 }
             }
@@ -296,10 +313,28 @@ pub fn idctBlocks(self: *Frame) void {
 // https://github.com/nothings/stb/blob/5c205738c191bcb0abc65c4febfa9bd25ff35234/stb_image.h#L2430C9-L2430C22
 fn f2f(comptime x: f32) i32 {
     // 4096 = 1 << 12
-    return @intFromFloat(x * 4096 + 0.5);
+    return @trunc(x * 4096 + 0.5);
 }
 
-fn idct1D(s0: i32, s1: i32, s2: i32, s3: i32, s4: i32, s5: i32, s6: i32, s7: i32) struct { i32, i32, i32, i32, i32, i32, i32, i32 } {
+fn idct1D(
+    s0: i32,
+    s1: i32,
+    s2: i32,
+    s3: i32,
+    s4: i32,
+    s5: i32,
+    s6: i32,
+    s7: i32,
+) Image.ReadError!IDCT1DResult {
+    for ([_]i32{ s0, s1, s2, s3, s4, s5, s6, s7 }) |sample| {
+        if (sample < -IDCT_INPUT_MAX) {
+            return Image.ReadError.Unsupported;
+        }
+        if (sample > IDCT_INPUT_MAX) {
+            return Image.ReadError.Unsupported;
+        }
+    }
+
     var p2 = s2;
     var p3 = s6;
 
@@ -339,7 +374,7 @@ fn idct1D(s0: i32, s1: i32, s2: i32, s3: i32, s4: i32, s5: i32, s6: i32, s7: i32
     return .{ x0, x1, x2, x3, t0, t1, t2, t3 };
 }
 
-fn idctBlock(block: *Block) void {
+fn idctBlock(block: *Block) Image.ReadError!void {
     for (0..8) |x| {
         const s0 = block[0 * 8 + x];
         const s1 = block[1 * 8 + x];
@@ -359,7 +394,7 @@ fn idctBlock(block: *Block) void {
         var t2: i32 = 0;
         var t3: i32 = 0;
 
-        x0, x1, x2, x3, t0, t1, t2, t3 = idct1D(s0, s1, s2, s3, s4, s5, s6, s7);
+        x0, x1, x2, x3, t0, t1, t2, t3 = try idct1D(s0, s1, s2, s3, s4, s5, s6, s7);
 
         x0 += 512;
         x1 += 512;
@@ -395,7 +430,7 @@ fn idctBlock(block: *Block) void {
         var t2: i32 = 0;
         var t3: i32 = 0;
 
-        x0, x1, x2, x3, t0, t1, t2, t3 = idct1D(s0, s1, s2, s3, s4, s5, s6, s7);
+        x0, x1, x2, x3, t0, t1, t2, t3 = try idct1D(s0, s1, s2, s3, s4, s5, s6, s7);
 
         // add 0.5 scaled up by factor
         x0 += (1 << 17) / 2;

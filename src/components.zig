@@ -1,9 +1,8 @@
 // components.zig
 const std = @import("std");
-const Imports = @import("imports.zig");
-const Algebra = Imports.Algebra;
-const Vec3 = Algebra.Vec3;
-const ModelId = Imports.RendCTX.ModelId;
+const Algebra = @import("algebra.zig");
+const ModelId = @import("rend_ctx.zig").ModelId;
+const Vec3 = @import("algebra.zig").Vec3;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 // 在这里定义所有组件类型
 pub const Components = struct {

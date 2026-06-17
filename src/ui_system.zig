@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 // ui_system.zig — 基于 SDF（Signed Distance Field）的 UI 文字渲染系统
 const UiSystem = @This();
 
@@ -200,14 +201,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
     var self: UiSystem = undefined;
 
     // === 先加载字体（失败不浪费 GPU 资源）===
-    const font_data = try std.fs.cwd().readFileAllocOptions(
-        allocator,
-        font_path,
-        std.math.maxInt(usize),
-        null,
-        .@"8",
-        null,
-    );
+    const font_data = try std.Io.Dir.cwd().readFileAlloc(io, font_path, allocator, .unlimited);
     errdefer allocator.free(font_data);
 
     const font_offset = Stb.stbtt_GetFontOffsetForIndex(font_data.ptr, 0);
@@ -764,7 +758,7 @@ const UiRenderPipeline = struct {
     shader_module: Wgpu.WGPUShaderModule,
 
     pub fn init(gctx: *Gctx, shader_file_path: []const u8, ui_system: *UiSystem) !@This() {
-        const shader_module = try gctx.createShaderModule(shader_file_path);
+        const shader_module = try gctx.createShaderModule(io, shader_file_path);
 
         // Binding 布局（3 个入口）
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
@@ -930,13 +924,12 @@ pub const UiUniform = struct {
 };
 
 const std = @import("std");
+const Game = @import("game.zig");
+const Window = @import("window.zig");
 const Gctx = @import("gctx.zig");
-const Imports = @import("imports.zig");
-const Game = Imports.Game;
-const Wgpu = Imports.Wgpu;
+const Wgpu = @import("imports.zig").Wgpu;
 const Algebra = @import("algebra.zig");
 const Mat4 = Algebra.Mat4;
-const Window = Imports.Window;
 const Stb = @import("stb").c;
 const Hotbar = @import("inventory.zig").Hotbar;
 const ItemStack = @import("inventory.zig").ItemStack;

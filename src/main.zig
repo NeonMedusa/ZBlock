@@ -1,6 +1,7 @@
 //main.zig:
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }){};
+const Game = @import("game.zig");
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -17,5 +18,3 @@ pub fn main() !void {
 
 const std = @import("std");
 const Log = @import("log.zig");
-const Imports = @import("imports.zig");
-const Game = Imports.Game;

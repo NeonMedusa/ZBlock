@@ -234,8 +234,7 @@ pub const Key = enum(i32) {
 };
 
 const std = @import("std");
+const Game = @import("game.zig");
+const Vec2 = @import("algebra.zig").Vec2;
 const Glfw = @import("imports.zig").Glfw;
 const Window = @import("window.zig");
-const Imports = @import("imports.zig");
-const Game = Imports.Game;
-const Vec2 = Imports.Vec2;

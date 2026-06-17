@@ -1,3 +1,4 @@
+const winsock = @import("winsock.zig");
 // network.zig — 局域网联机网络模块（TCP，直接 posix socket）
 // 包格式：u32(tag + serial) | payload
 // tag=0: ClientInput, tag=1: ServerState
@@ -38,57 +39,64 @@ pub const ServerState = struct {
 };
 
 /// 设置 socket 接收超时（Windows 用 DWORD 毫秒，其他平台用 timeval）
-pub fn setRecvTimeout(fd: std.posix.socket_t) void {
+pub fn setRecvTimeout(fd: winsock.socket_t) void {
     if (@import("builtin").os.tag == .windows) {
         // Windows: SO_RCVTIMEO 期望 DWORD（毫秒）
         const ms: u32 = 1;
-        _ = std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&ms)) catch {};
+        _ = winsock.setsockopt(fd, winsock.SOL_SOCKET, winsock.SO_RCVTIMEO, @ptrCast(&ms), @sizeOf(@TypeOf(ms)));
     } else {
-        const tv = std.posix.timeval{ .sec = 0, .usec = 1000 };
-        _ = std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, &std.mem.toBytes(tv)) catch {};
+        const tv = winsock.timeval{ .sec = 0, .usec = 1000 };
+        _ = winsock.setsockopt(fd, winsock.SOL_SOCKET, winsock.SO_RCVTIMEO, &std.mem.toBytes(tv));
     }
 }
 
 /// 创建一个 TCP socket 并监听
-pub fn listen(port: u16) !std.posix.socket_t {
-    const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP);
-    errdefer std.posix.close(fd);
-    try std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.REUSEADDR, &std.mem.toBytes(@as(i32, 1)));
-    var addr = std.net.Address.initIp4(.{ 0, 0, 0, 0 }, port);
-    try std.posix.bind(fd, &addr.any, addr.getOsSockLen());
-    try std.posix.listen(fd, 4);
+pub fn listen(port: u16) winsock.socket_t {
+    const fd = winsock.socket(winsock.AF_INET, winsock.SOCK_STREAM, winsock.IPPROTO_TCP);
+    if (fd < 0) return -1;
+    _ = winsock.setsockopt(fd, winsock.SOL_SOCKET, winsock.SO_REUSEADDR, @ptrCast(&@as(i32, 1)), @sizeOf(i32));
+    var addr = winsock.sockaddr_in{
+        .family = @as(u16, @intCast(winsock.AF_INET)),
+        .port = @byteSwap(port),
+        .addr = 0,
+        .zero = [_]u8{0} ** 8,
+    };
+    if (winsock.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) { _ = winsock.closesocket(fd); return -1; }
+    if (winsock.listen(fd, 4) != 0) { _ = winsock.closesocket(fd); return -1; }
     return fd;
 }
 
 /// 连接到服务端
-pub fn connect(host: [4]u8, port: u16) !std.posix.socket_t {
-    const fd = try std.posix.socket(std.posix.AF.INET, std.posix.SOCK.STREAM, std.posix.IPPROTO.TCP);
-    errdefer std.posix.close(fd);
-    var addr = std.net.Address.initIp4(host, port);
-    try std.posix.connect(fd, &addr.any, addr.getOsSockLen());
+pub fn connect(host: [4]u8, port: u16) winsock.socket_t {
+    const fd = winsock.socket(winsock.AF_INET, winsock.SOCK_STREAM, winsock.IPPROTO_TCP);
+    if (fd < 0) return -1;
+    const host_int = @as(u32, @bitCast(host));
+    var addr = winsock.sockaddr_in{
+        .family = @as(u16, @intCast(winsock.AF_INET)),
+        .port = @byteSwap(port),
+        .addr = host_int,
+        .zero = [_]u8{0} ** 8,
+    };
+    if (winsock.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) { _ = winsock.closesocket(fd); return -1; }
     return fd;
 }
 
 /// 发送 ClientInput（阻塞）
-pub fn sendInput(fd: std.posix.socket_t, input: *const ClientInput) !void {
+pub fn sendInput(fd: winsock.socket_t, input: *const ClientInput) void {
     const tag: u32 = 0;
     var buf: [4 + @sizeOf(ClientInput)]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], tag << 30 | (input.serial & 0x3FFFFFFF), .little);
     const ptr: [*]const u8 = @ptrCast(input);
     @memcpy(buf[4..], ptr[0..@sizeOf(ClientInput)]);
-    _ = try std.posix.send(fd, &buf, 0);
+    _ = winsock.@"send"(fd, &buf, @intCast(buf.len), 0);
 }
 
 /// 接收 ClientInput（非阻塞，true=有新数据，false=断线，WouldBlock=无数据）
-pub fn recvInput(fd: std.posix.socket_t, input: *ClientInput) !bool {
+pub fn recvInput(fd: winsock.socket_t, input: *ClientInput) bool {
     var buf: [4 + @sizeOf(ClientInput)]u8 = undefined;
-    const n = recvAll(fd, &buf) catch |err| switch (err) {
-        error.ConnectionResetByPeer => return false,
-        error.WouldBlock, error.ConnectionTimedOut => return error.WouldBlock,
-        else => return err,
-    };
-    if (n == 0) return error.WouldBlock;
-    if (n < buf.len) return error.WouldBlock; // 数据不完整，下次再收
+    const n = recvAll(fd, &buf);
+    if (n == 0) return false;
+    if (n < @sizeOf(@TypeOf(buf))) return false; // 数据不完整，下次再收
     const tag = std.mem.readInt(u32, buf[0..4], .little) >> 30;
     if (tag != 0) return false;
     input.serial = std.mem.readInt(u32, buf[0..4], .little) & 0x3FFFFFFF;
@@ -98,12 +106,12 @@ pub fn recvInput(fd: std.posix.socket_t, input: *ClientInput) !bool {
 }
 
 /// 发送 ServerState（阻塞）
-pub fn sendState(fd: std.posix.socket_t, state: *const ServerState) !void {
+pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
     const tag: u32 = 1;
     const payload_len = 8 + 8 + state.entities.len * @sizeOf(EntitySnapshot);
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.heap.page_allocator);
-    try buf.ensureTotalCapacity(std.heap.page_allocator, payload_len);
+    buf.ensureTotalCapacity(std.heap.page_allocator, payload_len) catch {};
     buf.items.len = payload_len;
     std.mem.writeInt(u32, buf.items[0..4], tag << 30 | (state.serial & 0x3FFFFFFF), .little);
     const count_u32: u32 = @intCast(state.entities.len);
@@ -115,16 +123,16 @@ pub fn sendState(fd: std.posix.socket_t, state: *const ServerState) !void {
         @memcpy(buf.items[offset..][0..@sizeOf(EntitySnapshot)], std.mem.asBytes(e));
         offset += @sizeOf(EntitySnapshot);
     }
-    _ = try std.posix.send(fd, buf.items, 0);
+    _ = winsock.@"send"(fd, buf.items.ptr, @intCast(buf.items.len), 0);
 }
 
 /// 发送区块数据（tag=2）。origin 为 chunk 原点，palette_json 和 index_data 与存档格式相同
-pub fn sendChunk(fd: std.posix.socket_t, serial: u32, origin_x: i32, origin_z: i32, palette_json: []const u8, index_data: []const u8) !void {
+pub fn sendChunk(fd: winsock.socket_t, serial: u32, origin_x: i32, origin_z: i32, palette_json: []const u8, index_data: []const u8) void {
     // 总大小: 4+4+4+4+palette_json.len+4+index_data.len
     const total = 4 + 4 + 4 + 4 + palette_json.len + 4 + index_data.len;
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.heap.page_allocator);
-    try buf.ensureTotalCapacity(std.heap.page_allocator, total);
+    buf.ensureTotalCapacity(std.heap.page_allocator, total) catch {};
     buf.items.len = total;
 
     var off: usize = 0;
@@ -144,25 +152,22 @@ pub fn sendChunk(fd: std.posix.socket_t, serial: u32, origin_x: i32, origin_z: i
     off += 4;
     @memcpy(buf.items[off..][0..index_data.len], index_data);
 
-    _ = try std.posix.send(fd, buf.items, 0);
+    _ = winsock.@"send"(fd, buf.items.ptr, @intCast(buf.items.len), 0);
 }
 
 /// 发送区块卸载指令（tag=3）
-pub fn sendChunkUnload(fd: std.posix.socket_t, origin_x: i32, origin_z: i32) !void {
+pub fn sendChunkUnload(fd: winsock.socket_t, origin_x: i32, origin_z: i32) void {
     var buf: [12]u8 = undefined;
     std.mem.writeInt(u32, buf[0..4], @as(u32, 3) << 30, .little);
     std.mem.writeInt(i32, buf[4..8], origin_x, .little);
     std.mem.writeInt(i32, buf[8..12], origin_z, .little);
-    _ = try std.posix.send(fd, &buf, 0);
+    _ = winsock.@"send"(fd, &buf, @intCast(buf.len), 0);
 }
 
 /// 接收区块数据。返回的 palette_json 和 index_data 需要调用者释放
-pub fn recvChunk(fd: std.posix.socket_t, allocator: std.mem.Allocator) !?struct { origin_x: i32, origin_z: i32, palette: []u8, data: []u8 } {
+pub fn recvChunk(fd: winsock.socket_t, allocator: std.mem.Allocator) ?struct { origin_x: i32, origin_z: i32, palette: []u8, data: []u8 } {
     var header: [16]u8 = undefined;
-    const n = recvAll(fd, &header) catch |err| switch (err) {
-        error.ConnectionResetByPeer, error.ConnectionTimedOut => return null,
-        else => return err,
-    };
+    const n = recvAll(fd, &header);
     if (n == 0) return null;
     const tag = std.mem.readInt(u32, header[0..4], .little) >> 30;
     if (tag != 2) return null;
@@ -171,29 +176,26 @@ pub fn recvChunk(fd: std.posix.socket_t, allocator: std.mem.Allocator) !?struct 
     const pal_len = std.mem.readInt(u32, header[12..16], .little);
     if (pal_len > 1024 * 64) return null;
 
-    const pal_buf = try allocator.alloc(u8, pal_len);
+    const pal_buf = allocator.alloc(u8, pal_len) catch return null;
     errdefer allocator.free(pal_buf);
-    _ = try recvAll(fd, pal_buf);
+    _ = recvAll(fd, pal_buf);
 
     var data_len_buf: [4]u8 = undefined;
-    _ = try recvAll(fd, &data_len_buf);
+    _ = recvAll(fd, &data_len_buf);
     const data_len = std.mem.readInt(u32, &data_len_buf, .little);
     if (data_len > 1024 * 256) return null;
 
-    const data_buf = try allocator.alloc(u8, data_len);
+    const data_buf = allocator.alloc(u8, data_len) catch return null;
     errdefer allocator.free(data_buf);
-    _ = try recvAll(fd, data_buf);
+    _ = recvAll(fd, data_buf);
 
     return .{ .origin_x = origin_x, .origin_z = origin_z, .palette = pal_buf, .data = data_buf };
 }
 
 /// 接收区块卸载指令（tag=3），返回 (origin_x, origin_z)
-pub fn recvChunkUnload(fd: std.posix.socket_t) !?struct { x: i32, z: i32 } {
+pub fn recvChunkUnload(fd: winsock.socket_t) ?struct { x: i32, z: i32 } {
     var header: [12]u8 = undefined;
-    const n = recvAll(fd, &header) catch |err| switch (err) {
-        error.ConnectionResetByPeer, error.ConnectionTimedOut, error.WouldBlock => return null,
-        else => return err,
-    };
+    const n = recvAll(fd, &header);
     if (n < 12) return null;
     const tag = std.mem.readInt(u32, header[0..4], .little) >> 30;
     if (tag != 3) return null;
@@ -201,24 +203,20 @@ pub fn recvChunkUnload(fd: std.posix.socket_t) !?struct { x: i32, z: i32 } {
 }
 
 /// 接收 ServerState（非阻塞，true=有新数据，false=断线，WouldBlock=无数据）
-pub fn recvState(fd: std.posix.socket_t, allocator: std.mem.Allocator, state: *ServerState) !bool {
+pub fn recvState(fd: winsock.socket_t, allocator: std.mem.Allocator, state: *ServerState) bool {
     var header: [16]u8 = undefined;
-    const n = recvAll(fd, &header) catch |err| switch (err) {
-        error.ConnectionResetByPeer => return false,
-        error.WouldBlock, error.ConnectionTimedOut => return error.WouldBlock,
-        else => return err,
-    };
-    if (n == 0) return error.WouldBlock;
-    if (n < header.len) return error.WouldBlock;
+    const n = recvAll(fd, &header);
+    if (n == 0) return false;
+    if (n < header.len) return false;
     const tag = std.mem.readInt(u32, header[0..4], .little) >> 30;
     if (tag != 1) return false;
     state.serial = std.mem.readInt(u32, header[0..4], .little) & 0x3FFFFFFF;
     const count = std.mem.readInt(u32, header[4..8], .little);
     state.host_time = std.mem.readInt(i64, header[8..16], .little);
     if (count > 64) return false; // sanity
-    const snapshots = try allocator.alloc(EntitySnapshot, count);
+    const snapshots = allocator.alloc(EntitySnapshot, count) catch return false;
     if (count > 0) {
-        const snap_bytes = try recvAll(fd, std.mem.sliceAsBytes(snapshots));
+        const snap_bytes = recvAll(fd, std.mem.sliceAsBytes(snapshots));
         if (snap_bytes == 0) return false;
     }
     state.entities = snapshots;
@@ -226,29 +224,22 @@ pub fn recvState(fd: std.posix.socket_t, allocator: std.mem.Allocator, state: *S
 }
 
 /// 读取数据包的前 2 bit 标签（不消耗数据）
-pub fn peekTag(fd: std.posix.socket_t) !u32 {
+pub fn peekTag(fd: winsock.socket_t) u32 {
     var header: [4]u8 = undefined;
-    const n = std.posix.recv(fd, &header, std.posix.MSG.PEEK) catch |err| switch (err) {
-        error.ConnectionResetByPeer => return error.ConnectionResetByPeer,
-        error.ConnectionTimedOut, error.WouldBlock => return error.WouldBlock,
-        else => return err,
-    };
-    if (n < 4) return error.WouldBlock;
+    const n = winsock.@"recv"(fd, &header, header.len, winsock.MSG_PEEK);
+    if (n < 0) return 0;
+    if (n < 4) return 0;
     return std.mem.readInt(u32, &header, .little) >> 30;
 }
 
 /// 保证收满 len 字节（或返回 0）
-fn recvAll(fd: std.posix.socket_t, buf: []u8) !usize {
+fn recvAll(fd: winsock.socket_t, buf: []u8) usize {
     var off: usize = 0;
     while (off < buf.len) {
-        const n = std.posix.recv(fd, buf[off..], 0) catch |err| switch (err) {
-            error.ConnectionResetByPeer => return 0,
-            error.ConnectionTimedOut => return off, // 超时 = 当前没数据，不视为断线
-            error.WouldBlock => return off,
-            else => return err,
-        };
+        const n = winsock.@"recv"(fd, buf[off..].ptr, @intCast(buf[off..].len), 0);
+        if (n < 0) return 0;
         if (n == 0) return off;
-        off += n;
+        off += @as(usize, @intCast(n));
     }
     return off;
 }

@@ -108,10 +108,9 @@ pub fn getForwardRay(self: *@This()) Raycast.Ray {
     return self.getRayFromScreenUV(0.5, 0.5);
 }
 // 引用
-const Imports = @import("imports.zig");
-const Vec3 = Imports.Algebra.Vec3;
-const Vec4 = Imports.Algebra.Vec4;
-const Mat4 = Imports.Algebra.Mat4;
-const Glfw = Imports.Glfw;
-const Game = Imports.Game;
+const Vec3 = @import("algebra.zig").Vec3;
+const Vec4 = @import("algebra.zig").Vec4;
+const Mat4 = @import("algebra.zig").Mat4;
+const Glfw = @import("imports.zig").Glfw;
+const Game = @import("game.zig");
 const Raycast = @import("raycast.zig");

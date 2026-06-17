@@ -271,15 +271,8 @@ pub const Registry = struct {
     /// reentrant crashes when a handler calls `destroy` on the same entity.
     pub fn destroy(self: *Registry, entity: Entity) void {
         assert(self.valid(entity));
-        // Invalidate the handle first — matches EnTT semantics.
+        self.removeAll(entity);
         self.handles.remove(entity) catch unreachable;
-        // Remove all components (inlined from removeAll, without the
-        // valid() assertion which would now fail).
-        var iter = self.components.valueIterator();
-        while (iter.next()) |value| {
-            var storage: *Storage(u1) = @alignCast(@ptrCast(value.*));
-            storage.removeIfContains(entity);
-        }
     }
 
     /// returns an interator that iterates all live entities

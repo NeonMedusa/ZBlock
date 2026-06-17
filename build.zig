@@ -16,12 +16,13 @@ pub fn build(b: *std.Build) void {
     });
 
     // GLFW需要libc
-    exe.linkLibC();
+    exe.root_module.link_libc = true;
 
     // GLFW
-    exe.addIncludePath(b.path("libs/glfw-3.4.bin.WIN64/include/GLFW/"));
-    exe.addLibraryPath(b.path("libs/glfw-3.4.bin.WIN64/lib-vc2022"));
-    exe.linkSystemLibrary("glfw3");
+    exe.root_module.addIncludePath(b.path("libs/glfw-3.4.bin.WIN64/include/GLFW/"));
+    exe.root_module.addLibraryPath(b.path("libs/glfw-3.4.bin.WIN64/lib-vc2022"));
+    exe.root_module.linkSystemLibrary("glfw3", .{});
+    exe.root_module.linkSystemLibrary("ws2_32", .{});
     const copy_glfw_dll = b.addInstallFile(
         b.path("libs/glfw-3.4.bin.WIN64/lib-vc2022/glfw3.dll"),
         "bin/glfw3.dll",
@@ -29,9 +30,9 @@ pub fn build(b: *std.Build) void {
     exe.step.dependOn(&copy_glfw_dll.step);
 
     // WGPU
-    exe.addIncludePath(b.path("libs/wgpu-windows-x86_64-gnu-release/include/webgpu"));
-    exe.addLibraryPath(b.path("libs/wgpu-windows-x86_64-gnu-release/lib"));
-    exe.linkSystemLibrary("wgpu_native");
+    exe.root_module.addIncludePath(b.path("libs/wgpu-windows-x86_64-gnu-release/include/webgpu"));
+    exe.root_module.addLibraryPath(b.path("libs/wgpu-windows-x86_64-gnu-release/lib"));
+    exe.root_module.linkSystemLibrary("wgpu_native", .{});
     const copy_wgpu_dll = b.addInstallFile(
         b.path("libs/wgpu-windows-x86_64-gnu-release/lib/wgpu_native.dll"),
         "bin/wgpu_native.dll",
@@ -43,7 +44,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("libs/stb-master/stb.zig"),
     });
     stb_module.addIncludePath(b.path("libs/stb-master"));
-    exe.addCSourceFile(.{
+    exe.root_module.addCSourceFile(.{
         .file = b.path("libs/stb-master/stb_impl.c"),
         .flags = &[_][]const u8{},
     });
@@ -65,12 +66,10 @@ pub fn build(b: *std.Build) void {
     const zigimg_module = zigimg_dep.module("zigimg");
     exe.root_module.addImport("zigimg", zigimg_module);
 
-    // zigecs
-    const ecs_dep = b.dependency("zigecs", .{
-        .target = target,
-        .optimize = optimize,
+    // ECS — prime31/zig-ecs
+    const ecs_module = b.createModule(.{
+        .root_source_file = b.path("libs/zig-ecs-master/src/ecs.zig"),
     });
-    const ecs_module = ecs_dep.module("zig-ecs");
     exe.root_module.addImport("zigecs", ecs_module);
 
     // fridge (SQLite ORM)

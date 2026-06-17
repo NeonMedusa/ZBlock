@@ -1,16 +1,15 @@
+const io = @import("imports.zig").io;
 // block_world.zig
 const std = @import("std");
-const Imports = @import("imports.zig");
-const Vec3 = Imports.Vec3;
-const Vec3i = Imports.Vec3i;
-const Vec4 = Imports.Vec4;
-const Quat = Imports.Quat;
-const Wgpu = Imports.Wgpu;
-const Gctx = Imports.Gctx;
+const Gctx = @import("gctx.zig");
+const Vec3 = @import("algebra.zig").Vec3;
+const Vec3i = @import("algebra.zig").Vec3i;
+const Vec4 = @import("algebra.zig").Vec4;
+const Quat = @import("algebra.zig").Quat;
+const ECS = @import("zigecs");
+const Comps = @import("components.zig").Components;
 const RenderPipeline = @import("render_pipeline.zig");
 const Noise = @import("noise.zig");
-const ECS = Imports.ECS;
-const Comps = Imports.Comps;
 const AABB = @import("aabb.zig").AABB;
 const Direction = @import("direction.zig").Direction;
 const BlockId = @import("block_registry.zig").BlockId;
@@ -45,7 +44,7 @@ pub const Chunk = struct {
         const buf_size = (CHUNK_BLOCKS + 7) / 8; // 1-bit 最小大小
         return Self{
             .allocator = allocator,
-            .palette = .{},
+            .palette = .empty,
             .index_bits = 1,
             .index_data = allocator.alloc(u8, buf_size) catch unreachable,
         };
@@ -117,13 +116,13 @@ pub const Chunk = struct {
 
     pub fn generate(world_origin: Vec3i, out_chunk: *Chunk) void {
         // 第一阶段：用固定大小数组做 lookup（block_infos 编译期已知，≤ 256 种）
-        var temp_pal = std.ArrayListUnmanaged(BlockState){};
+        var temp_pal: std.ArrayListUnmanaged(BlockState) = .empty;
         defer temp_pal.deinit(out_chunk.allocator);
 
         // idx_lookup[block_id_int] = palette_index，初始为 null
         var idx_lookup: [MAX_BLOCKS]?u32 = [_]?u32{null} ** MAX_BLOCKS;
 
-        var temp_indices = std.ArrayListUnmanaged(u32){};
+        var temp_indices: std.ArrayListUnmanaged(u32) = .empty;
         defer temp_indices.deinit(out_chunk.allocator);
         temp_indices.ensureTotalCapacity(out_chunk.allocator, CHUNK_BLOCKS) catch unreachable;
 
@@ -194,7 +193,7 @@ pub const Chunk = struct {
                         }
                     };
                     const bs = BlockState.init(block_id);
-                    const id_int = @intFromEnum(bs.block_id);
+                    const id_int = bs.block_id.id;
                     const pal_idx = if (idx_lookup[id_int]) |idx| idx else blk: {
                         const new_idx = @as(u32, @intCast(temp_pal.items.len));
                         idx_lookup[id_int] = new_idx;
@@ -213,7 +212,7 @@ pub const Chunk = struct {
         out_chunk.palette.deinit(out_chunk.allocator);
         out_chunk.palette = temp_pal;
         // 阻止 defer 释放——所有权已转给 out_chunk.palette
-        temp_pal = .{};
+        temp_pal = .empty;
 
         const buf_size = (CHUNK_BLOCKS * out_chunk.index_bits + 7) / 8;
         out_chunk.allocator.free(out_chunk.index_data);
@@ -298,30 +297,30 @@ pub const BlockWorld = struct {
     pipeline: *RenderPipeline,
     material_registry: MaterialRegistry,
     chunks: std.AutoHashMap(Vec3i, LoadedChunk),
-    collision_list: std.ArrayListUnmanaged(AABB) = .{},
+    collision_list: std.ArrayListUnmanaged(AABB) = .empty,
 
     pending: std.AutoHashMap(Vec3i, void),
-    mesh_mutex: std.Thread.Mutex = .{}, // 保护 mesh pending 队列
-    mesh_cond: std.Thread.Condition = .{}, // 有新的 mesh 构建任务时 signal
+    mesh_mutex: std.Io.Mutex = .init, // 保护 mesh pending 队列
+    mesh_cond: std.Io.Condition = .init, // 有新的 mesh 构建任务时 signal
     /// 读写锁保护 chunks HashMap。
     /// A* worker 和 mesh worker 均只读（getPtr）→ lockShared 并发无竞争。
     /// 只有 loadChunk（put）和 unloadChunk（remove）持写锁，此时所有读者排队等待。
     /// 前提：init 中 chunks.ensureTotalCapacity 预设容量，运行期不扩容——否则扩容会改 metadata 导致其他线程 getPtr 崩溃。
-    chunk_mutex: std.Thread.RwLock = .{},
+    chunk_mutex: std.Io.RwLock = .init,
     completed: std.ArrayListUnmanaged(MeshBuildResult),
-    completed_mutex: std.Thread.Mutex = .{},
+    completed_mutex: std.Io.Mutex = .init,
     running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     worker: ?std.Thread = null,
-    worker_gpa: std.heap.GeneralPurposeAllocator(.{}),
+    worker_gpa: std.heap.DebugAllocator(.{}),
     stale_targets: std.AutoHashMap(Pathfind.StaleKey, u32),
     last_exact_targets: std.AutoHashMap(ECS.Entity, Pathfind.GridPos),
 
     // 异步 A*：worker 持有 AStarState 所有权，通过队列与主线程交换
     astar_pending: std.ArrayListUnmanaged(AStarTask),
-    astar_pending_mutex: std.Thread.Mutex = .{},
-    astar_cond: std.Thread.Condition = .{}, // 有新的 A* 任务时 signal
+    astar_pending_mutex: std.Io.Mutex = .init,
+    astar_cond: std.Io.Condition = .init, // 有新的 A* 任务时 signal
     astar_completed: std.ArrayListUnmanaged(AStarTask),
-    astar_completed_mutex: std.Thread.Mutex = .{},
+    astar_completed_mutex: std.Io.Mutex = .init,
     astar_active: std.AutoHashMap(ECS.Entity, void), // 标记有 A* 在运行的实体
     astar_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
     astar_worker: ?std.Thread = null,
@@ -334,20 +333,20 @@ pub const BlockWorld = struct {
     // 异步存档保存队列
     pending_saves: std.ArrayListUnmanaged(SaveTask),
     completed_saves: std.ArrayListUnmanaged(SaveTask),
-    completed_saves_mutex: std.Thread.Mutex = .{},
+    completed_saves_mutex: std.Io.Mutex = .init,
 
     // 异步区块加载队列（io worker 读 SQLite 或 generate，主线程接收后放入 chunks）
     pending_loads: std.ArrayListUnmanaged(Vec3i),
     completed_loads: std.ArrayListUnmanaged(LoadResult),
-    completed_loads_mutex: std.Thread.Mutex = .{},
+    completed_loads_mutex: std.Io.Mutex = .init,
 
     // 去重：已入队正在处理的 load 请求
     io_active_loads: std.AutoHashMap(Vec3i, void),
 
     /// 所有 IO 任务（load + save）的总数，deinit/saveAllChunks 等待此值归零
     /// IO worker 专用锁：保护 pending_saves + pending_loads 两条队列
-    io_queue_mutex: std.Thread.Mutex = .{},
-    io_cond: std.Thread.Condition = .{}, // 有新的 IO 任务时 signal
+    io_queue_mutex: std.Io.Mutex = .init,
+    io_cond: std.Io.Condition = .init, // 有新的 IO 任务时 signal
     pending_io_count: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
 
     bvh: Bvh = undefined, // 实体宽相位碰撞检测（物理 tick 内重建）
@@ -385,18 +384,18 @@ pub const BlockWorld = struct {
             .material_registry = material_registry,
             .chunks = chunks,
             .pending = pending,
-            .completed = .{},
+            .completed = .empty,
             .worker_gpa = .{},
             .astar_active = astar_active,
             .stale_targets = stale_targets,
             .last_exact_targets = last_exact_targets,
-            .astar_pending = .{},
-            .astar_completed = .{},
+            .astar_pending = .empty,
+            .astar_completed = .empty,
             .save_dir = try std.fs.path.join(allocator, &.{ "saves", save_name }),
-            .pending_saves = .{},
-            .completed_saves = .{},
-            .pending_loads = .{},
-            .completed_loads = .{},
+            .pending_saves = .empty,
+            .completed_saves = .empty,
+            .pending_loads = .empty,
+            .completed_loads = .empty,
             .io_active_loads = std.AutoHashMap(Vec3i, void).init(allocator),
             .bvh = Bvh.init(allocator, 0.5),
         };
@@ -423,7 +422,7 @@ pub const BlockWorld = struct {
 
         // 停止 IO worker（先唤醒，再等退出）
         self.save_running.store(false, .release);
-        self.io_cond.signal();
+        self.io_cond.signal(io);
         if (self.save_worker) |w| {
             w.join();
         }
@@ -451,7 +450,7 @@ pub const BlockWorld = struct {
 
         // 通知 mesh worker 停止（先唤醒，再等退出）
         self.running.store(false, .release);
-        self.mesh_cond.signal();
+        self.mesh_cond.signal(io);
         if (self.worker) |w| {
             w.join();
         }
@@ -459,7 +458,7 @@ pub const BlockWorld = struct {
 
         // 清理 A* worker（先唤醒，再等退出）
         self.astar_running.store(false, .release);
-        self.astar_cond.signal();
+        self.astar_cond.signal(io);
         if (self.astar_worker) |w| {
             w.join();
         }
@@ -517,33 +516,33 @@ pub const BlockWorld = struct {
     }
 
     pub fn enqueueMeshBuild(self: *BlockWorld, origin: Vec3i) !void {
-        self.mesh_mutex.lock();
-        defer self.mesh_mutex.unlock();
+        self.mesh_mutex.lockUncancelable(io);
+        defer self.mesh_mutex.unlock(io);
         try self.pending.put(origin, {});
-        self.mesh_cond.signal();
+        self.mesh_cond.signal(io);
     }
 
     /// 批量入队 mesh 构建请求（一次锁操作，减少锁争抢）
     fn enqueueMeshBuildBatch(self: *BlockWorld, origins: []const Vec3i) !void {
-        self.mesh_mutex.lock();
-        defer self.mesh_mutex.unlock();
+        self.mesh_mutex.lockUncancelable(io);
+        defer self.mesh_mutex.unlock(io);
         for (origins) |origin| {
             try self.pending.put(origin, {});
         }
-        self.mesh_cond.signal();
+        self.mesh_cond.signal(io);
     }
 
     /// 待构建 mesh 的 chunk 数量
     pub fn pendingCount(self: *BlockWorld) usize {
-        self.mesh_mutex.lock();
-        defer self.mesh_mutex.unlock();
+        self.mesh_mutex.lockUncancelable(io);
+        defer self.mesh_mutex.unlock(io);
         return self.pending.count();
     }
 
     pub fn processCompletedBuilds(self: *BlockWorld) !void {
-        const start_ns = std.time.nanoTimestamp();
-        self.completed_mutex.lock();
-        defer self.completed_mutex.unlock();
+        const start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        self.completed_mutex.lockUncancelable(io);
+        defer self.completed_mutex.unlock(io);
 
         for (self.completed.items) |*r| {
             if (self.chunks.getPtr(r.origin)) |loaded| {
@@ -554,16 +553,16 @@ pub const BlockWorld = struct {
             r.deinit();
         }
         self.completed.clearRetainingCapacity();
-        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - start_ns))) / 1000;
         if (elapsed_us > 100000) std.debug.print("[TIMER] processCompletedBuilds: {d}us\n", .{elapsed_us});
     }
 
     /// 将脏区块数据拷贝入队，io worker 异步写入 SQLite
     pub fn enqueueSaveTask(self: *BlockWorld, origin: Vec3i, chunk: *const Chunk) !void {
-        const start_ns = std.time.nanoTimestamp();
+        const start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
         const pal = chunk.palette.items;
         // 序列化 palette 为 JSON（同 saveChunk 格式）
-        var json = try std.ArrayListUnmanaged(u8).initCapacity(self.allocator, pal.len * 16);
+        var json: std.ArrayListUnmanaged(u8) = try .initCapacity(self.allocator, pal.len * 16);
         try json.append(self.allocator, '[');
         for (pal, 0..) |bs, i| {
             if (i > 0) try json.append(self.allocator, ',');
@@ -583,8 +582,8 @@ pub const BlockWorld = struct {
 
         const json_owned = try json.toOwnedSlice(self.allocator);
 
-        self.io_queue_mutex.lock();
-        defer self.io_queue_mutex.unlock();
+        self.io_queue_mutex.lockUncancelable(io);
+        defer self.io_queue_mutex.unlock(io);
         try self.pending_saves.append(self.allocator, .{
             .origin = origin,
             .palette_json = json_owned,
@@ -592,8 +591,8 @@ pub const BlockWorld = struct {
             .palette_count = @as(u32, @intCast(palette_count)),
         });
         _ = self.pending_io_count.fetchAdd(1, .release);
-        self.io_cond.signal();
-        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+        self.io_cond.signal(io);
+        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - start_ns))) / 1000;
         if (elapsed_us > 100000) std.debug.print("[TIMER] enqueueSaveTask({d},{d}): {d}us\n", .{ origin.x, origin.z, elapsed_us });
     }
 
@@ -601,24 +600,24 @@ pub const BlockWorld = struct {
     pub fn enqueueLoadTask(self: *BlockWorld, origin: Vec3i) !void {
         if (self.chunks.contains(origin)) return;
         {
-            self.io_queue_mutex.lock();
-            defer self.io_queue_mutex.unlock();
+            self.io_queue_mutex.lockUncancelable(io);
+            defer self.io_queue_mutex.unlock(io);
             // 如果已有相同 origin 的 load 在排队的，跳过
             if (self.io_active_loads.contains(origin)) return;
             try self.pending_loads.append(self.allocator, origin);
             try self.io_active_loads.put(origin, {});
             _ = self.pending_io_count.fetchAdd(1, .release);
-            self.io_cond.signal();
+            self.io_cond.signal(io);
         }
     }
 
     /// 处理已完成的 IO 加载任务（主线程每帧调用）
     pub fn processCompletedLoads(self: *BlockWorld) !void {
-        self.completed_loads_mutex.lock();
-        defer self.completed_loads_mutex.unlock();
+        self.completed_loads_mutex.lockUncancelable(io);
+        defer self.completed_loads_mutex.unlock(io);
 
         // 先收集所有需要 mesh 构建的 origin，批量入队（一次锁操作）
-        var batch_origins = std.ArrayListUnmanaged(Vec3i){};
+        var batch_origins: std.ArrayListUnmanaged(Vec3i) = .empty;
         defer batch_origins.deinit(self.allocator);
 
         for (self.completed_loads.items) |*result| {
@@ -626,8 +625,8 @@ pub const BlockWorld = struct {
             var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
             try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
             {
-                self.chunk_mutex.lock();
-                defer self.chunk_mutex.unlock();
+                self.chunk_mutex.lockUncancelable(io);
+                defer self.chunk_mutex.unlock(io);
                 try self.chunks.put(result.origin, .{
                     .chunk = result.chunk,
                     .meshes = meshes,
@@ -657,8 +656,8 @@ pub const BlockWorld = struct {
 
     /// 释放 io worker 已完成的任务内存
     pub fn processCompletedSaves(self: *BlockWorld) void {
-        self.completed_saves_mutex.lock();
-        defer self.completed_saves_mutex.unlock();
+        self.completed_saves_mutex.lockUncancelable(io);
+        defer self.completed_saves_mutex.unlock(io);
         for (self.completed_saves.items) |*t| {
             self.allocator.free(t.palette_json);
             self.allocator.free(t.index_data);
@@ -690,7 +689,10 @@ pub const BlockWorld = struct {
         const nb_e = self.chunks.getPtr(Vec3i.new(origin.x + CHUNK_WIDTH_I32, 0, origin.z));
         const nb_n = self.chunks.getPtr(Vec3i.new(origin.x, 0, origin.z - CHUNK_WIDTH_I32));
         const nb_s = self.chunks.getPtr(Vec3i.new(origin.x, 0, origin.z + CHUNK_WIDTH_I32));
-        var result = buildChunkMeshCPU(self.allocator, origin, loaded.chunk,
+        var result = buildChunkMeshCPU(
+            self.allocator,
+            origin,
+            loaded.chunk,
             if (nb_w) |n| n.chunk else null,
             if (nb_e) |n| n.chunk else null,
             if (nb_n) |n| n.chunk else null,
@@ -705,7 +707,7 @@ pub const BlockWorld = struct {
         const origin = Vec3i.new(origin_x, 0, origin_z);
 
         // 解析 palette
-        var palette_list = std.ArrayListUnmanaged(BlockState){};
+        var palette_list: std.ArrayListUnmanaged(BlockState) = .empty;
         defer palette_list.deinit(self.allocator);
         var i: usize = 1;
         while (i < palette_json.len and palette_json[i] != ']') : (i += 1) {
@@ -715,7 +717,9 @@ pub const BlockWorld = struct {
                 const name = palette_json[start..end];
                 const lu = std.mem.lastIndexOfScalar(u8, name, '_');
                 const bn = if (lu) |p| name[0..p] else name;
-                const fi: u3 = if (lu) |p| blk: { break :blk if (p + 1 < name.len) @as(u3, @intCast(name[p + 1] - '0')) else 0; } else 0;
+                const fi: u3 = if (lu) |p| blk: {
+                    break :blk if (p + 1 < name.len) @as(u3, @intCast(name[p + 1] - '0')) else 0;
+                } else 0;
                 const id = registries.block_name_to_id.get(bn) orelse 0;
                 try palette_list.append(self.allocator, BlockState{ .block_id = BlockId.fromInt(id), .facing = @enumFromInt(fi) });
                 i = end;
@@ -725,7 +729,7 @@ pub const BlockWorld = struct {
         const bpi: u5 = if (fc <= 1) 1 else @intCast(std.math.log2_int(usize, fc - 1) + 1);
         const ds = (CHUNK_BLOCKS * bpi + 7) / 8;
 
-        self.chunk_mutex.lock();
+        self.chunk_mutex.lockUncancelable(io);
 
         if (self.chunks.getPtr(origin)) |loaded| {
             // 原地更新已有区块：不分配新 Chunk，mesh worker 仍持有合法指针
@@ -751,7 +755,7 @@ pub const BlockWorld = struct {
             loaded.meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
             loaded.dirty = false;
 
-            self.chunk_mutex.unlock();
+            self.chunk_mutex.unlock(io);
 
             self.enqueueMeshBuild(origin) catch {};
             for (NEIGHBOR_OFFSETS[1..]) |noff| {
@@ -769,7 +773,7 @@ pub const BlockWorld = struct {
         chunk.* = Chunk.init(self.allocator);
         chunk.palette.deinit(self.allocator);
         chunk.palette = palette_list;
-        palette_list = .{};
+        palette_list = .empty;
         chunk.index_bits = bpi;
         self.allocator.free(chunk.index_data);
         chunk.index_data = self.allocator.alloc(u8, ds_new) catch @panic("OOM");
@@ -780,7 +784,7 @@ pub const BlockWorld = struct {
         meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
 
         try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .dirty = false });
-        self.chunk_mutex.unlock();
+        self.chunk_mutex.unlock(io);
 
         self.enqueueMeshBuild(origin) catch {};
         for (NEIGHBOR_OFFSETS[1..]) |noff| {
@@ -790,11 +794,11 @@ pub const BlockWorld = struct {
     }
 
     pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
-        const start_ns = std.time.nanoTimestamp();
+        const start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
-        self.chunk_mutex.lock();
-        defer self.chunk_mutex.unlock();
-        const c_mutex_ns = std.time.nanoTimestamp();
+        self.chunk_mutex.lockUncancelable(io);
+        defer self.chunk_mutex.unlock(io);
+        const c_mutex_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
         if (self.chunks.getPtr(origin)) |loaded| {
             if (loaded.build_lock.load(.acquire)) return;
@@ -810,14 +814,14 @@ pub const BlockWorld = struct {
                 }
             }
 
-            const t1_ns = std.time.nanoTimestamp();
+            const t1_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
             // 脏数据入队异步保存（不阻塞主线程）
             if (loaded.dirty) {
                 self.enqueueSaveTask(origin, loaded.chunk) catch {};
             }
 
-            const t2_ns = std.time.nanoTimestamp();
+            const t2_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
             // 释放所有 mesh
             {
@@ -829,24 +833,24 @@ pub const BlockWorld = struct {
             }
             loaded.meshes.deinit();
 
-            const t3_ns = std.time.nanoTimestamp();
+            const t3_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
             loaded.chunk.deinit();
             self.allocator.destroy(loaded.chunk);
             _ = self.chunks.remove(origin);
 
-            const t4_ns = std.time.nanoTimestamp();
+            const t4_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
             self.material_registry.cleanupUnused();
 
-            const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - start_ns))) / 1000;
+            const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - start_ns))) / 1000;
             if (elapsed_us > 100000) {
                 const cmtx_us = @as(u64, @intCast(@max(@as(i64, 0), c_mutex_ns - start_ns))) / 1000;
                 const lookup_us = @as(u64, @intCast(@max(@as(i64, 0), t1_ns - c_mutex_ns))) / 1000;
                 const save_us = @as(u64, @intCast(@max(@as(i64, 0), t2_ns - t1_ns))) / 1000;
                 const mesh_us = @as(u64, @intCast(@max(@as(i64, 0), t3_ns - t2_ns))) / 1000;
                 const chunk_us = @as(u64, @intCast(@max(@as(i64, 0), t4_ns - t3_ns))) / 1000;
-                const reg_us = @as(u64, @intCast(@max(@as(i64, 0), std.time.nanoTimestamp() - t4_ns))) / 1000;
+                const reg_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - t4_ns))) / 1000;
                 std.debug.print("[TIMER] unloadChunk({d},{d}): total={d}us cmtx={d}us look={d}us save={d}us mesh={d}us chunk={d}us reg={d}us\n", .{ origin.x, origin.z, elapsed_us, cmtx_us, lookup_us, save_us, mesh_us, chunk_us, reg_us });
             }
         } else {
@@ -1059,7 +1063,7 @@ pub const BlockWorld = struct {
                     const pos = ent_view.get(Comps.Position, entity);
                     const col = ent_view.get(Comps.Collider, entity);
                     const aabb = getEntityAABB(pos.vec, col);
-                    self.bvh.insert(@as(u32, @bitCast(entity)), aabb) catch {};
+                    self.bvh.insert(@as(u32, @intCast(entity.index)), aabb) catch {};
                 }
             }
 
@@ -1068,8 +1072,9 @@ pub const BlockWorld = struct {
                 registry: *ECS.Registry,
                 repel: f32,
                 fn callback(ctx: @This(), a: u32, b: u32) void {
-                    const ea: ECS.Entity = @bitCast(a);
-                    const eb: ECS.Entity = @bitCast(b);
+                    const ea: ECS.Entity = .{ .index = @intCast(a), .version = 0 };
+                    const eb: ECS.Entity = .{ .index = @intCast(b), .version = 0 };
+                    if (!ctx.registry.valid(ea) or !ctx.registry.valid(eb)) return;
                     const pos_a = ctx.registry.get(Comps.Position, ea);
                     const pos_b = ctx.registry.get(Comps.Position, eb);
                     const vel_a = ctx.registry.get(Comps.Velocity, ea);
@@ -1082,8 +1087,8 @@ pub const BlockWorld = struct {
 
                     // 只处理紧凑 AABB 真正重叠的对（BVH 的胖 AABB 粗筛后二次精筛）
                     if (!(box_a.min_x < box_b.max_x and box_a.max_x > box_b.min_x and
-                          box_a.min_y < box_b.max_y and box_a.max_y > box_b.min_y and
-                          box_a.min_z < box_b.max_z and box_a.max_z > box_b.min_z)) return;
+                        box_a.min_y < box_b.max_y and box_a.max_y > box_b.min_y and
+                        box_a.min_z < box_b.max_z and box_a.max_z > box_b.min_z)) return;
 
                     // 水平排斥方向（A → B）
                     const dx = pos_b.vec.x - pos_a.vec.x;
@@ -1182,8 +1187,8 @@ pub const BlockWorld = struct {
                 var completed_buf: [16]AStarTask = undefined;
                 var completed_count: usize = 0;
                 {
-                    self.astar_completed_mutex.lock();
-                    defer self.astar_completed_mutex.unlock();
+                    self.astar_completed_mutex.lockUncancelable(io);
+                    defer self.astar_completed_mutex.unlock(io);
                     var i: usize = self.astar_completed.items.len;
                     while (i > 0 and completed_count < completed_buf.len) {
                         i -= 1;
@@ -1327,14 +1332,14 @@ pub const BlockWorld = struct {
                                 defer if (!owned) Pathfind.deinitAStar(&astar);
                                 self.astar_active.put(entity, {}) catch continue;
                                 {
-                                    self.astar_pending_mutex.lock();
-                                    defer self.astar_pending_mutex.unlock();
+                                    self.astar_pending_mutex.lockUncancelable(io);
+                                    defer self.astar_pending_mutex.unlock(io);
                                     self.astar_pending.append(self.allocator, .{ .entity = entity, .state = astar }) catch {
                                         _ = self.astar_active.remove(entity);
                                         continue;
                                     };
                                 }
-                                self.astar_cond.signal();
+                                self.astar_cond.signal(io);
                                 owned = true; // 所有权转移给 worker
                             }
                         }
@@ -1579,8 +1584,8 @@ pub const BlockWorld = struct {
     pub fn getSurfaceY(self: *BlockWorld, x: i32, z: i32) ?i32 {
         const origin = BlockWorld.chunkOrigin(x, z);
         {
-            self.chunk_mutex.lockShared();
-            defer self.chunk_mutex.unlockShared();
+            self.chunk_mutex.lockSharedUncancelable(io);
+            defer self.chunk_mutex.unlockShared(io);
             _ = self.chunks.getPtr(origin) orelse return null;
         }
         var y: i32 = 256;
@@ -1599,10 +1604,10 @@ fn meshWorkerFn(world: *BlockWorld) void {
         // 取任务：阻塞等待直到 pending 非空，然后取出一个并移除
         var origin: Vec3i = undefined;
         {
-            world.mesh_mutex.lock();
-            defer world.mesh_mutex.unlock();
+            world.mesh_mutex.lockUncancelable(io);
+            defer world.mesh_mutex.unlock(io);
             while (world.pending.count() == 0 and world.running.load(.acquire))
-                world.mesh_cond.wait(&world.mesh_mutex);
+                world.mesh_cond.waitUncancelable(io, &world.mesh_mutex);
             if (!world.running.load(.acquire)) break;
             var iter = world.pending.keyIterator();
             origin = iter.next().?.*; // pending 非空，一定有
@@ -1611,8 +1616,8 @@ fn meshWorkerFn(world: *BlockWorld) void {
 
         var loaded_ptr_chunks: [NEIGHBOR_OFFSETS.len]?*LoadedChunk = [_]?*LoadedChunk{null} ** NEIGHBOR_OFFSETS.len;
         {
-            world.chunk_mutex.lockShared();
-            defer world.chunk_mutex.unlockShared();
+            world.chunk_mutex.lockSharedUncancelable(io);
+            defer world.chunk_mutex.unlockShared(io);
             loaded_ptr_chunks[0] = world.chunks.getPtr(origin);
             if (loaded_ptr_chunks[0] != null) {
                 loaded_ptr_chunks[0].?.build_lock.store(true, .release);
@@ -1643,11 +1648,11 @@ fn meshWorkerFn(world: *BlockWorld) void {
                 if (opt_l) |l| l.build_lock.store(false, .release);
             }
 
-            world.completed_mutex.lock();
+            world.completed_mutex.lockUncancelable(io);
             world.completed.append(world.allocator, result) catch {
                 result.deinit();
             };
-            world.completed_mutex.unlock();
+            world.completed_mutex.unlock(io);
         }
         // 完成工作后短暂让步，让主线程有机会处理 completed
         std.Thread.yield() catch {};
@@ -1660,10 +1665,10 @@ fn astarWorkerFn(world: *BlockWorld) void {
     var active: ?AStarTask = null;
     while (world.astar_running.load(.acquire)) {
         if (active == null) {
-            world.astar_pending_mutex.lock();
-            defer world.astar_pending_mutex.unlock();
+            world.astar_pending_mutex.lockUncancelable(io);
+            defer world.astar_pending_mutex.unlock(io);
             while (world.astar_pending.items.len == 0 and world.astar_running.load(.acquire))
-                world.astar_cond.wait(&world.astar_pending_mutex);
+                world.astar_cond.waitUncancelable(io, &world.astar_pending_mutex);
             if (!world.astar_running.load(.acquire)) break;
             active = world.astar_pending.swapRemove(0);
         }
@@ -1671,8 +1676,8 @@ fn astarWorkerFn(world: *BlockWorld) void {
             var just_finished: bool = false;
             {
                 // 读共享 chunk 锁（多 reader 并发），state 由 worker 独占无需锁
-                world.chunk_mutex.lockShared();
-                defer world.chunk_mutex.unlockShared();
+                world.chunk_mutex.lockSharedUncancelable(io);
+                defer world.chunk_mutex.unlockShared(io);
                 if (entry.state.result == .pending) {
                     Pathfind.stepAStar(&entry.state, world, 500);
                 }
@@ -1681,8 +1686,8 @@ fn astarWorkerFn(world: *BlockWorld) void {
                 }
             }
             if (just_finished) {
-                world.astar_completed_mutex.lock();
-                defer world.astar_completed_mutex.unlock();
+                world.astar_completed_mutex.lockUncancelable(io);
+                defer world.astar_completed_mutex.unlock(io);
                 world.astar_completed.append(world.allocator, .{ .entity = entry.entity, .state = entry.state }) catch {};
                 active = null;
             }
@@ -1706,7 +1711,7 @@ fn ioWorkerFn(world: *BlockWorld) void {
     {
         if (std.fmt.allocPrint(pa, "{s}/regions", .{world.save_dir})) |reg_dir| {
             defer pa.free(reg_dir);
-            std.fs.cwd().makePath(reg_dir) catch {};
+            std.Io.Dir.cwd().createDirPath(io, reg_dir) catch {};
         } else |_| {}
     }
 
@@ -1714,8 +1719,8 @@ fn ioWorkerFn(world: *BlockWorld) void {
         // 优先处理保存任务
         var save_task: ?SaveTask = null;
         {
-            world.io_queue_mutex.lock();
-            defer world.io_queue_mutex.unlock();
+            world.io_queue_mutex.lockUncancelable(io);
+            defer world.io_queue_mutex.unlock(io);
             if (world.pending_saves.items.len > 0) {
                 save_task = world.pending_saves.swapRemove(0);
             }
@@ -1741,7 +1746,7 @@ fn ioWorkerFn(world: *BlockWorld) void {
                     continue;
                 };
                 defer pa.free(db_path_z);
-                var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = db_path_z }) catch {
+                var sess = fr.Session.open(fr.SQLite3, pa, io, .{ .filename = db_path_z }) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
                     continue;
                 };
@@ -1767,9 +1772,9 @@ fn ioWorkerFn(world: *BlockWorld) void {
                 _ = stmt.bind(3, fr.Value{ .blob = t.index_data[0..data_size] }) catch {};
                 _ = stmt.exec() catch {};
             }
-            world.completed_saves_mutex.lock();
+            world.completed_saves_mutex.lockUncancelable(io);
             world.completed_saves.append(world.allocator, t) catch {};
-            world.completed_saves_mutex.unlock();
+            world.completed_saves_mutex.unlock(io);
             _ = world.pending_io_count.fetchSub(1, .release);
             continue;
         }
@@ -1777,8 +1782,8 @@ fn ioWorkerFn(world: *BlockWorld) void {
         // 没有保存任务，尝试加载任务
         var origin: ?Vec3i = null;
         {
-            world.io_queue_mutex.lock();
-            defer world.io_queue_mutex.unlock();
+            world.io_queue_mutex.lockUncancelable(io);
+            defer world.io_queue_mutex.unlock(io);
             if (world.pending_loads.items.len > 0) {
                 origin = world.pending_loads.swapRemove(0);
             }
@@ -1806,7 +1811,7 @@ fn ioWorkerFn(world: *BlockWorld) void {
                 if (region_caches.getPtr(key)) |sess| {
                     break :blk sess;
                 } else {
-                    var sess = fr.Session.open(fr.SQLite3, pa, .{ .filename = load_path_z }) catch {
+                    var sess = fr.Session.open(fr.SQLite3, pa, io, .{ .filename = load_path_z }) catch {
                         _ = world.pending_io_count.fetchSub(1, .release);
                         continue;
                     };
@@ -1844,7 +1849,7 @@ fn ioWorkerFn(world: *BlockWorld) void {
                 };
                 const src = col0.string;
                 // 解析 palette JSON
-                var palette_names = std.ArrayListUnmanaged([]const u8){};
+                var palette_names: std.ArrayListUnmanaged([]const u8) = .empty;
                 defer palette_names.deinit(pa);
                 {
                     var i: usize = 1;
@@ -1861,7 +1866,7 @@ fn ioWorkerFn(world: *BlockWorld) void {
                     }
                 }
                 // 构建运行时 palette
-                var runtime_palette = std.ArrayListUnmanaged(BlockState){};
+                var runtime_palette: std.ArrayListUnmanaged(BlockState) = .empty;
                 defer runtime_palette.deinit(pa);
                 runtime_palette.ensureTotalCapacity(pa, palette_names.items.len) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
@@ -1884,7 +1889,7 @@ fn ioWorkerFn(world: *BlockWorld) void {
                 chunk.* = Chunk.init(pa);
                 chunk.palette.deinit(pa);
                 chunk.palette = runtime_palette;
-                runtime_palette = .{};
+                runtime_palette = .empty;
                 chunk.index_bits = @as(u5, @intCast(bpi));
                 const col1 = stmt.column(1) catch {
                     _ = world.pending_io_count.fetchSub(1, .release);
@@ -1905,18 +1910,18 @@ fn ioWorkerFn(world: *BlockWorld) void {
             }
 
             // 推送 completed_loads
-            world.completed_loads_mutex.lock();
+            world.completed_loads_mutex.lockUncancelable(io);
             world.completed_loads.append(world.allocator, .{ .origin = o, .chunk = chunk }) catch {};
-            world.completed_loads_mutex.unlock();
+            world.completed_loads_mutex.unlock(io);
             _ = world.pending_io_count.fetchSub(1, .release);
         } else {
-            world.io_queue_mutex.lock();
+            world.io_queue_mutex.lockUncancelable(io);
             while (world.pending_saves.items.len == 0 and
-                   world.pending_loads.items.len == 0 and
-                   world.save_running.load(.acquire))
-                world.io_cond.wait(&world.io_queue_mutex);
+                world.pending_loads.items.len == 0 and
+                world.save_running.load(.acquire))
+                world.io_cond.waitUncancelable(io, &world.io_queue_mutex);
             if (!world.save_running.load(.acquire)) break;
-            world.io_queue_mutex.unlock();
+            world.io_queue_mutex.unlock(io);
         }
     }
 }

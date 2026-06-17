@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 //render_pipeline.zig:
 // 主渲染管线管理。一个 shader module + 三个 vertex entry point (vs_static/vs_skinned/vs_chunk)，
 // 三个 vertex entry：vs_static / vs_skinned / vs_chunk 共享同一份片段着色器。
@@ -13,7 +14,7 @@ pipeline_skinned: Wgpu.WGPURenderPipeline,
 pipeline_chunk: Wgpu.WGPURenderPipeline,
 
 pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
-    const shader_module = try game.gctx.createShaderModule(shader_file_path);
+    const shader_module = try game.gctx.createShaderModule(io, shader_file_path);
     // 创建 binding group layout
     const global_bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
         .{ // scene_uniform
@@ -251,9 +252,8 @@ pub fn deinit(self: @This()) void {
 }
 
 const std = @import("std");
+const Game = @import("game.zig");
 const Gctx = @import("gctx.zig");
 const Wgpu = @import("imports.zig").Wgpu;
-const Imports = @import("imports.zig");
-const Game = Imports.Game;
 
 const RenderCTX = @import("rend_ctx.zig");

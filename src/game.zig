@@ -1,3 +1,5 @@
+const io = @import("imports.zig").io;
+const winsock = @import("winsock.zig");
 // game.zig
 //
 // ⚠️ 重要：Zig 的 allocator.create() 不应用结构体字段默认值。
@@ -5,6 +7,24 @@
 //    否则字段值为内存垃圾（不是默认值）。
 //    已在此踩坑的字段：player_id, remote_player, flying, network_mode
 //    新增字段时务必检查 init() 是否有对应初始化。
+const Algebra = @import("algebra.zig");
+const Gctx = @import("gctx.zig");
+const Window = @import("window.zig");
+const Render = @import("render.zig");
+const Camera3D = @import("camera3d.zig");
+const RenderPipeline = @import("render_pipeline.zig");
+const UiSystem = @import("ui_system.zig");
+const Input = @import("input.zig");
+const ECS = @import("zigecs");
+const RendCTX = @import("rend_ctx.zig");
+const Comps = @import("components.zig").Components;
+const Wgpu = @import("imports.zig").Wgpu;
+const Glfw = @import("imports.zig").Glfw;
+const Gltf = @import("imports.zig").Gltf;
+const Vec3 = @import("algebra.zig").Vec3;
+const ResManager = @import("rend_ctx.zig").ResManager;
+const Model = @import("rend_ctx.zig").Model;
+const SceneUniform = @import("rend_ctx.zig").SceneUniform;
 
 allocator: std.mem.Allocator,
 window: Window,
@@ -26,7 +46,7 @@ selected_item: ?SelectedItem = null,
 save_manager: SaveManager,
 icon_atlas: IconAtlas,
 accumulator: f32 = 0, // 物理 tick 时间余量，用于渲染插值
-frame_timer: std.time.Instant, // 帧计时器，独立于 GLFW
+frame_timer: std.Io.Timestamp, // 帧计时器，独立于 GLFW
 fps_buffer: [120]f32 = undefined, // 2 秒 FPS 窗口
 fps_idx: u32 = 0,
 fps_avg: f32 = 0,
@@ -37,15 +57,15 @@ menu_state: MenuState = .MainMenu,
 
 // 联机网络
 network_mode: NetworkMode = .single,
-listen_fd: std.posix.socket_t = undefined,
+listen_fd: winsock.socket_t = undefined,
 net_listening: bool = false, // listen_fd 是否有效
-client_fd: std.posix.socket_t = undefined, // 有效值由网络线程写入
+client_fd: winsock.socket_t = undefined, // 有效值由网络线程写入
 client_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 remote_player: ?ECS.Entity = null,
 client_disconnected: bool = false, // 网络线程检测到断线，主线程清理
 net_thread: ?std.Thread = null,
 net_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
-net_mutex: std.Thread.Mutex = .{}, // 保护 net_cam_yaw/pitch
+net_mutex: std.Io.Mutex = .init, // 保护 net_cam_yaw/pitch
 net_saved_client_pos: Vec3 = Vec3.zero, // 客机断线时保存的位置（重连后恢复）
 server_wants_fly: bool = false, // 主循环检测到双击空格后设置，collectPlayerInput 消费
 fly_timer: f64 = 0, // 飞行双击计时器（用真实帧时间递减）
@@ -129,8 +149,8 @@ pub fn start(self: *Game) !void {
 
         // 游戏初始化后才运行物理和渲染
         if (self.save_initialized) {
-            const now = try std.time.Instant.now();
-            const dt_ns = now.since(self.frame_timer);
+            const now = std.Io.Timestamp.now(io, .awake);
+            const dt_ns = now.nanoseconds - self.frame_timer.nanoseconds;
             self.frame_timer = now;
             const dt = @as(f32, @floatFromInt(dt_ns)) / 1_000_000_000.0;
             self.fps_buffer[self.fps_idx] = dt;
@@ -451,10 +471,11 @@ fn initGame(self: *Game) !void {
 }
 
 pub fn init(allocator: std.mem.Allocator) !*@This() {
+    if (@import("builtin").os.tag == .windows) winsock.startup();
     var self = try allocator.create(@This());
     self.allocator = allocator;
     self.server = Server.init(allocator);
-    self.net_mutex = .{};
+    self.net_mutex = .init;
     self.network_mode = .single;
     self.net_saved_client_pos = Vec3.zero;
     self.net_thread = null;
@@ -472,7 +493,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 初始化输入系统
     const input = Input.init(self);
     self.input = input;
-    self.frame_timer = try std.time.Instant.now();
+    self.frame_timer = std.Io.Timestamp.now(io, .awake);
     self.fps_idx = 0;
 
     // 初始化wgpu
@@ -551,7 +572,9 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 生成随机用户名（每次启动不同，避免联机重名）
     {
-        const suffix = std.crypto.random.int(u32) % 10000;
+        var rand_buf: [4]u8 = undefined;
+        io.random(&rand_buf);
+        const suffix = std.mem.readInt(u32, &rand_buf, .little) % 10000;
         self.player_name = try std.fmt.allocPrint(allocator, "user_{d}", .{suffix});
     }
 
@@ -589,24 +612,18 @@ pub fn deinit(self: *@This()) void {
         self.server.block_world.deinit();
         self.save_manager.deinit();
     }
-    // 释放服务端资源（returnToMenu 未释放时才释放）
-    if (!self.game_cleaned) {
-        self.server.deinit();
-    }
+    self.server.deinit();
     self.server.animation_system.deinit();
     registries.deinit(self.allocator);
 }
 
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
-    Log.info("loading save '{s}'...", .{name});
+    Log.info("startSave begin '{s}'", .{name});
     self.server.chunk_radius = 4;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
-    // 如果是从 returnToMenu 回来的，需要重建 BlockWorld
-    if (self.game_cleaned) {
-        self.server.registry = ECS.Registry.init(self.allocator);
-    }
+    // 如果是从 returnToMenu 回来的，Server 已经被重建，只需要重建 BlockWorld
     self.server.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.server.chunk_radius, name);
     try self.server.block_world.spawnWorker();
     try self.server.block_world.spawnAStarWorker();
@@ -626,7 +643,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     self.interp_buf_count = 0;
     self.interp_buf_head = 0;
     self.last_snapshot_serial = std.math.maxInt(u64);
-    self.server.chunk_radius = 0;
+    self.server.chunk_radius = 4;
     self.network_mode = .client;
 
     self.net_thread = null;
@@ -634,10 +651,11 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     self.client_connected.store(false, .release);
     self.client_fd = undefined;
 
-    const cfd = Network.connect(host_ip, Network.SERVER_PORT) catch |err| {
-        Log.info("connect failed: {}", .{err});
+    const cfd = Network.connect(host_ip, Network.SERVER_PORT);
+    if (cfd < 0) {
+        Log.info("connect failed", .{});
         return;
-    };
+    }
     self.client_fd = cfd;
     self.client_connected.store(true, .release);
     Log.info("connected\n", .{});
@@ -657,12 +675,12 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     self.latency_samples = 0;
 
     // 初始化空的 block_world（渲染需要）
-    self.server.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, 0, "");
+    self.server.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.server.chunk_radius, "");
 
     // 启动 mesh worker（区块通过动态加载到达）
     self.server.block_world.spawnWorker() catch {};
     // 设置非阻塞超时
-    Network.setRecvTimeout(self.client_fd);
+    Network.setRecvTimeout(@as(winsock.socket_t, @intCast(self.client_fd)));
 
     // 创建本地玩家实体（第一人称，不可见，用于接收主机发回的自身位置）
     {
@@ -681,7 +699,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
 /// 返回主菜单（由暂停菜单调用）
 pub fn returnToMenu(self: *Game) void {
-    Log.info("returning to menu, mode={any}", .{self.network_mode});
+    Log.info("returnToMenu CALLED, mode={any}, save_initialized={}, menu_state={}", .{ self.network_mode, self.save_initialized, @intFromEnum(self.menu_state) });
     if (self.network_mode != .client) {
         self.save_manager.savePlayer(self.player_name, &self.hotbar, &self.inventory, &self.server.registry, self.server.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
         self.save_manager.saveAllEntities(&self.server.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
@@ -694,7 +712,7 @@ pub fn returnToMenu(self: *Game) void {
         self.net_running.store(false, .release);
         if (self.net_listening) {
             self.net_listening = false;
-            std.posix.close(self.listen_fd);
+            _ = winsock.closesocket(self.listen_fd);
         }
         t.join();
         self.net_thread = null;
@@ -706,7 +724,7 @@ pub fn returnToMenu(self: *Game) void {
 
     // 客机：关闭 socket + 清理快照映射（主机由网络线程的 defer close 处理）
     if (was_client) {
-        std.posix.close(self.client_fd);
+        _ = winsock.closesocket(self.client_fd);
         self.snapshot_info.deinit(self.allocator);
         self.snapshot_info = .{};
     }
@@ -724,11 +742,25 @@ pub fn returnToMenu(self: *Game) void {
         }
     }
 
-    // 释放 gameplay 子系统（先释放 block_world / save_manager，再 registry.deinit
-    // 因为 registry.deinit 可能崩溃，先清理能清理的）
+    // 释放 gameplay 子系统
     self.server.block_world.deinit();
+    // 释放 Server 内部容器，但保留 registry（zig-ecs 的 deinit 有泄漏 bug）
+    self.server.input_queue.deinit(self.allocator);
+    self.server.pending_chunks.deinit(self.allocator);
+    self.server.pending_unloads.deinit(self.allocator);
+    {
+        var it = self.server.player_chunks.valueIterator();
+        while (it.next()) |list| list.deinit(self.allocator);
+    }
+    self.server.player_chunks.deinit(self.allocator);
+    // 重置为初始状态
+    self.server.input_queue = .empty;
+    self.server.pending_chunks = .empty;
+    self.server.pending_unloads = .empty;
+    self.server.player_chunks = .empty;
+    self.server.snapshot_count = 0;
+    self.server.snapshot_serial = 0;
     if (!was_client) self.save_manager.deinit();
-    self.server.registry.deinit();
     self.game_cleaned = true;
     self.save_initialized = false;
     self.server.player_id = 0;
@@ -758,8 +790,8 @@ fn tick(self: *Game) !void {
         }
 
         // 主机相机朝向（网络线程需读取，用于主机玩家快照）
-        self.net_mutex.lock();
-        defer self.net_mutex.unlock();
+        self.net_mutex.lockUncancelable(io);
+        defer self.net_mutex.unlock(io);
         self.net_cam_yaw = self.camera.yaw;
         self.net_cam_pitch = self.camera.pitch;
     }
@@ -767,15 +799,16 @@ fn tick(self: *Game) !void {
 
 /// 联机：主机网络线程（接受客户端 + 循环收发）
 fn hostNetworkThread(self: *Game) void {
-    self.listen_fd = Network.listen(Network.SERVER_PORT) catch {
+    self.listen_fd = Network.listen(Network.SERVER_PORT);
+    if (self.listen_fd < 0) {
         Log.err("network: listen failed", .{});
         return;
-    };
+    }
     self.net_listening = true;
     defer {
         if (self.net_listening) {
             self.net_listening = false;
-            std.posix.close(self.listen_fd);
+            _ = winsock.closesocket(self.listen_fd);
         }
     }
 
@@ -787,27 +820,31 @@ fn hostNetworkThread(self: *Game) void {
         }
         accept_print_timer -= 1;
         // 用 poll 轮询，避免 blocking accept 被关闭 socket 打断时 Windows 报 WSAEINTR
-        var poll_fds = [_]std.posix.pollfd{
-            .{ .fd = self.listen_fd, .events = std.posix.POLL.IN, .revents = 0 },
+        var readfds = winsock.fd_set{
+            .fd_count = 1,
+            .fd_array = [_]usize{@as(usize, @intCast(self.listen_fd))} ** winsock.FD_SETSIZE,
         };
-        const poll_rc = std.posix.poll(&poll_fds, 200) catch |err| {
-            Log.err("network: poll error: {}", .{err});
+        var tv = winsock.timeval{ .sec = 0, .usec = 200000 };
+        const sel_rc = winsock.select(0, &readfds, null, null, &tv);
+        if (sel_rc < 0) {
+            Log.err("network: select error", .{});
             return;
-        };
-        if (poll_rc == 0 or poll_fds[0].revents & std.posix.POLL.IN == 0) continue;
+        }
+        if (sel_rc == 0) continue;
         if (!self.net_running.load(.acquire)) return;
-        const cfd = std.posix.accept(self.listen_fd, null, null, 0) catch |err| {
-            Log.err("network: accept error: {}", .{err});
+        const cfd = winsock.accept(self.listen_fd, null, null);
+        if (cfd < 0) {
+            Log.err("network: accept error", .{});
             return;
-        };
+        }
         if (!self.net_running.load(.acquire)) return;
         Log.info("network: player joined", .{});
-        defer std.posix.close(cfd);
+        defer _ = winsock.closesocket(cfd);
 
-        self.net_mutex.lock();
+        self.net_mutex.lockUncancelable(io);
         self.client_fd = cfd;
         self.client_connected.store(true, .release);
-        self.net_mutex.unlock();
+        self.net_mutex.unlock(io);
 
         var state_serial: u32 = 0;
         // 创建远程玩家实体
@@ -823,7 +860,10 @@ fn hostNetworkThread(self: *Game) void {
                 var pi = pv.entityIterator();
                 var found = Vec3.zero;
                 while (pi.next()) |pe| {
-                    if (pv.get(Comps.Player, pe).id == 0) { found = pv.get(Comps.Position, pe).vec; break; }
+                    if (pv.get(Comps.Player, pe).id == 0) {
+                        found = pv.get(Comps.Position, pe).vec;
+                        break;
+                    }
                 }
                 break :blk found;
             };
@@ -846,9 +886,10 @@ fn hostNetworkThread(self: *Game) void {
 
         var input: Network.ClientInput = undefined;
         while (self.net_running.load(.acquire)) {
-            const got = Network.recvInput(cfd, &input) catch {
+            const got = Network.recvInput(cfd, &input);
+            if (!got) {
                 break;
-            };
+            }
             if (!got or !self.net_running.load(.acquire)) break;
 
             // 将 ClientInput 转为 PlayerInput 投递到服务端
@@ -872,15 +913,15 @@ fn hostNetworkThread(self: *Game) void {
             }
 
             // 读取共享数据
-            self.net_mutex.lock();
+            self.net_mutex.lockUncancelable(io);
             const cam_yaw = self.net_cam_yaw;
             const cam_pitch = self.net_cam_pitch;
             // 取出服务端线程填充的区块更新
-            self.server.pending_chunks_mutex.lock();
+            self.server.pending_chunks_mutex.lockUncancelable(io);
             var chunks_to_send = self.server.pending_chunks;
-            self.server.pending_chunks = .{};
-            self.server.pending_chunks_mutex.unlock();
-            self.net_mutex.unlock();
+            self.server.pending_chunks = .empty;
+            self.server.pending_chunks_mutex.unlock(io);
+            self.net_mutex.unlock(io);
 
             var snapshots: [64]Network.EntitySnapshot = undefined;
             var count: usize = 0;
@@ -919,36 +960,34 @@ fn hostNetworkThread(self: *Game) void {
                     const pal_json = buildPaletteJson(loaded.chunk.palette.items, std.heap.page_allocator);
                     const bpi = loaded.chunk.index_bits;
                     const data_size = (BlockWorld.CHUNK_WIDTH * BlockWorld.CHUNK_HEIGHT * BlockWorld.CHUNK_WIDTH * @as(u32, @intCast(bpi)) + 7) / 8;
-                    _ = Network.sendChunk(cfd, 0, origin.x, origin.z, pal_json, loaded.chunk.index_data[0..data_size]) catch {};
+                    _ = Network.sendChunk(cfd, 0, origin.x, origin.z, pal_json, loaded.chunk.index_data[0..data_size]);
                     std.heap.page_allocator.free(pal_json);
                 }
                 // 剩余的放回队列
                 if (chunks_to_send.items.len > 1) {
-                    self.server.pending_chunks_mutex.lock();
+                    self.server.pending_chunks_mutex.lockUncancelable(io);
                     for (chunks_to_send.items[1..]) |o| {
                         self.server.pending_chunks.append(self.server.allocator, o) catch {};
                     }
-                    self.server.pending_chunks_mutex.unlock();
+                    self.server.pending_chunks_mutex.unlock(io);
                 }
             }
             chunks_to_send.deinit(self.server.allocator);
 
             // 发送卸载指令
-            self.server.pending_unloads_mutex.lock();
+            self.server.pending_unloads_mutex.lockUncancelable(io);
             var unloads = self.server.pending_unloads;
-            self.server.pending_unloads = .{};
-            self.server.pending_unloads_mutex.unlock();
+            self.server.pending_unloads = .empty;
+            self.server.pending_unloads_mutex.unlock(io);
             for (unloads.items) |origin| {
-                Network.sendChunkUnload(cfd, origin.x, origin.z) catch {};
+                Network.sendChunkUnload(cfd, origin.x, origin.z);
             }
             unloads.deinit(self.server.allocator);
 
             // state 包后发，排在队列末尾，客机读到的是最新的
             state_serial += 1;
-            const now_ns = @as(i64, @truncate(std.time.nanoTimestamp()));
-            Network.sendState(cfd, &.{ .serial = state_serial, .host_time = now_ns, .entities = snapshots[0..count] }) catch {
-                break;
-            };
+            const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+            Network.sendState(cfd, &.{ .serial = state_serial, .host_time = now_ns, .entities = snapshots[0..count] });
         }
         // 客机断线，关闭 cfd（defer 会执行），准备 accept 下一个
         self.client_connected.store(false, .release);
@@ -959,7 +998,7 @@ fn hostNetworkThread(self: *Game) void {
 
 /// 将 palette 序列化为 JSON 字符串（与存档格式一致）
 fn buildPaletteJson(palette: []const BlockState, allocator: std.mem.Allocator) []u8 {
-    var buf = std.ArrayListUnmanaged(u8){};
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(allocator);
     buf.append(allocator, '[') catch unreachable;
     for (palette, 0..) |bs, i| {
@@ -1013,7 +1052,7 @@ fn collectPlayerInput(self: *Game) PlayerInput {
 /// 从本地输入设备（键盘/鼠标）采集移动意图（客户端专用）
 /// 客户端 tick：不跑物理，只发输入 + 收状态
 fn clientTick(self: *Game) !void {
-    self._tick_start_ns = @as(i64, @truncate(std.time.nanoTimestamp()));
+    self._tick_start_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
     // 先发输入（采集真实输入，方向为相机相对）
     var intent: Network.ClientInput = undefined;
     intent.serial = @truncate(self.server.tick_count);
@@ -1054,36 +1093,28 @@ fn clientTick(self: *Game) !void {
     intent.wants_fly = self.server_wants_fly;
     self.server_wants_fly = false;
 
-    Network.sendInput(self.client_fd, &intent) catch {};
+    Network.sendInput(@as(winsock.socket_t, @intCast(self.client_fd)), &intent);
 
     // 一次性读完所有可用的包：chunk 全部消费，state 只保留最新的
-    var poll_fds = [_]std.posix.pollfd{
-        .{ .fd = self.client_fd, .events = std.posix.POLL.IN, .revents = 0 },
-    };
     var state: Network.ServerState = undefined;
     var state_initialized = false;
     while (true) {
-        const poll_rc = std.posix.poll(&poll_fds, 0) catch { break; };
-        if (poll_rc == 0) break;
-        const tag = Network.peekTag(self.client_fd) catch |err| switch (err) {
-            error.WouldBlock => break,
-            else => {
-                self.disconnectClient();
-                return;
-            },
+        var readfds2 = winsock.fd_set{
+            .fd_count = 1,
+            .fd_array = [_]usize{@as(usize, @intCast(self.client_fd))} ** winsock.FD_SETSIZE,
         };
+        var tv2 = winsock.timeval{ .sec = 0, .usec = 0 };
+        const sel_rc2 = winsock.select(0, &readfds2, null, null, &tv2);
+        if (sel_rc2 <= 0) break;
+        const tag = Network.peekTag(self.client_fd);
+        if (tag == 0) break;
         if (tag == 2) {
             self.chunk_count += 1;
-            const result = Network.recvChunk(self.client_fd, self.allocator) catch |err| switch (err) {
-                error.ConnectionResetByPeer, error.ConnectionTimedOut, error.WouldBlock => {
-                    self.disconnectClient();
-                    return;
-                },
-                else => {
-                    self.disconnectClient();
-                    return;
-                },
-            };
+            const result = Network.recvChunk(self.client_fd, self.allocator);
+            if (result == null) {
+                self.disconnectClient();
+                return;
+            }
             if (result) |chunk| {
                 if (chunk.palette.len > 2) {
                     self.server.block_world.insertChunkFromNetwork(chunk.origin_x, chunk.origin_z, chunk.palette, chunk.data) catch {};
@@ -1093,17 +1124,18 @@ fn clientTick(self: *Game) !void {
             }
         } else if (tag == 1) {
             if (state_initialized) self.allocator.free(state.entities);
-            const got = Network.recvState(self.client_fd, self.allocator, &state) catch {
+            const got = Network.recvState(self.client_fd, self.allocator, &state);
+            if (!got) {
                 self.disconnectClient();
                 return;
-            };
+            }
             if (!got) {
                 self.disconnectClient();
                 return;
             }
             state_initialized = true;
         } else if (tag == 3) {
-            const unload = Network.recvChunkUnload(self.client_fd) catch { self.disconnectClient(); return; };
+            const unload = Network.recvChunkUnload(self.client_fd);
             if (unload) |u| {
                 self.server.block_world.unloadChunk(Vec3i.new(u.x, 0, u.z));
             }
@@ -1114,7 +1146,7 @@ fn clientTick(self: *Game) !void {
         defer self.allocator.free(state.entities);
         self.state_count += 1;
 
-        const now_ns = @as(i64, @truncate(std.time.nanoTimestamp()));
+        const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
         const latency_ns = now_ns - state.host_time;
         if (latency_ns >= 0) {
             self.latency_min_ns = @min(self.latency_min_ns, latency_ns);
@@ -1127,7 +1159,7 @@ fn clientTick(self: *Game) !void {
         self.state_serial_last = state.serial;
 
         if (self.state_count % 30 == 0) {
-            const tick_end = @as(i64, @truncate(std.time.nanoTimestamp()));
+            const tick_end = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
             const tick_duration_us = @divTrunc(tick_end - self._tick_start_ns, 1000);
             if (tick_duration_us > 0) {
                 Log.debug("tick time: {}us (chunks={d})", .{ tick_duration_us, self.chunk_count });
@@ -1181,7 +1213,7 @@ fn clientTick(self: *Game) !void {
         }
 
         {
-            var keys_to_remove = std.ArrayListUnmanaged(u64){};
+            var keys_to_remove: std.ArrayListUnmanaged(u64) = .empty;
             defer keys_to_remove.deinit(self.allocator);
             var iter = self.snapshot_info.keyIterator();
             while (iter.next()) |k| {
@@ -1211,7 +1243,8 @@ pub fn disconnectClient(self: *Game) void {
     self.snapshot_info.deinit(self.allocator);
     self.snapshot_info = .{};
     if (self.client_connected.load(.acquire)) {
-        _ = std.posix.close(self.client_fd);
+        _ = winsock.closesocket(self.client_fd);
+        self.client_fd = undefined;
         self.client_connected.store(false, .release);
     }
     self.server.block_world.deinit();
@@ -1223,7 +1256,6 @@ pub fn disconnectClient(self: *Game) void {
     self.snapshot_info = .{}; // 已在上方 deinit，重置标记
     Log.info("returned to menu\n", .{});
 }
-
 
 /// 物品栏输入处理：数字键切换到、滚轮切换、中键拾取方块
 fn handleHotbarInput(self: *Game) void {
@@ -1255,8 +1287,8 @@ fn handleHotbarInput(self: *Game) void {
                 @as(f32, @floatFromInt(hit.block_pos.y)) + 0.5,
                 @as(f32, @floatFromInt(hit.block_pos.z)) + 0.5,
             ));
-            const block_id = @intFromEnum(block);
-            if (block_id == 0) return;
+            if (block.id == 0) return;
+            const block_id = block.id;
 
             for (&self.hotbar.slots, 0..) |slot, i| {
                 if (slot.item_id == block_id) {
@@ -1274,7 +1306,6 @@ fn handleHotbarInput(self: *Game) void {
 }
 
 /// 双击空格切换飞行模式（0.3 秒内再次按下空格则添加/移除 Flying 组件）
-
 /// 检查服务端快照并推入环形缓冲区（主机用）
 fn pollServerSnapshot(self: *Game) void {
     // 检查是否有新快照
@@ -1282,8 +1313,8 @@ fn pollServerSnapshot(self: *Game) void {
     if (serial == self.last_snapshot_serial) return;
     self.last_snapshot_serial = serial;
 
-    self.server.snapshot_mutex.lock();
-    defer self.server.snapshot_mutex.unlock();
+    self.server.snapshot_mutex.lockUncancelable(io);
+    defer self.server.snapshot_mutex.unlock(io);
     for (self.server.snapshots[0..self.server.snapshot_count]) |s| {
         if (s.player_id == self.server.player_id) {
             self.pushInterpPos(s.pos);
@@ -1296,7 +1327,7 @@ fn pollServerSnapshot(self: *Game) void {
 fn pushInterpPos(self: *Game, pos: Vec3) void {
     const idx = self.interp_buf_head;
     self.interp_buf_pos[idx] = pos;
-    self.interp_buf_time[idx] = @as(i64, @truncate(std.time.nanoTimestamp()));
+    self.interp_buf_time[idx] = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
     self.interp_buf_head = (idx + 1) % 8;
     if (self.interp_buf_count < 8) self.interp_buf_count += 1;
 }
@@ -1304,14 +1335,14 @@ fn pushInterpPos(self: *Game, pos: Vec3) void {
 /// 从环形缓冲区获取插值后的位置
 fn getInterpPos(self: *Game) ?Vec3 {
     if (self.interp_buf_count < 2) return null;
-    const now_ns = @as(i64, @truncate(std.time.nanoTimestamp()));
+    const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
     const render_time = now_ns -| 50_000_000; // 50ms 延迟
     const B: u32 = 8;
     const newest = (self.interp_buf_head + B - 1) % B;
     var i: u32 = 0;
     while (i < self.interp_buf_count - 1) {
-        const newer = (newest + B - i) % B;      // 更新的快照
-        const older = (newer + B - 1) % B;        // 更旧的快照
+        const newer = (newest + B - i) % B; // 更新的快照
+        const older = (newer + B - 1) % B; // 更旧的快照
         // 找 older.time <= render_time < newer.time
         if (self.interp_buf_time[older] <= render_time and self.interp_buf_time[newer] > render_time) {
             const interval = self.interp_buf_time[newer] - self.interp_buf_time[older];
@@ -1390,7 +1421,6 @@ fn tryItemToInventory(self: *Game, item_id: u32, count: u32) void {
     }
 }
 
-
 fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     const eid = EntityTypeId.fromName(type_name);
     const info = eid.info();
@@ -1414,7 +1444,6 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
         });
     }
 }
-
 
 const Game = @This();
 
@@ -1441,37 +1470,8 @@ pub const SelectedItem = struct {
 };
 
 const std = @import("std");
-const Imports = @import("imports.zig");
-
-const Wgpu = Imports.Wgpu;
-const Glfw = Imports.Glfw;
-const Gltf = Imports.Gltf;
-
-const Algebra = Imports.Algebra;
-const Vec2 = Algebra.Vec2;
-const Vec3 = Algebra.Vec3;
-const Vec3i = Algebra.Vec3i;
-const Mat4 = Algebra.Mat4;
-
-const Gctx = Imports.Gctx;
-const Window = Imports.Window;
-const Render = Imports.Render;
-const Camera3D = Imports.Camera3D;
-
-const RenderPipeline = Imports.RenderPipeline;
-
-const UiSystem = Imports.UiSystem;
-const Input = Imports.Input;
-
-const ECS = Imports.ECS;
-
-const RendCTX = Imports.RendCTX;
-const ResManager = RendCTX.ResManager;
-const Model = RendCTX.Model;
-const SceneUniform = RendCTX.SceneUniform;
-
-const Comps = Imports.Comps;
-
+const Mat4 = @import("algebra.zig").Mat4;
+const Vec3i = @import("algebra.zig").Vec3i;
 const Raycast = @import("raycast.zig");
 
 const WireframePipeline = @import("wireframe_pipeline.zig").WireframePipeline;
@@ -1499,4 +1499,3 @@ const Server = @import("server.zig").Server;
 const PlayerInput = @import("server.zig").PlayerInput;
 const Network = @import("network.zig");
 const Log = @import("log.zig");
-

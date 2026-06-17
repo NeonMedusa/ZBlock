@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 // sky.zig — 全屏三角 + cubemap 噪声云渲染
 const std = @import("std");
 const Wgpu = @import("imports.zig").Wgpu;
@@ -280,7 +281,7 @@ pub const SkyPipeline = struct {
     moon_sampler: Wgpu.WGPUSampler,
 
     pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
-        const shader_module = try gctx.createShaderModule("resources/shaders/sky_shader.wgsl");
+        const shader_module = try gctx.createShaderModule(io, "resources/shaders/sky_shader.wgsl");
 
         // CPU 烘培 3D 噪声 cubemap（6 面，每面 512²）
         const noise = @import("noise.zig");
@@ -359,7 +360,7 @@ pub const SkyPipeline = struct {
 
         // 加载月亮 2D 纹理
         var moon_read_buf: [8192]u8 = undefined;
-        var moon_img = try zigimg.Image.fromFilePath(std.heap.page_allocator, "resources/textures/sky/moon.png", &moon_read_buf);
+        var moon_img = try zigimg.Image.fromFilePath(std.heap.page_allocator, io, "resources/textures/sky/moon.png", &moon_read_buf);
         defer moon_img.deinit(std.heap.page_allocator);
         if (moon_img.pixels != .rgba32) try moon_img.convert(std.heap.page_allocator, .rgba32);
         const moon_w: u32 = @intCast(moon_img.width);

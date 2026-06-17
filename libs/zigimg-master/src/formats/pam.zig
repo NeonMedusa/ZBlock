@@ -70,14 +70,14 @@ const Header = struct {
         var maybe_depth: ?usize = null;
         var maybe_maxval: ?u16 = null;
         var maybe_tuple_type: ?TupleType = null;
-        var comments = std.ArrayListUnmanaged([]const u8){};
+        var comments: std.ArrayList([]const u8) = .empty;
         defer {
             for (comments.items) |comment| allocator.free(comment);
             comments.deinit(allocator);
         }
 
         {
-            var line_buffer_stream = try std.io.Writer.Allocating.initCapacity(allocator, 32);
+            var line_buffer_stream = try std.Io.Writer.Allocating.initCapacity(allocator, 32);
             defer line_buffer_stream.deinit();
 
             while (true) {
@@ -225,6 +225,8 @@ const Header = struct {
             .float32,
             .rgb332,
             .rgb565,
+            .sega_grb333,
+            .sega_bgr333,
             => return error.Unsupported, // unsupported pixel format
 
             .grayscale1 => {
@@ -380,7 +382,7 @@ pub const PAM = struct {
 
         if (src_maxval == dst_maxval) return val;
 
-        const W = std.meta.Int(.unsigned, @bitSizeOf(T) * 2);
+        const W = @Int(.unsigned, @bitSizeOf(T) * 2);
         return @intCast(@min(std.math.maxInt(T), @as(W, dst_maxval) * @as(W, val) / @as(W, src_maxval)));
     }
 

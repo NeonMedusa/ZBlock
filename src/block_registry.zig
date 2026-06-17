@@ -68,36 +68,25 @@ pub const block_infos = [_]BlockProtoType{
 
 pub const MAX_BLOCKS = block_infos.len;
 
-pub const BlockNames = blk: {
-    var fields: [MAX_BLOCKS]std.builtin.Type.EnumField = undefined;
-    for (&fields, block_infos, 0..) |*field, def, i|
-        field.* = .{ .name = def.name, .value = i };
-    break :blk @Type(.{ .@"enum" = .{
-        .tag_type = u16,
-        .fields = &fields,
-        .decls = &.{},
-        .is_exhaustive = true,
-    } });
-};
-
-pub const BlockId = enum(u16) {
-    _,
+pub const BlockId = packed struct(u16) {
+    id: u16,
     pub fn fromInt(i: anytype) BlockId {
-        return @enumFromInt(i);
+        return .{ .id = @intCast(i) };
     }
     pub fn fromName(comptime str: []const u8) BlockId {
-        const block_name_val = @field(BlockNames, str);
-        return @enumFromInt(@intFromEnum(block_name_val));
+        inline for (&block_infos, 0..) |info, i| {
+            if (comptime std.mem.eql(u8, info.name, str)) return .{ .id = i };
+        }
+        @compileError("unknown block: " ++ str);
     }
-    /// 运行时按名字查找（用于存档加载）
     pub fn fromNameRuntime(block_name: []const u8) ?BlockId {
         for (&block_infos, 0..) |info, i| {
-            if (std.mem.eql(u8, info.name, block_name)) return @enumFromInt(i);
+            if (std.mem.eql(u8, info.name, block_name)) return .{ .id = i };
         }
         return null;
     }
     pub fn prototype(self: BlockId) BlockProtoType {
-        return block_infos[@intFromEnum(self)];
+        return block_infos[self.id];
     }
     pub fn name(self: BlockId) [:0]const u8 {
         return self.prototype().name;

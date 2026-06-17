@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 // render.zig
 /// 渲染帧（comptime world 控制是否渲染 3D 世界 vs 仅 UI）
 fn drawFrame(game: *Game, comptime world: bool) void {
@@ -120,8 +121,8 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         // 为每个已加载的 chunk 生成一个实例（携带 chunk 原点偏移）
         chunk_instance_idx = ins_idx;
         {
-            game.server.block_world.chunk_mutex.lockShared();
-            defer game.server.block_world.chunk_mutex.unlockShared();
+            game.server.block_world.chunk_mutex.lockSharedUncancelable(io);
+            defer game.server.block_world.chunk_mutex.unlockShared(io);
             var chunk_it = game.server.block_world.chunks.iterator();
             while (chunk_it.next()) |entry| {
                 const origin = entry.key_ptr.*;
@@ -180,8 +181,8 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         // 阴影 pass：使用 chunk_handle 渲染区块
         {
             var chunk_ins_idx = chunk_instance_idx;
-            game.server.block_world.chunk_mutex.lockShared();
-            defer game.server.block_world.chunk_mutex.unlockShared();
+            game.server.block_world.chunk_mutex.lockSharedUncancelable(io);
+            defer game.server.block_world.chunk_mutex.unlockShared(io);
             var s_chunk_it = game.server.block_world.chunks.iterator();
             Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.chunk_handle);
             while (s_chunk_it.next()) |entry| {
@@ -273,8 +274,8 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_chunk);
         {
             var chunk_ins_idx = chunk_instance_idx;
-            game.server.block_world.chunk_mutex.lockShared();
-            defer game.server.block_world.chunk_mutex.unlockShared();
+            game.server.block_world.chunk_mutex.lockSharedUncancelable(io);
+            defer game.server.block_world.chunk_mutex.unlockShared(io);
             var chunk_it = game.server.block_world.chunks.iterator();
             while (chunk_it.next()) |entry| {
                 const loaded = &entry.value_ptr.*;
@@ -349,22 +350,19 @@ pub fn drawUI(game: *Game) void {
     drawFrame(game, false);
 }
 
-const Imports = @import("imports.zig");
+const Wgpu = @import("imports.zig").Wgpu;
 
-const Wgpu = Imports.Wgpu;
-
-const Algebra = Imports.Algebra;
 const Vec3 = Algebra.Vec3;
 const Mat4 = Algebra.Mat4;
 
-const RendCTX = Imports.RendCTX;
 const EntityData = RendCTX.EntityData;
 const InstanceData = RendCTX.InstanceData;
 
 const Frustum = @import("frustum.zig").Frustum;
-const Game = Imports.Game;
 const std = @import("std");
-
-const Comps = Imports.Comps;
+const Algebra = @import("algebra.zig");
+const RendCTX = @import("rend_ctx.zig");
+const Game = @import("game.zig");
+const Comps = @import("components.zig").Components;
 
 const TICK_DT = @import("block_world.zig").TICK_DT;

@@ -45,6 +45,7 @@ pub const ComponentType = types.ComponentType;
 pub const Target = types.Target;
 pub const MetallicRoughness = types.MetallicRoughness;
 pub const AnimationSampler = types.AnimationSampler;
+pub const Interpolation = types.Interpolation;
 pub const Channel = types.Channel;
 pub const MagFilter = types.MagFilter;
 pub const MinFilter = types.MinFilter;
@@ -157,8 +158,8 @@ pub fn debugPrint(self: *const Gltf) void {
         print("   Skins found:\n", .{});
 
         for (self.data.skins) |skin| {
-            print("     '{s}' found with {} joint(s).\n", .{
-                skin.name.?,
+            print("     '{?s}' found with {} joint(s).\n", .{
+                skin.name,
                 skin.joints.len,
             });
         }
@@ -171,8 +172,8 @@ pub fn debugPrint(self: *const Gltf) void {
 
         for (self.data.animations) |anim| {
             print(
-                "     '{s}' found with {} sampler(s) and {} channel(s).\n",
-                .{ anim.name.?, anim.samplers.len, anim.channels.len },
+                "     '{?s}' found with {} sampler(s) and {} channel(s).\n",
+                .{ anim.name, anim.samplers.len, anim.channels.len },
             );
         }
 

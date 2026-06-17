@@ -4,7 +4,7 @@
 
 ```
 src/
-├── main.zig               — 入口（GPA.thread_safe = true）
+├── main.zig               — 入口（DebugAllocator）
 ├── game.zig               — 核心循环、固定 tick 物理（30tick/s）、状态机、延迟初始化
 ├── registries.zig         — 注册表聚合层（编译期解析掉落物 + 运行时哈希表）
 ├── block_registry.zig     — 方块注册表 & BlockId（u16）
@@ -55,8 +55,9 @@ src/
 ├── bvh.zig                — 动态 AABB 树（BVH 宽相位碰撞检测，含测试）
 ├── algebra.zig            — 线性代数类型（Vec3/Mat4/Quat）
 ├── direction.zig          — 朝向枚举（6 方向）
-├── sparse_set.zig         — 稀疏集（ECS 底层存储）
-├── imports.zig            — 统一 re-export（Vec3, ECS 等）
+├── sparse_set.zig         — 稀疏集（SparseIndexSet 用于 mesh/material 管理）
+├── imports.zig            — 统一导出层（libs + 全局 Io 实例 `io`）
+├── winsock.zig            — Windows 原生 socket 封装（ws2_32 extern）
 ```
 
 ## E/S 彻底分离（2026-06-17）
@@ -73,7 +74,7 @@ src/
   渲染: getSnapPos() → lerp(snap_prev, snap_curr, accumulator/TICK_DT)
 
 服务端线程(独立线程, 固定 30Hz):
-  1. timedWait 等够 33ms
+  1. Sleep 到下一个 tick 截止时间
   2. drain 所有输入
   3. 处理每个输入 → MoveIntent/朝向/break/place/fly
   4. updatePhysics (30Hz 固定)
@@ -169,11 +170,13 @@ main()
 否则区块会围绕硬编码的 (8,8) 加载，玩家实际位置附近无区块 → 自由落体。
 
 returnToMenu()
-  └─ 保存当前状态 → registry.deinit() → block_world.deinit()
+  └─ 保存当前状态 → block_world.deinit() → server.deinit()
+  └─ Server.init() 重建（registry 不销毁重建，zig-ecs deinit 有泄漏 bug）
   └─ game_cleaned = true, save_initialized = false
 
 deinit()
-  └─ if !game_cleaned: registry.deinit()  ← 防止双重释放
+  └─ server.deinit()  ← 始终释放（不论 game_cleaned）
+  └─ animation_system.deinit()
   └─ registries.deinit()
 ```
 
@@ -195,7 +198,7 @@ deinit()
 
 ### Worker 空闲阻塞机制
 
-三个 worker 在无任务时均使用**条件变量**（`std.Thread.Condition`）阻塞等待，而非轮询：
+三个 worker 在无任务时均使用**条件变量**（`std.Io.Condition`）阻塞等待，而非轮询：
 
 - 有新任务入队时，入队方持有对应 mutex 并调用 `signal()` 唤醒 worker；worker 醒来后在 `while (队列空 and running)` 循环中重新判断，防止虚假唤醒
 - 避免了 `yield()` 空转（线程立即被重新调度，占满 CPU）和 `sleep()` 轮询（醒来后可能仍无任务）的问题
@@ -259,7 +262,7 @@ render(alpha = accumulator / TICK_DT)  ← 插值渲染
 ```
 
 - `tick_count: u64` — 逻辑 tick 计数，1 tick = 1/30s
-- `frame_timer` 使用 `std.time.Instant`，独立于 GLFW
+- `frame_timer` 使用 `std.Io.Timestamp.now(Io, .awake)`，独立于 GLFW
 - `accumulator` 上限 `TICK_DT × 5`（CPU 跟不上时降速不崩盘）
 - 天空时间 = `tick_count × TICK_DT + accumulator`，与渲染插值一致
 - Pause 模式下 `tick_count` 不递增，时间冻结

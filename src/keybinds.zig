@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 // keybinds.zig — 按键绑定系统，支持配置文件
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -6,19 +7,35 @@ const Input = @import("input.zig");
 /// 所有可配置的逻辑动作
 pub const Action = enum {
     // 移动
-    forward, back, left, right,
+    forward,
+    back,
+    left,
+    right,
     // 动作
-    jump, fly_toggle,
-    sprint_toggle, sneak, swim_down,
+    jump,
+    fly_toggle,
+    sprint_toggle,
+    sneak,
+    swim_down,
     // UI
     pause_menu,
     toggle_inventory,
     // 鼠标
-    break_block, place_block, pick_block,
+    break_block,
+    place_block,
+    pick_block,
     // 物品栏
-    hotbar_1, hotbar_2, hotbar_3, hotbar_4, hotbar_5,
-    hotbar_6, hotbar_7, hotbar_8, hotbar_9,
-    hotbar_scroll_up, hotbar_scroll_down,
+    hotbar_1,
+    hotbar_2,
+    hotbar_3,
+    hotbar_4,
+    hotbar_5,
+    hotbar_6,
+    hotbar_7,
+    hotbar_8,
+    hotbar_9,
+    hotbar_scroll_up,
+    hotbar_scroll_down,
 
     fn count() comptime_int {
         return @typeInfo(Action).@"enum".fields.len;
@@ -103,14 +120,12 @@ pub const Keybinds = struct {
 
     /// 从 JSON 文件加载，文件不存在时生成默认配置文件
     pub fn load(allocator: Allocator, path: []const u8) !Keybinds {
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        const data = std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(1_000_000)) catch |err| {
             if (err != error.FileNotFound) return error.FailedToOpenConfig;
             const defaults = Keybinds.init();
             try defaults.save(path);
             return defaults;
         };
-        defer file.close();
-        const data = try file.readToEndAlloc(allocator, 1_000_000);
         defer allocator.free(data);
 
         const root = try std.json.parseFromSlice(std.json.Value, allocator, data, .{});
@@ -131,21 +146,21 @@ pub const Keybinds = struct {
 
     /// 保存当前绑定到 JSON 文件
     pub fn save(self: *const Keybinds, path: []const u8) !void {
-        if (std.fs.path.dirname(path)) |dir| std.fs.cwd().makePath(dir) catch {};
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
-        try file.writeAll("{\n");
+        if (std.fs.path.dirname(path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch {};
+        const file = try std.Io.Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
+        try file.writeStreamingAll(io, "{\n");
         inline for (@typeInfo(Action).@"enum".fields, 0..) |field, i| {
             const b = self.bindings[i];
-            try file.writeAll("    \"");
-            try file.writeAll(field.name);
-            try file.writeAll("\": \"");
-            try file.writeAll(bindingName(b));
-            try file.writeAll("\"");
-            if (i < Action.count() - 1) try file.writeAll(",");
-            try file.writeAll("\n");
+            try file.writeStreamingAll(io, "    \"");
+            try file.writeStreamingAll(io, field.name);
+            try file.writeStreamingAll(io, "\": \"");
+            try file.writeStreamingAll(io, bindingName(b));
+            try file.writeStreamingAll(io, "\"");
+            if (i < Action.count() - 1) try file.writeStreamingAll(io, ",");
+            try file.writeStreamingAll(io, "\n");
         }
-        try file.writeAll("}\n");
+        try file.writeStreamingAll(io, "}\n");
     }
 
     /// 恢复默认键位并写入配置文件

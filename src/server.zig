@@ -1,3 +1,5 @@
+const io = @import("imports.zig").io;
+pub extern "kernel32" fn Sleep(milliseconds: u32) callconv(.c) void;
 // server.zig — 服务端状态（物理、AI、动画）
 // 独立线程运行，通过输入队列与渲染线程通信。
 
@@ -48,26 +50,25 @@ pub const Server = struct {
     chunk_radius: i32 = 4,
     sprint_toggled: bool = false,
 
-    input_queue: std.ArrayListUnmanaged(PlayerInput) = .{},
-    queue_mutex: std.Thread.Mutex = .{},
-    queue_cond: std.Thread.Condition = .{},
+    input_queue: std.ArrayListUnmanaged(PlayerInput) = .empty,
+    queue_mutex: std.Io.Mutex = .init,
     running: bool = true,
     server_thread: ?std.Thread = null,
 
     // 待发送给客机的区块更新（服务端线程填充，网络线程消费）
-    pending_chunks: std.ArrayListUnmanaged(Vec3i) = .{},
-    pending_chunks_mutex: std.Thread.Mutex = .{},
-    pending_unloads: std.ArrayListUnmanaged(Vec3i) = .{},
-    pending_unloads_mutex: std.Thread.Mutex = .{},
+    pending_chunks: std.ArrayListUnmanaged(Vec3i) = .empty,
+    pending_chunks_mutex: std.Io.Mutex = .init,
+    pending_unloads: std.ArrayListUnmanaged(Vec3i) = .empty,
+    pending_unloads_mutex: std.Io.Mutex = .init,
 
     // 双缓冲快照（服务端线程发布，网络/渲染线程读取）
-    snapshot_mutex: std.Thread.Mutex = .{},
+    snapshot_mutex: std.Io.Mutex = .init,
     snapshots: [64]Network.EntitySnapshot = undefined,
     snapshot_count: u32 = 0,
     snapshot_serial: u64 = 0,
 
     // 每个玩家已加载的区块集合（用于增量更新远程客户端）
-    player_chunks: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(Vec3i)) = .{},
+    player_chunks: std.AutoHashMapUnmanaged(u32, std.ArrayListUnmanaged(Vec3i)) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Server {
         return .{
@@ -95,7 +96,6 @@ pub const Server = struct {
 
     pub fn stop(self: *Server) void {
         self.running = false;
-        self.queue_cond.signal();
         if (self.server_thread) |t| {
             t.join();
             self.server_thread = null;
@@ -104,36 +104,46 @@ pub const Server = struct {
     }
 
     pub fn pushInput(self: *Server, input: PlayerInput) !void {
-        self.queue_mutex.lock();
-        defer self.queue_mutex.unlock();
+        self.queue_mutex.lockUncancelable(io);
+        defer self.queue_mutex.unlock(io);
         try self.input_queue.append(self.allocator, input);
-        self.queue_cond.signal();
     }
 
     fn serverThreadFn(self: *Server, res_manager: *ResManager) void {
-        var timer = std.time.Timer.start() catch unreachable;
         const tick_ns: u64 = @intFromFloat(TICK_DT * 1_000_000_000);
+        var next_tick = std.Io.Timestamp.now(io, .awake);
 
         while (self.running) {
-            const elapsed = timer.read();
-            if (elapsed < tick_ns) {
-                const wait_ns = tick_ns - elapsed;
-                self.queue_mutex.lock();
-                _ = self.queue_cond.timedWait(&self.queue_mutex, wait_ns) catch {};
-                self.queue_mutex.unlock();
-                continue;
+            // 等待到下一个 tick 时间点
+            {
+                const deadline = next_tick.nanoseconds;
+                while (true) {
+                    const now = std.Io.Timestamp.now(io, .awake);
+                    const remaining = deadline - now.nanoseconds;
+                    if (remaining <= 0) break;
+                    // 分块睡眠，每次最多 5ms，保持对 running 标志的响应
+                    const sleep_ms = @min(@as(u32, @intCast(@divTrunc(remaining, 1_000_000))), 5);
+                    if (sleep_ms > 0) Sleep(sleep_ms);
+                }
             }
-            timer.reset();
 
-            var inputs = std.ArrayListUnmanaged(PlayerInput){};
+            var inputs: std.ArrayListUnmanaged(PlayerInput) = .empty;
             defer inputs.deinit(self.allocator);
-            self.queue_mutex.lock();
+            self.queue_mutex.lockUncancelable(io);
             while (self.input_queue.items.len > 0) {
                 inputs.append(self.allocator, self.input_queue.orderedRemove(0)) catch {};
             }
-            self.queue_mutex.unlock();
+            self.queue_mutex.unlock(io);
 
             self.tick(inputs.items, res_manager) catch {};
+
+            // 推进到下一个 tick 截止时间
+            next_tick = std.Io.Timestamp.fromNanoseconds(next_tick.nanoseconds + tick_ns);
+            // 如果落后超过一个 tick，直接跳到当前时间 + 一个 tick（不补帧）
+            const now2 = std.Io.Timestamp.now(io, .awake);
+            if (next_tick.nanoseconds < now2.nanoseconds) {
+                next_tick = std.Io.Timestamp.fromNanoseconds(now2.nanoseconds + tick_ns);
+            }
         }
     }
 
@@ -145,8 +155,8 @@ pub const Server = struct {
             0,
             @divFloor(block_pos.z, 16) * 16,
         );
-        self.pending_chunks_mutex.lock();
-        defer self.pending_chunks_mutex.unlock();
+        self.pending_chunks_mutex.lockUncancelable(io);
+        defer self.pending_chunks_mutex.unlock(io);
         for (self.pending_chunks.items) |o| {
             if (o.x == origin.x and o.z == origin.z) return;
         }
@@ -155,8 +165,8 @@ pub const Server = struct {
 
     /// 投递区块卸载（服务端线程调用，网络线程消费）
     pub fn enqueueChunkUnload(self: *Server, origin: Vec3i) void {
-        self.pending_unloads_mutex.lock();
-        defer self.pending_unloads_mutex.unlock();
+        self.pending_unloads_mutex.lockUncancelable(io);
+        defer self.pending_unloads_mutex.unlock(io);
         for (self.pending_unloads.items) |o| {
             if (o.x == origin.x and o.z == origin.z) return;
         }
@@ -223,7 +233,7 @@ pub const Server = struct {
 
             if (input.wants_fly) {
                 if (self.registry.has(Comps.Flying, entity)) {
-                    self.registry.remove(Comps.Flying, entity);
+                    _ = self.registry.remove(Comps.Flying, entity);
                 } else {
                     self.registry.add(entity, Comps.Flying{});
                 }
@@ -291,8 +301,8 @@ pub const Server = struct {
     }
 
     fn publishSnapshot(self: *Server) void {
-        self.snapshot_mutex.lock();
-        defer self.snapshot_mutex.unlock();
+        self.snapshot_mutex.lockUncancelable(io);
+        defer self.snapshot_mutex.unlock(io);
         self.snapshot_count = 0;
         self.snapshot_serial +|= 1;
 
@@ -346,7 +356,10 @@ pub const Server = struct {
         var pi = pv.entityIterator();
         while (pi.next()) |entity| {
             const ppos = pv.get(Comps.Position, entity);
-            const rng = std.crypto.random;
+            var seed_buf: [8]u8 = undefined;
+            io.random(&seed_buf);
+            var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_buf, .little));
+            const rng = prng.random();
             if (rng.float(f32) > 0.4) continue; // 60% 概率跳过
             const angle = rng.float(f32) * std.math.pi * 2;
             const r: f32 = 16 + @as(f32, @floatFromInt(rng.int(u32) % 16));
@@ -547,7 +560,7 @@ pub const Server = struct {
                     }
                 }
                 const unload_lr_sq = (load_range + 2) * (load_range + 2);
-                var to_unload = std.ArrayListUnmanaged(Vec3i){};
+                var to_unload: std.ArrayListUnmanaged(Vec3i) = .empty;
                 defer to_unload.deinit(self.allocator);
                 var chunk_it = self.block_world.chunks.keyIterator();
                 while (chunk_it.next()) |key| {
@@ -580,7 +593,7 @@ pub const Server = struct {
                 // 远程玩家：增量发送新出现的区块 + 卸载已远离的区块
                 const pid = player.id;
                 const gop = try self.player_chunks.getOrPut(self.allocator, pid);
-                if (!gop.found_existing) gop.value_ptr.* = .{};
+                if (!gop.found_existing) gop.value_ptr.* = .empty;
                 const loaded = &gop.value_ptr.*;
 
                 const load_range: i32 = self.chunk_radius;
@@ -612,7 +625,7 @@ pub const Server = struct {
                 }
 
                 // 找出已远离的区块（在已发送列表中但不在新范围内）
-                var to_unload = std.ArrayListUnmanaged(Vec3i){};
+                var to_unload: std.ArrayListUnmanaged(Vec3i) = .empty;
                 defer to_unload.deinit(self.allocator);
                 for (loaded.items) |origin| {
                     const ocx = @divFloor(origin.x, CHUNK_WIDTH_I32);

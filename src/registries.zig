@@ -26,7 +26,7 @@ fn buildDropsFlat(comptime InfosType: type, infos: InfosType) [blk: {
     for (infos) |info| {
         for (info.drops, 0..) |raw_d, i| {
             flat[offset + i] = .{
-                .item_id = @intFromEnum(@field(item_registry.ItemNames, raw_d.item_name)),
+                .item_id = item_registry.itemFromName(raw_d.item_name),
                 .min_count = raw_d.min_count,
                 .max_count = raw_d.max_count,
                 .probability = raw_d.probability,

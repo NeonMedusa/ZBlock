@@ -1,6 +1,32 @@
 # DESIGN.md
 
-## 当前架构（2026-06-17）
+## 当前架构（2026-06-18）
+
+### 环境
+
+| 组件 | 版本 |
+|------|------|
+| Zig | 0.16.0 |
+| ECS | prime31/zig-ecs (master, 2026-05-18) |
+| SQLite | fridge (zig16 branch, 2026-05-07) |
+| GLFW | 3.4 |
+| WGPU | wgpu-native (x86_64-windows) |
+| zgltf | 最新 master |
+| zigimg | 最新 master (zig16 适配) |
+
+### 与 0.15.2 的关键迁移差异
+
+| 旧 API | 新 API | 说明 |
+|--------|--------|------|
+| `std.Thread.Mutex` | `std.Io.Mutex` | 需要传 `io` 参数 |
+| `std.Thread.Condition` | `std.Io.Condition` | `timedWait` 被移除，改用 sleep 轮询 |
+| `std.Thread.RwLock` | `std.Io.RwLock` | 需要传 `io` 参数 |
+| `std.time.Timer` / `nanoTimestamp` | `std.Io.Timestamp.now(io, .awake)` | |
+| `std.fs.cwd()` | `std.Io.Dir.cwd(io)` | |
+| `ArrayListUnmanaged = .{},` | `= .empty` | |
+| `GeneralPurposeAllocator` | `DebugAllocator(.{})` | |
+| `std.crypto.random` | `Io.random(buf)` 或 PRNG | |
+| `std.posix.socket/bind/...` | 手写 `winsock.zig` (Windows) | 0.16 移除了中等抽象层 |
 
 ### 进程架构
 
@@ -21,7 +47,7 @@
   渲染: getSnapPos() → lerp(prev, curr, accumulator/TICK_DT)
 
 服务端线程(独立线程, 固定 30Hz):
-  1. timedWait 等够 33ms
+  1. Sleep 到下一个 tick 截止时间（分块 1~5ms，可响应停止信号）
   2. drain 所有输入
   3. 处理每个输入 → MoveIntent/朝向/break/place/fly
   4. updatePhysics (30Hz 固定, 与输入数量无关)
@@ -30,6 +56,7 @@
   7. updateEntities (生命值/消失)
   8. updateChunks (所有玩家的区块加载/卸载)
   9. publishSnapshot → 快照缓冲区(mutex保护)
+  10. 推进 next_tick 截止时间，落后时不补帧
 
 网络线程(独立线程, 仅 host 模式):
   accept → 创建远程玩家实体

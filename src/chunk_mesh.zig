@@ -1,13 +1,12 @@
 // chunk_mesh.zig
 const std = @import("std");
-const Imports = @import("imports.zig");
-const Vec3 = Imports.Vec3;
-const Vec3i = Imports.Vec3i;
-const Quat = Imports.Quat;
-const Wgpu = Imports.Wgpu;
-const Material = Imports.RendCTX.Material;
-const TextureRes = Imports.RendCTX.TextureRes;
-const Gctx = Imports.Gctx;
+const Gctx = @import("gctx.zig");
+const Vec3 = @import("algebra.zig").Vec3;
+const Vec3i = @import("algebra.zig").Vec3i;
+const Quat = @import("algebra.zig").Quat;
+const Material = @import("rend_ctx.zig").Material;
+const TextureRes = @import("rend_ctx.zig").TextureRes;
+const Wgpu = @import("imports.zig").Wgpu;
 const RenderPipeline = @import("render_pipeline.zig");
 const SparseIndexSet = @import("sparse_set.zig").SparseIndexSet;
 const BlockRegistry = @import("block_registry.zig");
@@ -30,12 +29,12 @@ pub const MaterialKey = struct {
     variant: u3,
 
     pub fn toId(key: MaterialKey) u32 {
-        return @intFromEnum(key.block_id) * MAX_VARIANTS + key.variant;
+        return key.block_id.id * MAX_VARIANTS + key.variant;
     }
 
     pub fn fromId(id: u32) MaterialKey {
         return .{
-            .block_id = @enumFromInt(id / MAX_VARIANTS),
+            .block_id = BlockId.fromInt(id / MAX_VARIANTS),
             .variant = @intCast(id % MAX_VARIANTS),
         };
     }
@@ -58,7 +57,7 @@ pub const ChunkMesh = struct {
     vertex_buffer: Wgpu.WGPUBuffer,
     vertex_count: u32,
 
-    cpu_vertices: std.ArrayListUnmanaged(u8) = .{}, // 原始顶点字节
+    cpu_vertices: std.ArrayListUnmanaged(u8) = .empty, // 原始顶点字节
 
     pub fn init(gctx: *Gctx) !ChunkMesh {
         const vertex_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
@@ -201,7 +200,7 @@ pub const MaterialRegistry = struct {
 pub const MeshBuildResult = struct {
     origin: Vec3i,
     allocator: std.mem.Allocator,
-    vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(u8) = [_]std.ArrayListUnmanaged(u8){.{}} ** MAX_MATERIALS, // 原始顶点字节
+    vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(u8) = [_]std.ArrayListUnmanaged(u8){.empty} ** MAX_MATERIALS, // 原始顶点字节
 
     pub fn deinit(self: *MeshBuildResult) void {
         for (0..MAX_MATERIALS) |i| {

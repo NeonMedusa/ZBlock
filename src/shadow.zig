@@ -1,3 +1,4 @@
+const io = @import("imports.zig").io;
 // shadow.zig — 方向光阴影贴图（shadow map）
 const Wgpu = @import("imports.zig").Wgpu;
 const Gctx = @import("gctx.zig");
@@ -24,7 +25,7 @@ pub const ShadowPipeline = struct {
     light_vp: Mat4,
 
     pub fn init(gctx: *Gctx) !ShadowPipeline {
-        const shader_module = try gctx.createShaderModule("resources\\shaders\\shadow_shader.wgsl");
+        const shader_module = try gctx.createShaderModule(io, "resources\\shaders\\shadow_shader.wgsl");
         const map_size: u32 = 2048; // 2048² 深度贴图
 
         // BGL: binding 0 = LightUniform, binding 1 = ins_data (storage)
