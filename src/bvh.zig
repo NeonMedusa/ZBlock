@@ -9,6 +9,7 @@
 const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
 const AABB = @import("aabb.zig").AABB;
+const ECS = @import("zigecs");
 
 /// 空节点索引
 const NULL_NODE: i32 = -1;
@@ -25,7 +26,7 @@ pub const Bvh = struct {
 
     pub const Node = struct {
         aabb: AABB,
-        entity: u32,    // 叶子节点关联的实体 ID
+        entity: ECS.Entity,    // 叶子节点关联的实体
         parent: i32,    // 父节点索引，-1 = 根或游离
         child1: i32,    // -1 = 叶子节点
         child2: i32,
@@ -94,7 +95,7 @@ pub const Bvh = struct {
 
     // ─── 插入 ───
 
-    pub fn insert(self: *Self, entity: u32, aabb: AABB) !void {
+    pub fn insert(self: *Self, entity: ECS.Entity, aabb: AABB) !void {
         const leaf = try self.allocNode();
         const fat = self.fatAABB(aabb);
         self.nodes.items[@as(usize, @intCast(leaf))] = .{
@@ -180,12 +181,12 @@ pub const Bvh = struct {
 
     // ─── 移除 ───
 
-    pub fn remove(self: *Self, entity: u32) void {
+    pub fn remove(self: *Self, entity: ECS.Entity) void {
         const leaf = self.findLeaf(entity) orelse return;
         self.removeLeaf(leaf);
     }
 
-    fn findLeaf(self: *const Self, entity: u32) ?i32 {
+    fn findLeaf(self: *const Self, entity: ECS.Entity) ?i32 {
         for (self.nodes.items, 0..) |n, i| {
             if (n.child1 == NULL_NODE and n.entity == entity) {
                 return @as(i32, @intCast(i));
@@ -237,7 +238,7 @@ pub const Bvh = struct {
 
     // ─── 更新位置 ───
 
-    pub fn update(self: *Self, entity: u32, new_aabb: AABB) !void {
+    pub fn update(self: *Self, entity: ECS.Entity, new_aabb: AABB) !void {
         const leaf = self.findLeaf(entity) orelse {
             try self.insert(entity, new_aabb);
             return;
@@ -265,7 +266,7 @@ pub const Bvh = struct {
     /// ctx 为运行时上下文，callback 为编译期函数，签名 fn(ctx: C, a: u32, b: u32) void
     /// 先递归遍历所有内部节点，交叉检测其两个孩子的子树，
     /// 再逐一检测所有可能重叠的实体对。
-    pub fn queryPairs(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), u32, u32) void) void {
+    pub fn queryPairs(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, ECS.Entity) void) void {
         if (self.root == NULL_NODE) return;
         self.clearCrossFlags();
         // crossAll 递归遍历所有内部节点，自动交叉每个节点的两个孩子
@@ -279,7 +280,7 @@ pub const Bvh = struct {
     }
 
     /// 递归遍历所有内部节点，交叉检测其两个孩子
-    fn crossAll(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), u32, u32) void, node_idx: i32) void {
+    fn crossAll(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, ECS.Entity) void, node_idx: i32) void {
         const n = &self.nodes.items[@as(usize, @intCast(node_idx))];
         if (n.child1 == NULL_NODE or n.crossed) return;
         n.crossed = true;
@@ -288,7 +289,7 @@ pub const Bvh = struct {
         self.crossAll(ctx, callback, n.child2);
     }
 
-    fn queryInternal(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), u32, u32) void, a: i32, b: i32) void {
+    fn queryInternal(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, ECS.Entity) void, a: i32, b: i32) void {
         const na = &self.nodes.items[@as(usize, @intCast(a))];
         const nb = &self.nodes.items[@as(usize, @intCast(b))];
         if (!overlapAABB(na.aabb, nb.aabb)) return;
@@ -330,12 +331,12 @@ pub const Bvh = struct {
     /// 遍历 BVH，找到射线命中的最近实体。
     /// ctx 为运行时上下文，callback 签名 fn(ctx, entity: u32, t: f32) bool
     /// callback 返回 true 表示已找到（停止继续搜索）
-    pub fn raycast(self: *const Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), u32, f32) bool, origin: Vec3, dir: Vec3) void {
+    pub fn raycast(self: *const Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, f32) bool, origin: Vec3, dir: Vec3) void {
         if (self.root == NULL_NODE) return;
         self.raycastNode(ctx, callback, self.root, origin, dir);
     }
 
-    fn raycastNode(self: *const Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), u32, f32) bool, node_idx: i32, origin: Vec3, dir: Vec3) void {
+    fn raycastNode(self: *const Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, f32) bool, node_idx: i32, origin: Vec3, dir: Vec3) void {
         const n = &self.nodes.items[@as(usize, @intCast(node_idx))];
         const t = rayAABB(n.aabb, origin, dir);
         if (t == null or t.? < 0) return;
@@ -558,15 +559,15 @@ test "BVH dense — 200 entities cluster" { try runDenseTest(200, "密集"); }
 test "BVH insert 2 overlapping" {
     var bvh = Bvh.init(std.heap.page_allocator, 0.5);
     defer bvh.deinit();
-    try bvh.insert(1, AABB{ .min_x = 0, .max_x = 1, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.insert(ECS.Entity{ .index = 1, .version = 0 }, AABB{ .min_x = 0, .max_x = 1, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     var pair_count: u32 = 0;
     const Ctx = struct {
         count: *u32,
-        fn callback(ctx: @This(), a: u32, b: u32) void { _ = a; _ = b; ctx.count.* += 1; }
+        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void { _ = a; _ = b; ctx.count.* += 1; }
     };
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 0);
-    try bvh.insert(2, AABB{ .min_x = 0.5, .max_x = 1.5, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.insert(ECS.Entity{ .index = 2, .version = 0 }, AABB{ .min_x = 0.5, .max_x = 1.5, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     pair_count = 0;
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 1);
@@ -576,12 +577,12 @@ test "BVH insert 2 overlapping" {
 test "BVH insert 2 non-overlapping" {
     var bvh = Bvh.init(std.heap.page_allocator, 0.5);
     defer bvh.deinit();
-    try bvh.insert(1, AABB{ .min_x = 0, .max_x = 1, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
-    try bvh.insert(2, AABB{ .min_x = 10, .max_x = 11, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.insert(ECS.Entity{ .index = 1, .version = 0 }, AABB{ .min_x = 0, .max_x = 1, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.insert(ECS.Entity{ .index = 2, .version = 0 }, AABB{ .min_x = 10, .max_x = 11, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     var pair_count: u32 = 0;
     const Ctx = struct {
         count: *u32,
-        fn callback(ctx: @This(), a: u32, b: u32) void { _ = a; _ = b; ctx.count.* += 1; }
+        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void { _ = a; _ = b; ctx.count.* += 1; }
     };
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 0);
@@ -591,21 +592,21 @@ test "BVH insert 2 non-overlapping" {
 test "BVH update and re-insert" {
     var bvh = Bvh.init(std.heap.page_allocator, 0.5);
     defer bvh.deinit();
-    try bvh.insert(1, AABB{ .min_x = 0, .max_x = 1, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
-    try bvh.insert(2, AABB{ .min_x = 0.5, .max_x = 1.5, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.insert(ECS.Entity{ .index = 1, .version = 0 }, AABB{ .min_x = 0, .max_x = 1, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.insert(ECS.Entity{ .index = 2, .version = 0 }, AABB{ .min_x = 0.5, .max_x = 1.5, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     var pair_count: u32 = 0;
     const Ctx = struct {
         count: *u32,
-        fn callback(ctx: @This(), a: u32, b: u32) void { _ = a; _ = b; ctx.count.* += 1; }
+        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void { _ = a; _ = b; ctx.count.* += 1; }
     };
-    try bvh.update(2, AABB{ .min_x = 100, .max_x = 101, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.update(ECS.Entity{ .index = 2, .version = 0 }, AABB{ .min_x = 100, .max_x = 101, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 0);
-    try bvh.update(2, AABB{ .min_x = 0.5, .max_x = 1.5, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.update(ECS.Entity{ .index = 2, .version = 0 }, AABB{ .min_x = 0.5, .max_x = 1.5, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     pair_count = 0;
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 1);
-    try bvh.update(2, AABB{ .min_x = 0.6, .max_x = 1.6, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
+    try bvh.update(ECS.Entity{ .index = 2, .version = 0 }, AABB{ .min_x = 0.6, .max_x = 1.6, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     pair_count = 0;
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 1);

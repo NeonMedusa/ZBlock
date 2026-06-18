@@ -183,11 +183,15 @@ pub fn start(self: *Game) !void {
                 self.accumulator -= TICK_DT;
                 if (self.menu_state != .Pause or self.network_mode != .single) {
                     if (self.network_mode == .client) {
-                        try self.clientTick();
+                        try self.clientTick(); // 30Hz 发输入
                     } else {
                         try self.tick();
                     }
                 }
+            }
+            // 客机：每帧收包，不等 30Hz tick
+            if (self.network_mode == .client and self.save_initialized and self.client_connected.load(.acquire)) {
+                self.clientReceivePackets();
             }
             // 如果 tick 内触发了 returnToMenu，跳过当前帧
             if (!self.save_initialized) continue;
@@ -216,6 +220,14 @@ pub fn start(self: *Game) !void {
                 if (self.network_mode != .client) {
                     self.pollServerSnapshot();
                     syncCameraFromPlayer(self);
+                } else {
+                    // 客机：相机位置每帧插值（暂停时在多人模式下继续运行）
+                    if (self.getInterpPos()) |render_pos| {
+                        const eye = render_pos.add(Vec3.new(0, 1.6, 0));
+                        self.camera.position = eye;
+                        self.ubo.camera_pos = eye;
+                        self.ubo.view_matrix = Mat4.lookAt(eye, eye.add(self.camera.front), Vec3.new(0, 1, 0));
+                    }
                 }
             }
 
@@ -234,16 +246,6 @@ pub fn start(self: *Game) !void {
                         @divTrunc(avg_ns, 1000),
                         @divTrunc(self.latency_max_ns, 1000),
                     });
-                }
-
-                // 客机：相机位置每帧插值
-                if (self.network_mode == .client) {
-                    if (self.getInterpPos()) |render_pos| {
-                        const eye = render_pos.add(Vec3.new(0, 1.6, 0));
-                        self.camera.position = eye;
-                        self.ubo.camera_pos = eye;
-                        self.ubo.view_matrix = Mat4.lookAt(eye, eye.add(self.camera.front), Vec3.new(0, 1, 0));
-                    }
                 }
                 // 飞行切换（每帧检测，不依赖 tick）
                 if (self.input.isKeyJustPressed(.space)) {
@@ -744,7 +746,6 @@ pub fn returnToMenu(self: *Game) void {
 
     // 释放 gameplay 子系统
     self.server.block_world.deinit();
-    // 释放 Server 内部容器，但保留 registry（zig-ecs 的 deinit 有泄漏 bug）
     self.server.input_queue.deinit(self.allocator);
     self.server.pending_chunks.deinit(self.allocator);
     self.server.pending_unloads.deinit(self.allocator);
@@ -753,7 +754,9 @@ pub fn returnToMenu(self: *Game) void {
         while (it.next()) |list| list.deinit(self.allocator);
     }
     self.server.player_chunks.deinit(self.allocator);
-    // 重置为初始状态
+    self.server.registry.deinit();
+    // 重建 registry（zig-ecs handles 有 128B 泄漏，但不清空会导致实体残留）
+    self.server.registry = ECS.Registry.init(self.allocator);
     self.server.input_queue = .empty;
     self.server.pending_chunks = .empty;
     self.server.pending_unloads = .empty;
@@ -923,32 +926,24 @@ fn hostNetworkThread(self: *Game) void {
             self.server.pending_chunks_mutex.unlock(io);
             self.net_mutex.unlock(io);
 
+            // 从服务端快照缓冲区读取（由 publishSnapshot 在 tick 边界写入）
             var snapshots: [64]Network.EntitySnapshot = undefined;
             var count: usize = 0;
+            var snap_tick: u64 = 0;
             {
-                var pv = self.server.registry.view(.{ Comps.Player, Comps.Position, Comps.Facing }, .{});
-                var pi = pv.entityIterator();
-                while (pi.next()) |e| {
-                    if (count >= snapshots.len) break;
-                    const player = pv.get(Comps.Player, e);
-                    const epos = pv.get(Comps.Position, e);
-                    const efacing = pv.get(Comps.Facing, e);
-                    const syaw = if (player.id == 0) (-cam_yaw + std.math.pi / 2.0) else efacing.yaw;
-                    const spitch = if (player.id == 0) cam_pitch else efacing.pitch;
-                    snapshots[count] = .{ .player_id = player.id, .pos = epos.vec, .facing_yaw = syaw, .facing_pitch = spitch };
-                    count += 1;
-                }
-            }
-            {
-                var ev = self.server.registry.view(.{ Comps.ModelName, Comps.Position, Comps.Facing }, .{});
-                var ei = ev.entityIterator();
-                while (ei.next()) |e| {
-                    if (count >= snapshots.len) break;
-                    if (self.server.registry.tryGet(Comps.Player, e)) |_| continue;
-                    const epos = ev.get(Comps.Position, e);
-                    const efacing = ev.get(Comps.Facing, e);
-                    snapshots[count] = .{ .player_id = std.math.maxInt(u32), .pos = epos.vec, .facing_yaw = efacing.yaw, .facing_pitch = efacing.pitch };
-                    count += 1;
+                self.server.snapshot_mutex.lockUncancelable(io);
+                defer self.server.snapshot_mutex.unlock(io);
+                count = self.server.snapshot_count;
+                snap_tick = self.server.snapshot_tick;
+                if (count > 0) {
+                    @memcpy(std.mem.sliceAsBytes(snapshots[0..count]), std.mem.sliceAsBytes(self.server.snapshots[0..count]));
+                    // 修正主机玩家朝向：snapshot 中 player_id=0 的朝向需要替换为相机朝向
+                    for (snapshots[0..count]) |*s| {
+                        if (s.player_id == 0) {
+                            s.facing_yaw = -cam_yaw + std.math.pi / 2.0;
+                            s.facing_pitch = cam_pitch;
+                        }
+                    }
                 }
             }
             // 先发区块更新（无阻塞），再发状态包——这样 state 总是在 TCP 队列末尾，
@@ -987,7 +982,7 @@ fn hostNetworkThread(self: *Game) void {
             // state 包后发，排在队列末尾，客机读到的是最新的
             state_serial += 1;
             const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-            Network.sendState(cfd, &.{ .serial = state_serial, .host_time = now_ns, .entities = snapshots[0..count] });
+            Network.sendState(cfd, &.{ .serial = state_serial, .tick_count = snap_tick, .host_time = now_ns, .entities = snapshots[0..count] });
         }
         // 客机断线，关闭 cfd（defer 会执行），准备 accept 下一个
         self.client_connected.store(false, .release);
@@ -1051,9 +1046,9 @@ fn collectPlayerInput(self: *Game) PlayerInput {
 
 /// 从本地输入设备（键盘/鼠标）采集移动意图（客户端专用）
 /// 客户端 tick：不跑物理，只发输入 + 收状态
+/// 客机：发输入（30Hz，跟随物理 tick）
 fn clientTick(self: *Game) !void {
     self._tick_start_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-    // 先发输入（采集真实输入，方向为相机相对）
     var intent: Network.ClientInput = undefined;
     intent.serial = @truncate(self.server.tick_count);
     {
@@ -1068,8 +1063,6 @@ fn clientTick(self: *Game) !void {
         intent.move_dir = raw_dir.norm();
     }
     intent.jump = self.input.isKeyHeld(.space);
-    // 冲刺：用 toggle（与主机一致），而非按住
-    // 没有 WASD 输入时自动取消冲刺（与主机 Server.tick 行为一致）
     const has_movement = @sqrt(intent.move_dir.x * intent.move_dir.x + intent.move_dir.z * intent.move_dir.z) > 0.01;
     if (has_movement) {
         intent.sprint = self.server.sprint_toggled;
@@ -1081,40 +1074,38 @@ fn clientTick(self: *Game) !void {
     intent.cam_yaw = self.camera.yaw;
     intent.cam_pitch = self.camera.pitch;
 
-    // 动作输入（用与主机相同的 keybinds 映射）
     intent.break_block = self.break_once;
     intent.place_block = self.place_once;
     self.break_once = false;
     self.place_once = false;
     intent.attack = false;
     intent.hotbar_slot = self.hotbar.selected;
-    // 双击空格（用真实帧时间检测）
-    // 飞行双击检测在主循环（每帧），这里直接取标志
     intent.wants_fly = self.server_wants_fly;
     self.server_wants_fly = false;
 
     Network.sendInput(@as(winsock.socket_t, @intCast(self.client_fd)), &intent);
+}
 
-    // 一次性读完所有可用的包：chunk 全部消费，state 只保留最新的
+/// 客机：每帧收包，更新实体位置（独立于 30Hz clientTick）
+fn clientReceivePackets(self: *Game) void {
     var state: Network.ServerState = undefined;
     var state_initialized = false;
+
+    // 一次性读完所有可用的包
     while (true) {
-        var readfds2 = winsock.fd_set{
+        var readfds = winsock.fd_set{
             .fd_count = 1,
             .fd_array = [_]usize{@as(usize, @intCast(self.client_fd))} ** winsock.FD_SETSIZE,
         };
-        var tv2 = winsock.timeval{ .sec = 0, .usec = 0 };
-        const sel_rc2 = winsock.select(0, &readfds2, null, null, &tv2);
-        if (sel_rc2 <= 0) break;
+        var tv = winsock.timeval{ .sec = 0, .usec = 0 };
+        const sel_rc = winsock.select(0, &readfds, null, null, &tv);
+        if (sel_rc <= 0) break;
         const tag = Network.peekTag(self.client_fd);
         if (tag == 0) break;
         if (tag == 2) {
             self.chunk_count += 1;
             const result = Network.recvChunk(self.client_fd, self.allocator);
-            if (result == null) {
-                self.disconnectClient();
-                return;
-            }
+            if (result == null) { self.disconnectClient(); return; }
             if (result) |chunk| {
                 if (chunk.palette.len > 2) {
                     self.server.block_world.insertChunkFromNetwork(chunk.origin_x, chunk.origin_z, chunk.palette, chunk.data) catch {};
@@ -1125,14 +1116,7 @@ fn clientTick(self: *Game) !void {
         } else if (tag == 1) {
             if (state_initialized) self.allocator.free(state.entities);
             const got = Network.recvState(self.client_fd, self.allocator, &state);
-            if (!got) {
-                self.disconnectClient();
-                return;
-            }
-            if (!got) {
-                self.disconnectClient();
-                return;
-            }
+            if (!got) { self.disconnectClient(); return; }
             state_initialized = true;
         } else if (tag == 3) {
             const unload = Network.recvChunkUnload(self.client_fd);
@@ -1141,101 +1125,87 @@ fn clientTick(self: *Game) !void {
             }
         } else break;
     }
-    // 处理最后一个 state（最新的）
-    if (state_initialized) {
-        defer self.allocator.free(state.entities);
-        self.state_count += 1;
 
-        const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-        const latency_ns = now_ns - state.host_time;
-        if (latency_ns >= 0) {
-            self.latency_min_ns = @min(self.latency_min_ns, latency_ns);
-            self.latency_max_ns = @max(self.latency_max_ns, latency_ns);
-            self.latency_sum_ns += latency_ns;
-            self.latency_samples += 1;
-        }
+    if (!state_initialized) return;
+    defer self.allocator.free(state.entities);
 
-        // 注意：state serial 跳号是正常的（我们丢弃了中间旧 state），不算 gap
-        self.state_serial_last = state.serial;
-
-        if (self.state_count % 30 == 0) {
-            const tick_end = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-            const tick_duration_us = @divTrunc(tick_end - self._tick_start_ns, 1000);
-            if (tick_duration_us > 0) {
-                Log.debug("tick time: {}us (chunks={d})", .{ tick_duration_us, self.chunk_count });
-            }
-        }
-
-        for (state.entities, 0..) |snap, i| {
-            if (snap.player_id == self.server.player_id) {
-                self.found_own_snapshot = true;
-                if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos| {
-                    pos.prev = pos.vec;
-                    pos.vec = snap.pos;
-                    self.pushInterpPos(snap.pos);
-                }
-                if (self.server.registry.tryGet(Comps.Facing, self.remote_player.?)) |facing| {
-                    facing.yaw = snap.facing_yaw;
-                    facing.pitch = snap.facing_pitch;
-                }
-                continue;
-            }
-            const key = @as(u64, @intCast(i));
-            const gop = self.snapshot_info.getOrPut(self.allocator, key) catch continue;
-            if (!gop.found_existing) {
-                const is_player = snap.player_id != std.math.maxInt(u32);
-                const einfo = if (is_player)
-                    EntityTypeId.fromName("player").info()
-                else
-                    EntityTypeId.fromName("zombie").info();
-                const entity = self.server.registry.create();
-                self.server.registry.add(entity, Comps.ModelName{ .id = einfo.model_id });
-                self.server.registry.add(entity, Comps.Position{ .vec = snap.pos, .prev = snap.pos });
-                self.server.registry.add(entity, Comps.Collider{ .width = einfo.collider_width, .height = einfo.collider_height });
-                self.server.registry.add(entity, Comps.Facing{});
-                if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
-                    self.server.registry.add(entity, Comps.AnimationState{
-                        .clip_name = @import("rend_ctx.zig").ClipName.idle,
-                        .bone_offset = bone_offset,
-                    });
-                }
-                gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id };
-            } else {
-                if (self.server.registry.tryGet(Comps.Position, gop.value_ptr.*.entity)) |pos| {
-                    pos.prev = pos.vec;
-                    pos.vec = snap.pos;
-                }
-                if (self.server.registry.tryGet(Comps.Facing, gop.value_ptr.*.entity)) |facing| {
-                    facing.yaw = snap.facing_yaw;
-                    facing.pitch = snap.facing_pitch;
-                }
-            }
-        }
-
-        {
-            var keys_to_remove: std.ArrayListUnmanaged(u64) = .empty;
-            defer keys_to_remove.deinit(self.allocator);
-            var iter = self.snapshot_info.keyIterator();
-            while (iter.next()) |k| {
-                if (k.* >= state.entities.len) {
-                    try keys_to_remove.append(self.allocator, k.*);
-                } else if (self.snapshot_info.getPtr(k.*)) |info| {
-                    if (state.entities[k.*].player_id != info.player_id) {
-                        try keys_to_remove.append(self.allocator, k.*);
-                    }
-                }
-            }
-            for (keys_to_remove.items) |k| {
-                if (self.snapshot_info.getPtr(k)) |e| {
-                    self.server.registry.destroy(e.*.entity);
-                }
-                _ = self.snapshot_info.remove(k);
-            }
-        }
-
-        self.server.animation_system.update(&self.server.registry, &self.res_manager, TICK_DT);
+    const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+    const latency_ns = now_ns - state.host_time;
+    if (latency_ns >= 0) {
+        self.latency_min_ns = @min(self.latency_min_ns, latency_ns);
+        self.latency_max_ns = @max(self.latency_max_ns, latency_ns);
+        self.latency_sum_ns += latency_ns;
+        self.latency_samples += 1;
     }
+
+    for (state.entities, 0..) |snap, i| {
+        if (snap.player_id == self.server.player_id) {
+            self.found_own_snapshot = true;
+            if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos| {
+                pos.prev = pos.vec;
+                pos.vec = snap.pos;
+                self.pushInterpPos(snap.pos, state.tick_count);
+            }
+            if (self.server.registry.tryGet(Comps.Facing, self.remote_player.?)) |facing| {
+                facing.yaw = snap.facing_yaw;
+                facing.pitch = snap.facing_pitch;
+            }
+            continue;
+        }
+        const key = @as(u64, @intCast(i));
+        const gop = self.snapshot_info.getOrPut(self.allocator, key) catch continue;
+        if (!gop.found_existing) {
+            const is_player = snap.player_id != std.math.maxInt(u32);
+            const einfo = if (is_player) EntityTypeId.fromName("player").info() else EntityTypeId.fromName("zombie").info();
+            const entity = self.server.registry.create();
+            self.server.registry.add(entity, Comps.ModelName{ .id = einfo.model_id });
+            self.server.registry.add(entity, Comps.Position{ .vec = snap.pos, .prev = snap.pos });
+            self.server.registry.add(entity, Comps.Collider{ .width = einfo.collider_width, .height = einfo.collider_height });
+            self.server.registry.add(entity, Comps.Facing{});
+            if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                self.server.registry.add(entity, Comps.AnimationState{
+                    .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                    .bone_offset = bone_offset,
+                });
+            }
+            gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id };
+        } else {
+            if (self.server.registry.tryGet(Comps.Position, gop.value_ptr.*.entity)) |pos| {
+                pos.prev = pos.vec;
+                pos.vec = snap.pos;
+            }
+            if (self.server.registry.tryGet(Comps.Facing, gop.value_ptr.*.entity)) |facing| {
+                facing.yaw = snap.facing_yaw;
+                facing.pitch = snap.facing_pitch;
+            }
+        }
+    }
+
+    // 清理已不存在的实体
+    {
+        var keys_to_remove: std.ArrayListUnmanaged(u64) = .empty;
+        defer keys_to_remove.deinit(self.allocator);
+        var iter = self.snapshot_info.keyIterator();
+        while (iter.next()) |k| {
+            if (k.* >= state.entities.len) {
+                keys_to_remove.append(self.allocator, k.*) catch {};
+            } else if (self.snapshot_info.getPtr(k.*)) |info| {
+                if (state.entities[k.*].player_id != info.player_id) {
+                    keys_to_remove.append(self.allocator, k.*) catch {};
+                }
+            }
+        }
+        for (keys_to_remove.items) |k| {
+            if (self.snapshot_info.getPtr(k)) |e| {
+                self.server.registry.destroy(e.*.entity);
+            }
+            _ = self.snapshot_info.remove(k);
+        }
+    }
+
+    self.server.animation_system.update(&self.server.registry, &self.res_manager, TICK_DT);
 }
+
 
 /// 客户端断开连接，回到主菜单
 pub fn disconnectClient(self: *Game) void {
@@ -1317,14 +1287,15 @@ fn pollServerSnapshot(self: *Game) void {
     defer self.server.snapshot_mutex.unlock(io);
     for (self.server.snapshots[0..self.server.snapshot_count]) |s| {
         if (s.player_id == self.server.player_id) {
-            self.pushInterpPos(s.pos);
+            self.pushInterpPos(s.pos, self.server.snapshot_tick);
             break;
         }
     }
 }
 
-/// 将位置推入环形缓冲区
-fn pushInterpPos(self: *Game, pos: Vec3) void {
+/// 将位置推入环形缓冲区。时间戳使用本地单调时钟（与 render_time 同一时间源）。
+fn pushInterpPos(self: *Game, pos: Vec3, server_tick: u64) void {
+    _ = server_tick;
     const idx = self.interp_buf_head;
     self.interp_buf_pos[idx] = pos;
     self.interp_buf_time[idx] = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
@@ -1332,18 +1303,17 @@ fn pushInterpPos(self: *Game, pos: Vec3) void {
     if (self.interp_buf_count < 8) self.interp_buf_count += 1;
 }
 
-/// 从环形缓冲区获取插值后的位置
+/// 从环形缓冲区获取插值后的位置。
 fn getInterpPos(self: *Game) ?Vec3 {
     if (self.interp_buf_count < 2) return null;
     const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-    const render_time = now_ns -| 50_000_000; // 50ms 延迟
+    const render_time = now_ns -| 50_000_000;
     const B: u32 = 8;
     const newest = (self.interp_buf_head + B - 1) % B;
     var i: u32 = 0;
     while (i < self.interp_buf_count - 1) {
-        const newer = (newest + B - i) % B; // 更新的快照
-        const older = (newer + B - 1) % B; // 更旧的快照
-        // 找 older.time <= render_time < newer.time
+        const newer = (newest + B - i) % B;
+        const older = (newer + B - 1) % B;
         if (self.interp_buf_time[older] <= render_time and self.interp_buf_time[newer] > render_time) {
             const interval = self.interp_buf_time[newer] - self.interp_buf_time[older];
             if (interval > 0) {

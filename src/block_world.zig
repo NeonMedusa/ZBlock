@@ -1063,7 +1063,7 @@ pub const BlockWorld = struct {
                     const pos = ent_view.get(Comps.Position, entity);
                     const col = ent_view.get(Comps.Collider, entity);
                     const aabb = getEntityAABB(pos.vec, col);
-                    self.bvh.insert(@as(u32, @intCast(entity.index)), aabb) catch {};
+                    self.bvh.insert(entity, aabb) catch {};
                 }
             }
 
@@ -1071,9 +1071,9 @@ pub const BlockWorld = struct {
             const Ctx = struct {
                 registry: *ECS.Registry,
                 repel: f32,
-                fn callback(ctx: @This(), a: u32, b: u32) void {
-                    const ea: ECS.Entity = .{ .index = @intCast(a), .version = 0 };
-                    const eb: ECS.Entity = .{ .index = @intCast(b), .version = 0 };
+                fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void {
+                    const ea = a;
+                    const eb = b;
                     if (!ctx.registry.valid(ea) or !ctx.registry.valid(eb)) return;
                     const pos_a = ctx.registry.get(Comps.Position, ea);
                     const pos_b = ctx.registry.get(Comps.Position, eb);

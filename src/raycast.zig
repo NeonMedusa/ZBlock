@@ -192,9 +192,8 @@ pub fn raycastEntities(registry: *ECS.Registry, bvh: *const Bvh, ray: Ray, max_d
         closest: *EntityHitResult,
         max_dist: f32,
         ray: Ray,
-        fn callback(ctx: @This(), entity_id: u32, t: f32) bool {
+        fn callback(ctx: @This(), entity: ECS.Entity, t: f32) bool {
             if (t > ctx.max_dist or t <= 0) return false;
-            const entity: ECS.Entity = .{ .index = @intCast(entity_id), .version = 0 };
             if (!ctx.registry.valid(entity)) return false;
             const pos = ctx.registry.get(Comps.Position, entity);
             const col = ctx.registry.get(Comps.Collider, entity);

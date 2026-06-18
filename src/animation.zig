@@ -60,7 +60,9 @@ pub const AnimationSystem = struct {
 
     /// 在物理 tick 开始时调用：bone_prev = bone_current
     pub fn swapBuffers(self: *AnimationSystem) void {
-        @memcpy(self.bone_prev[0..self.max_bone_slot], self.bone_current[0..self.max_bone_slot]);
+        const count = self.max_bone_slot;
+        if (count == 0) return;
+        @memcpy(self.bone_prev[0..count], self.bone_current[0..count]);
     }
 
     /// 物理 tick 层：遍历 ECS，更新所有实体的 bone_current

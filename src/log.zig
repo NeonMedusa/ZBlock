@@ -1,17 +1,7 @@
-// log.zig — 迷你日志系统（仅 stderr 输出）
+// log.zig — 迷你日志系统（带时间戳，仅 stderr 输出）
 const std = @import("std");
 
 pub const Level = enum { debug, info, warn, err };
-
-var arena: std.heap.ArenaAllocator = undefined;
-
-pub fn init(gpa: std.mem.Allocator) !void {
-    arena = std.heap.ArenaAllocator.init(gpa);
-}
-
-pub fn deinit() void {
-    arena.deinit();
-}
 
 pub fn log(comptime level: Level, comptime fmt: []const u8, args: anytype) void {
     const label = comptime switch (level) {

@@ -78,25 +78,23 @@
 ### 快照与插值
 
 ```
-服务端 tick 结束 → publishSnapshot() → snapshots[64] (mutex 保护, 含所有实体的位置/朝向)
-  ↓
-网络线程: 读 snapshots → 组 state 包 → 发客机
-主线程:  pollServerSnapshot() (主机) / clientTick state (客机)
-  → pushSnapshot() → snap_prev, snap_curr
-  → 渲染: lerp(snap_prev, snap_curr, accumulator/TICK_DT)
+服务端 tick 结束 → publishSnapshot()
+  → snapshots[64] + snapshot_tick (mutex 保护)
+  → hostNetworkThread 读 snapshots 组包（不再直接从 ECS 读）
+  → sendState(tick_count, host_time, entities)
+
+主线程:
+  pollServerSnapshot(主机) / clientReceivePackets(客机, 每帧)
+  → pushInterpPos(pos, local_timestamp)
+  → 渲染: getInterpPos() → lerp 或 render.zig lerp(prev, vec, alpha)
 ```
 
-### 联机数据流
+### 客机收包
 
-```
-主机:
-  clientTick (30Hz): sendInput → clientReceivePackets (每帧)
-  clientReceivePackets: poll(0) → peekTag → 收 state/chunk/unload → 更新插值
-
-客机收到: state 包 (tag=1) → 更新 snap_prev/snap_curr → 累计器插值
-          chunk 包 (tag=2) → insertChunkFromNetwork → enqueueMeshBuild
-          unload 包 (tag=3) → unloadChunk
-```
+- `clientTick()` 30Hz 发输入
+- `clientReceivePackets()` 每帧非阻塞收包（独立于 30Hz tick）
+- 统一处理 tag=2（chunk）、tag=1（state）、tag=3（unload）
+- 所有实体（含远程）通过 `prev/vec` 做插值渲染
 
 ---
 

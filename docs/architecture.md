@@ -170,14 +170,16 @@ main()
 否则区块会围绕硬编码的 (8,8) 加载，玩家实际位置附近无区块 → 自由落体。
 
 returnToMenu()
-  └─ 保存当前状态 → block_world.deinit() → server.deinit()
-  └─ Server.init() 重建（registry 不销毁重建，zig-ecs deinit 有泄漏 bug）
+  └─ 保存当前状态 → block_world.deinit()
+  └─ 释放 Server 内部容器（input_queue/pending_chunks/player_chunks）
+  └─ registry.deinit() + 重建（zig-ecs handles 有 128B 泄漏，但不清空会导致实体残留）
   └─ game_cleaned = true, save_initialized = false
 
 deinit()
   └─ server.deinit()  ← 始终释放（不论 game_cleaned）
   └─ animation_system.deinit()
   └─ registries.deinit()
+  └─ 客机: disconnectClient()（直接关窗口时自动调用）
 ```
 
 - `save_initialized: bool` — 主循环中判断是否运行物理/渲染
@@ -253,20 +255,23 @@ packed_pos (32 bits):
 物理、AI、动画以固定速率运行（30 tick/s），与渲染帧率无关。
 
 ```
-frame_timer (std.time.Instant) → dt → accumulator
+frame_timer (Timestamp.now) → dt → accumulator
 while accumulator >= TICK_DT:
     tick_count += 1
     physics / AI / animation     ← 固定 TICK_DT 步长
     accumulator -= TICK_DT
 render(alpha = accumulator / TICK_DT)  ← 插值渲染
+
+客机：
+  clientTick() 30Hz 发输入
+  clientReceivePackets() 每帧收包（独立于 30Hz tick）
 ```
 
 - `tick_count: u64` — 逻辑 tick 计数，1 tick = 1/30s
-- `frame_timer` 使用 `std.Io.Timestamp.now(Io, .awake)`，独立于 GLFW
+- `frame_timer` 使用 `std.Io.Timestamp.now(io, .awake)`，独立于 GLFW
 - `accumulator` 上限 `TICK_DT × 5`（CPU 跟不上时降速不崩盘）
 - 天空时间 = `tick_count × TICK_DT + accumulator`，与渲染插值一致
-- Pause 模式下 `tick_count` 不递增，时间冻结
-- Inventory 模式下时间继续，`syncCameraFromPlayer` 同步视角
+- 多人模式下暂停时相机继续跟随
 
 ### 实体碰撞检测与射线检测（BVH）
 
@@ -278,6 +283,7 @@ render(alpha = accumulator / TICK_DT)  ← 插值渲染
 - **射线检测**：物理 tick 之间 BVH 保持有效，射线遍历树（O(log n)）取代线性扫描全部实体
   - BVH 节点 AABB 粗筛 → 叶子节点的紧凑 AABB 精测 → 返回最近实体
 - 树结构采用增量插入 + SAH 启发式搜索兄弟节点
+- BVH 叶子节点存储完整的 `ECS.Entity`（含 version），不再丢失 zig-ecs 版本号信息
 
 ---
 

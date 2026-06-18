@@ -65,6 +65,7 @@ pub const Server = struct {
     snapshot_mutex: std.Io.Mutex = .init,
     snapshots: [64]Network.EntitySnapshot = undefined,
     snapshot_count: u32 = 0,
+    snapshot_tick: u64 = 0,
     snapshot_serial: u64 = 0,
 
     // 每个玩家已加载的区块集合（用于增量更新远程客户端）
@@ -304,6 +305,7 @@ pub const Server = struct {
         self.snapshot_mutex.lockUncancelable(io);
         defer self.snapshot_mutex.unlock(io);
         self.snapshot_count = 0;
+        self.snapshot_tick = self.tick_count;
         self.snapshot_serial +|= 1;
 
         {

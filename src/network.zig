@@ -34,7 +34,8 @@ pub const EntitySnapshot = struct {
 
 pub const ServerState = struct {
     serial: u32,
-    host_time: i64, // 主机发送时的单调时钟 ns
+    tick_count: u64, // 服务端 tick 序号（插值时间线用）
+    host_time: i64,  // 主机发送时的单调时钟 ns（延迟测量用）
     entities: []const EntitySnapshot,
 };
 
@@ -108,7 +109,7 @@ pub fn recvInput(fd: winsock.socket_t, input: *ClientInput) bool {
 /// 发送 ServerState（阻塞）
 pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
     const tag: u32 = 1;
-    const payload_len = 8 + 8 + state.entities.len * @sizeOf(EntitySnapshot);
+    const payload_len = 8 + 8 + 8 + state.entities.len * @sizeOf(EntitySnapshot);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.heap.page_allocator);
     buf.ensureTotalCapacity(std.heap.page_allocator, payload_len) catch {};
@@ -118,7 +119,8 @@ pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
     std.mem.writeInt(u32, buf.items[4..8], count_u32, .little);
     // host_time（单调时钟 ns，用于延迟测量）
     std.mem.writeInt(i64, buf.items[8..16], state.host_time, .little);
-    var offset: usize = 16;
+    std.mem.writeInt(u64, buf.items[16..24], state.tick_count, .little);
+    var offset: usize = 24;
     for (state.entities) |*e| {
         @memcpy(buf.items[offset..][0..@sizeOf(EntitySnapshot)], std.mem.asBytes(e));
         offset += @sizeOf(EntitySnapshot);
@@ -204,7 +206,7 @@ pub fn recvChunkUnload(fd: winsock.socket_t) ?struct { x: i32, z: i32 } {
 
 /// 接收 ServerState（非阻塞，true=有新数据，false=断线，WouldBlock=无数据）
 pub fn recvState(fd: winsock.socket_t, allocator: std.mem.Allocator, state: *ServerState) bool {
-    var header: [16]u8 = undefined;
+    var header: [24]u8 = undefined;
     const n = recvAll(fd, &header);
     if (n == 0) return false;
     if (n < header.len) return false;
@@ -213,6 +215,7 @@ pub fn recvState(fd: winsock.socket_t, allocator: std.mem.Allocator, state: *Ser
     state.serial = std.mem.readInt(u32, header[0..4], .little) & 0x3FFFFFFF;
     const count = std.mem.readInt(u32, header[4..8], .little);
     state.host_time = std.mem.readInt(i64, header[8..16], .little);
+    state.tick_count = std.mem.readInt(u64, header[16..24], .little);
     if (count > 64) return false; // sanity
     const snapshots = allocator.alloc(EntitySnapshot, count) catch return false;
     if (count > 0) {
