@@ -390,4 +390,7 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 ### 讨论记录
 
 - 2026-06-15：决定骨骼动画在客机本地计算，不传输矩阵。状态同步为主机权威。物理物体按重要性分层处理。
+- 2026-06-19：发现 zig-ecs 并非线程安全，服务端线程写 Position 会踩坏 AnimationState 的 bone_offset。
+  当前方案：pollServerSnapshot 中检测非法 bone_offset 并重新分配。
+  将来做物理骨骼动画时，要么给 zig-ecs 加读写锁，要么换支持并发的 ECS（如 EnTT）。
 

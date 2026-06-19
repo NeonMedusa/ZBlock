@@ -50,11 +50,12 @@ pub const AnimationSystem = struct {
         Wgpu.wgpuBufferRelease(self.bone_pool_buffer);
     }
 
-    /// 分配一个骨骼槽位（每实体一个，内含 MAX_BONES 个矩阵）
+    /// 分配一个骨骼槽位（每实体一个，内含 MAX_BONES 个矩阵）。
+    /// 使用原子自增，可被多线程安全调用（服务端线程/spawnEnemy、
+    /// 网络线程/hostNetworkThread、主线程/initGame）。
     pub fn allocBoneSlot(self: *AnimationSystem) ?u32 {
-        const slot = self.next_bone_offset;
+        const slot = @atomicRmw(u32, &self.next_bone_offset, .Add, 1, .monotonic);
         if (slot >= MAX_ANIM_ENTITIES) return null;
-        self.next_bone_offset += 1;
         return slot * MAX_BONES;
     }
 
@@ -82,11 +83,9 @@ pub const AnimationSystem = struct {
                 state.time = @mod(state.time, clip.duration);
             }
 
-            if (@as(u32, @intCast(state.bone_offset)) >= 0xFF000000) {
-                const Log = @import("log.zig");
-                Log.err("ANIM BUG: entity={} bone_offset=0x{X:0>8}", .{ entity, @as(u32, @intCast(state.bone_offset)) });
-                continue;
-            }
+            // 跳过被 ECS 跨线程踩踏导致 bone_offset 损坏的实体（0xAAAAAAAA），
+            // 由 pollServerSnapshot 的修复循环重新分配。不直接崩掉。
+            if (state.bone_offset >= TOTAL_BONES) continue;
             evaluateClip(self, skel, clip, state.bone_offset, state.time);
 
             const end = state.bone_offset + skel.joint_count;

@@ -404,7 +404,12 @@ pub const Server = struct {
         self.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
         self.registry.add(entity, Comps.Facing{});
         self.registry.add(entity, Comps.ModelName{ .id = info.model_id });
-        // AnimationState 由主线程 pollServerSnapshot 补充（避免跨线程 allocBoneSlot 竞态）
+        if (self.animation_system.allocBoneSlot()) |bone_offset| {
+            self.registry.add(entity, Comps.AnimationState{
+                .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                .bone_offset = bone_offset,
+            });
+        }
     }
 
     fn handleActionBreak(self: *Server, ray: Raycast.Ray) void {

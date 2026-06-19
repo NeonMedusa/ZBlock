@@ -445,6 +445,7 @@ fn initGame(self: *Game) !void {
                         .clip_name = @import("rend_ctx.zig").ClipName.walk,
                         .bone_offset = bone_offset,
                     });
+
                 }
             }
         }
@@ -876,6 +877,12 @@ fn hostNetworkThread(self: *Game) void {
             self.server.registry.add(entity, Comps.OnGround{ .value = false });
             self.server.registry.add(entity, Comps.Facing{});
             self.server.registry.add(entity, Comps.MoveIntent{});
+            if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                self.server.registry.add(entity, Comps.AnimationState{
+                    .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                    .bone_offset = bone_offset,
+                });
+            }
             self.remote_player = entity;
         }
 
@@ -1346,18 +1353,19 @@ fn pollServerSnapshot(self: *Game) void {
 
     // 主机/单人：动画更新（主线程，与服务端分离）
     if (self.network_mode != .client) {
-        // 为主线程创建但缺少 AnimationState 的实体补充骨骼槽（服务端线程不再分配，避免竞态）
+        // ── AnimationState 修复 ──
+        // zig-ecs 非线程安全。服务端线程每 tick 写 Position/Velocity 等组件时，
+        // 内部数据结构可能踩到 AnimationState 的存储区域，使 bone_offset 变为
+        // DebugAllocator 填充值 0xAAAAAAAA。此修复在每次 pollServerSnapshot 中
+        // 检测被踩坏的 bone_offset 并重新分配合法 slot。
         {
-            var av = self.server.registry.view(.{Comps.ModelName}, .{});
+            var av = self.server.registry.view(.{Comps.AnimationState}, .{});
             var ai = av.entityIterator();
             while (ai.next()) |ent| {
-                if (!self.server.registry.has(Comps.AnimationState, ent)) {
-                    if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
-                        self.server.registry.add(ent, Comps.AnimationState{
-                            .clip_name = @import("rend_ctx.zig").ClipName.walk,
-                            .bone_offset = bone_offset,
-                        });
-                    }
+                const st = av.get(ent);
+                if (st.bone_offset >= 0xFFFF0000) {
+                    const new_bo = self.server.animation_system.allocBoneSlot() orelse continue;
+                    st.bone_offset = new_bo;
                 }
             }
         }
