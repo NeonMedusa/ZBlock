@@ -373,6 +373,13 @@ pub const SaveManager = struct {
             registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
             registry.add(entity, Comps.ModelName{ .id = info.model_id });
             registry.add(entity, Comps.Position{ .vec = pos, .prev = pos });
+            if (registry.tryGet(Comps.Position, entity)) |p| {
+                const h = p.render_buf_head;
+                p.render_buf_pos[h] = pos;
+                p.render_buf_time[h] = @as(i64, @truncate(@import("std").Io.Timestamp.now(@import("imports.zig").io, .awake).nanoseconds));
+                p.render_buf_head = (h + 1) % 3;
+                if (p.render_buf_count < 3) p.render_buf_count += 1;
+            }
             registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
             registry.add(entity, Comps.Collider{ .width = info.collider_width, .height = info.collider_height });
             registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });

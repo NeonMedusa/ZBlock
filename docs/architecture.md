@@ -111,20 +111,23 @@ src/
   → 主线程:
       主机: pollServerSnapshot()
         → 复制到 render_snapshots 缓冲区
-        → 更新 ECS 的 render_prev/render_vec（按 entity 精确匹配）
-        → 记录 last_snapshot_time_ns
+        → 推入实体 3 槽环形缓冲区（按 entity 精确匹配）
       客机: clientReceivePackets()
         → 复制到 render_snapshots 缓冲区
-        → 更新 prev/vec + render_prev/render_vec
-        → 记录 last_snapshot_time_ns
-  → 渲染:
-      实体: lerp(render_prev, render_vec, (now - last_snapshot_time_ns) / 33ms)
-      主机相机: lerp(render_prev, render_vec, (now - last_snapshot_time_ns) / 33ms)
-      客机相机: lerp(prev, vec, accumulator / TICK_DT)
+        → 推入实体 3 槽环形缓冲区
+  → 渲染（主机/客机统一）:
+      实体 & 相机: 搜索 3 槽环缓冲，render_time = now - 33ms
+        → 找到 bracket → lerp(pos[older], pos[newer], alpha)
+        → 缓冲区不足（count < 2）→ 返回最新原始位置
 ```
 
 注意：`EntitySnapshot` 存储完整 `ECS.Entity{index, version}` 而非仅 `entity_idx`，
 确保精确匹配不被回收实体干扰。
+
+动画相关：
+- `allocBoneSlot` 只在主线程调用（initGame / pollServerSnapshot / clientReceivePackets）
+- 服务端线程和网络线程不分配骨骼槽，避免竞态
+- `animation_system.update` 只在主线程调用（pollServerSnapshot / clientReceivePackets）
 
 ### 动态区块加载/卸载
 

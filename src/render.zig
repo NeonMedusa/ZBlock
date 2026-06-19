@@ -338,10 +338,32 @@ fn tryRenderEntity(
     ins_idx: *u32,
     frustum: Frustum,
 ) void {
+    // 从实体 3 槽环形缓冲区查插值位置
     const now_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
-    const elapsed = @as(f32, @floatFromInt(@as(i64, @truncate(now_ns)) - game.last_snapshot_time_ns));
-    const alpha = @min(elapsed / 33_333_333.0, 1.0);
-    const render_pos = Vec3.lerp(pos.render_prev, pos.render_vec, alpha);
+    const rend_time = @as(i64, @truncate(now_ns)) -| 33_000_000;
+    var render_pos: Vec3 = undefined;
+    {
+        var found = false;
+        if (pos.render_buf_count >= 2) {
+            const newest = (pos.render_buf_head + 2) % 3;
+            var ri: u32 = 0;
+            while (ri < pos.render_buf_count - 1) {
+                const ni = (newest + 3 - ri) % 3;
+                const oi = (ni + 2) % 3;
+                if (pos.render_buf_time[oi] <= rend_time and pos.render_buf_time[ni] > rend_time) {
+                    const interval = pos.render_buf_time[ni] - pos.render_buf_time[oi];
+                    if (interval > 0) {
+                        const alpha = @min(@max(@as(f32, @floatFromInt(rend_time - pos.render_buf_time[oi])) / @as(f32, @floatFromInt(interval)), 0.0), 1.0);
+                        render_pos = Vec3.lerp(pos.render_buf_pos[oi], pos.render_buf_pos[ni], alpha);
+                    } else render_pos = pos.render_buf_pos[ni];
+                    found = true;
+                    break;
+                }
+                ri += 1;
+            }
+        }
+        if (!found) render_pos = if (pos.render_buf_count > 0) pos.render_buf_pos[(pos.render_buf_head + 2) % 3] else Vec3.zero;
+    }
     const half_w = col.width / 2;
     const aabb_min = Vec3.new(render_pos.x - half_w, render_pos.y, render_pos.z - half_w);
     const aabb_max = Vec3.new(render_pos.x + half_w, render_pos.y + col.height, render_pos.z + half_w);

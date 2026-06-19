@@ -72,11 +72,8 @@
 
 - **输入**：`collectPlayerInput` → `pushInput`（主机走队列，客机走 TCP → 网络线程 → 队列）
 - **处理**：服务端线程根据 `input.player_id` 找到对应实体，统一处理 MoveIntent/朝向/break/place/fly
-- **渲染**：
-  - 主机实体：遍历 `render_snapshots`（避免 ECS view 迭代器竞态），`lerp(render_prev, render_vec, time_alpha)`
-  - 主机相机：同上
-  - 客机实体：ECS view 迭代（无服务端线程），同上
-  - 客机相机：`lerp(prev, vec, accumulator/TICK_DT)`
+- **渲染**：3 槽 per-entity 环形缓冲区，`render_time = now - 33ms`，主机/客机/相机统一
+- **动画**：`allocBoneSlot` 只由主线程调用（initGame / pollServerSnapshot / clientReceivePackets），服务端/网络线程不分配
 - **区块**：`updateChunks` 遍历所有玩家，主机从磁盘加载/卸载，远程通过 `pending_chunks` 发送
 
 ### 快照与插值
@@ -90,18 +87,19 @@
 主线程:
   主机: pollServerSnapshot()
     → 复制到 render_snapshots 缓冲区
-    → 按 entity 精确匹配，更新 render_prev/render_vec
+    → 推入实体 3 槽环形缓冲区
   客机: clientReceivePackets()（每帧非阻塞）
     → 复制到 render_snapshots 缓冲区
-    → 更新 prev/vec（客机相机用）+ render_prev/render_vec（实体渲染用）
+    → 推入实体 3 槽环形缓冲区
 
-  实体渲染: lerp(render_prev, render_vec, (now - last_snapshot_time_ns) / 33ms)
-  主机相机: 同上
-  客机相机: lerp(prev, vec, accumulator / TICK_DT)
+  渲染（主机/客机统一）:
+    搜索 3 槽环缓冲，render_time = now - 33ms
+    → 找到 bracket → lerp(pos[older], pos[newer], alpha)
+    → 缓冲区不足（count < 2）→ 返回最新原始位置
 ```
 
-注：`time_alpha = (now - last_snapshot_time_ns) / 33ms`，不受 tick 耗时抖动影响。
-环形缓冲区已移除，改为 2 位置插值（render_prev/render_vec）。
+注：3 槽环缓冲无需持久化时间参考，alpha 永不为零，无速度断续感。
+`EntitySnapshot.entity` 存储完整 {index, version}，不被回收实体干扰。
 
 ### 客机收包
 

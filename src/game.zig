@@ -334,6 +334,7 @@ fn initGame(self: *Game) !void {
     const player_entity = self.server.registry.create();
     self.server.registry.add(player_entity, Comps.Player{ .id = self.server.player_id, .mode = .creative });
     self.server.registry.add(player_entity, Comps.Position{ .vec = default_spawn, .prev = Vec3.zero });
+    if (self.server.registry.tryGet(Comps.Position, player_entity)) |pp| pushEntityPos(pp, default_spawn);
     self.server.registry.add(player_entity, Comps.Velocity{ .vec = Vec3.zero });
     self.server.registry.add(player_entity, Comps.Collider{ .width = 0.6, .height = 1.8 });
     self.server.registry.add(player_entity, Comps.MoveSpeed{ .value = 4.0 });
@@ -347,14 +348,6 @@ fn initGame(self: *Game) !void {
     // 玩家模型（统一实体类型，主机客机都能看见对方）
     const pinfo = EntityTypeId.fromName("player").info();
     self.server.registry.add(player_entity, Comps.ModelName{ .id = pinfo.model_id });
-    if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
-        self.server.registry.add(player_entity, Comps.AnimationState{
-            .clip_name = @import("rend_ctx.zig").ClipName.idle,
-            .bone_offset = bone_offset,
-        });
-    }
-
-    // }
 
     // 先恢复玩家存档位置（如果有存档）--- 必须在加载区块之前
     // 原因：区块需要围绕玩家实际所在位置加载，而不是硬编码的 (8,8)。
@@ -687,6 +680,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
         const entity = self.server.registry.create();
         self.server.registry.add(entity, Comps.Player{ .id = 1, .mode = .survival });
         self.server.registry.add(entity, Comps.Position{ .vec = Vec3.new(0, 130, 0), .prev = Vec3.new(0, 130, 0) });
+    if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, Vec3.new(0, 130, 0));
         self.server.registry.add(entity, Comps.Facing{});
         self.remote_player = entity;
         self.server.player_id = 1;
@@ -874,6 +868,7 @@ fn hostNetworkThread(self: *Game) void {
                 break :blk found;
             };
             self.server.registry.add(entity, Comps.Position{ .vec = spawn_pos, .prev = spawn_pos });
+    if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, spawn_pos);
             self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
             self.server.registry.add(entity, Comps.Collider{ .width = pinfo.collider_width, .height = pinfo.collider_height });
             self.server.registry.add(entity, Comps.MoveSpeed{ .value = pinfo.move_speed });
@@ -881,12 +876,6 @@ fn hostNetworkThread(self: *Game) void {
             self.server.registry.add(entity, Comps.OnGround{ .value = false });
             self.server.registry.add(entity, Comps.Facing{});
             self.server.registry.add(entity, Comps.MoveIntent{});
-            if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
-                self.server.registry.add(entity, Comps.AnimationState{
-                    .clip_name = @import("rend_ctx.zig").ClipName.idle,
-                    .bone_offset = bone_offset,
-                });
-            }
             self.remote_player = entity;
         }
 
@@ -1150,10 +1139,9 @@ fn clientReceivePackets(self: *Game) void {
     for (state.entities, 0..) |snap, i| {
         if (snap.player_id == self.server.player_id) {
             if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos| {
+                pushEntityPos(pos, snap.pos);
                 pos.prev = pos.vec;
                 pos.vec = snap.pos;
-                pos.render_prev = pos.render_vec;
-                pos.render_vec = snap.pos;
             }
             if (self.server.registry.tryGet(Comps.Facing, self.remote_player.?)) |facing| {
                 facing.yaw = snap.facing_yaw;
@@ -1169,21 +1157,15 @@ fn clientReceivePackets(self: *Game) void {
             const entity = self.server.registry.create();
             self.server.registry.add(entity, Comps.ModelName{ .id = einfo.model_id });
             self.server.registry.add(entity, Comps.Position{ .vec = snap.pos, .prev = snap.pos });
+    if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, snap.pos);
             self.server.registry.add(entity, Comps.Collider{ .width = einfo.collider_width, .height = einfo.collider_height });
             self.server.registry.add(entity, Comps.Facing{});
-            if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
-                self.server.registry.add(entity, Comps.AnimationState{
-                    .clip_name = @import("rend_ctx.zig").ClipName.idle,
-                    .bone_offset = bone_offset,
-                });
-            }
             gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id };
         } else {
             if (self.server.registry.tryGet(Comps.Position, gop.value_ptr.*.entity)) |pos| {
+                pushEntityPos(pos, snap.pos);
                 pos.prev = pos.vec;
                 pos.vec = snap.pos;
-                pos.render_prev = pos.render_vec;
-                pos.render_vec = snap.pos;
             }
             if (self.server.registry.tryGet(Comps.Facing, gop.value_ptr.*.entity)) |facing| {
                 facing.yaw = snap.facing_yaw;
@@ -1214,6 +1196,21 @@ fn clientReceivePackets(self: *Game) void {
         }
     }
 
+    // 为主线程创建的实体补充 AnimationState
+    {
+        var av = self.server.registry.view(.{Comps.ModelName}, .{});
+        var ai = av.entityIterator();
+        while (ai.next()) |ent| {
+            if (!self.server.registry.has(Comps.AnimationState, ent)) {
+                if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                    self.server.registry.add(ent, Comps.AnimationState{
+                        .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                        .bone_offset = bone_offset,
+                    });
+                }
+            }
+        }
+    }
     self.server.animation_system.update(&self.server.registry, &self.res_manager, TICK_DT);
 }
 
@@ -1299,19 +1296,19 @@ fn pollServerSnapshot(self: *Game) void {
     self.render_snapshot_count = @as(u32, @intCast(snapshots.len));
     @memcpy(std.mem.sliceAsBytes(self.render_snapshots[0..self.render_snapshot_count]), std.mem.sliceAsBytes(snapshots));
 
-    // 主机：更新 ECS Position.render_prev/render_vec（第一次快照时两者都设置）
+    // 主机：推入实体 3 槽环形缓冲区
     if (self.network_mode != .client) {
         for (snapshots) |s| {
             const entity = s.entity;
             if (!self.server.registry.valid(entity)) continue;
             if (self.server.registry.tryGet(Comps.Position, entity)) |pos| {
                 if (!self.host_snap_valid) {
-                    // 第一次快照：prev 和 vec 都设成当前位置
-                    pos.render_prev = s.pos;
-                    pos.render_vec = s.pos;
+                    // 第一次快照：推入三次确保缓冲区填满
+                    pushEntityPos(pos, s.pos);
+                    pushEntityPos(pos, s.pos);
+                    pushEntityPos(pos, s.pos);
                 } else {
-                    pos.render_prev = pos.render_vec;
-                    pos.render_vec = s.pos;
+                    pushEntityPos(pos, s.pos);
                 }
             }
             if (self.server.registry.tryGet(Comps.Facing, entity)) |facing| {
@@ -1326,8 +1323,32 @@ fn pollServerSnapshot(self: *Game) void {
 
     // 主机/单人：动画更新（主线程，与服务端分离）
     if (self.network_mode != .client) {
+        // 为主线程创建但缺少 AnimationState 的实体补充骨骼槽（服务端线程不再分配，避免竞态）
+        {
+            var av = self.server.registry.view(.{Comps.ModelName}, .{});
+            var ai = av.entityIterator();
+            while (ai.next()) |ent| {
+                if (!self.server.registry.has(Comps.AnimationState, ent)) {
+                    if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                        self.server.registry.add(ent, Comps.AnimationState{
+                            .clip_name = @import("rend_ctx.zig").ClipName.walk,
+                            .bone_offset = bone_offset,
+                        });
+                    }
+                }
+            }
+        }
         self.server.animation_system.update(&self.server.registry, &self.res_manager, TICK_DT);
     }
+}
+
+/// 推入实体 3 槽环形缓冲区
+fn pushEntityPos(pos: *Comps.Position, new_pos: Vec3) void {
+    const h = pos.render_buf_head;
+    pos.render_buf_pos[h] = new_pos;
+    pos.render_buf_time[h] = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+    pos.render_buf_head = (h + 1) % 3;
+    if (pos.render_buf_count < 3) pos.render_buf_count += 1;
 }
 
 fn syncCameraFromPlayer(self: *Game) void {
@@ -1337,17 +1358,30 @@ fn syncCameraFromPlayer(self: *Game) void {
         const p = view.get(Comps.Player, entity);
         if (p.id == self.server.player_id) {
             const pos = view.get(Comps.Position, entity);
-            const render_pos = if (self.network_mode == .client) blk: {
-                // 客机：与备份一致，prev/vec + accumulator/TICK_DT
-                const alpha = self.accumulator / TICK_DT;
-                break :blk Vec3.lerp(pos.prev, pos.vec, alpha);
-            } else blk: {
-                // 主机：render_prev/render_vec + 时间戳 alpha（避免服务端线程竞态）
-                const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-                const elapsed = @as(f32, @floatFromInt(now_ns - self.last_snapshot_time_ns));
-                const alpha = @min(elapsed / 33_333_333.0, 1.0);
-                break :blk Vec3.lerp(pos.render_prev, pos.render_vec, alpha);
-            };
+            // 从实体 3 槽环形缓冲区查插值位置（主机/客机统一）
+            const rend_now = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+            const rend_time = rend_now -| 33_000_000;
+            var rend_pos: Vec3 = undefined;
+            var found = false;
+            if (pos.render_buf_count >= 2) {
+                const newest = (pos.render_buf_head + 2) % 3;
+                var ri: u32 = 0;
+                while (ri < pos.render_buf_count - 1) {
+                    const ni = (newest + 3 - ri) % 3;
+                    const oi = (ni + 2) % 3;
+                    if (pos.render_buf_time[oi] <= rend_time and pos.render_buf_time[ni] > rend_time) {
+                        const interval = pos.render_buf_time[ni] - pos.render_buf_time[oi];
+                        if (interval > 0) {
+                            const alpha = @min(@max(@as(f32, @floatFromInt(rend_time - pos.render_buf_time[oi])) / @as(f32, @floatFromInt(interval)), 0.0), 1.0);
+                            rend_pos = Vec3.lerp(pos.render_buf_pos[oi], pos.render_buf_pos[ni], alpha);
+                        } else rend_pos = pos.render_buf_pos[ni];
+                        found = true;
+                        break;
+                    }
+                    ri += 1;
+                }
+            }
+            const render_pos = if (found) rend_pos else if (pos.render_buf_count > 0) pos.render_buf_pos[(pos.render_buf_head + 2) % 3] else Vec3.zero;
             const eye = render_pos.add(Vec3.new(0, 1.6, 0));
             self.camera.position = eye;
             self.ubo.camera_pos = eye;
@@ -1419,6 +1453,7 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     self.server.registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
     self.server.registry.add(entity, Comps.ModelName{ .id = info.model_id });
     self.server.registry.add(entity, Comps.Position{ .vec = pos, .prev = pos });
+    if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, pos);
     self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
     self.server.registry.add(entity, Comps.Collider{ .width = info.collider_width, .height = info.collider_height });
     self.server.registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });
@@ -1428,12 +1463,7 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     self.server.registry.add(entity, Comps.MoveIntent{});
     self.server.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
     self.server.registry.add(entity, Comps.AttackCooldown{ .interval = info.attack_interval });
-    if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
-        self.server.registry.add(entity, Comps.AnimationState{
-            .clip_name = @import("rend_ctx.zig").ClipName.walk,
-            .bone_offset = bone_offset,
-        });
-    }
+
 }
 
 const Game = @This();

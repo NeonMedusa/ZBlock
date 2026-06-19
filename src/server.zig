@@ -386,6 +386,13 @@ pub const Server = struct {
         self.registry.add(entity, Comps.AttackCooldown{});
         self.registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
         self.registry.add(entity, Comps.Position{ .vec = pos, .prev = pos });
+        if (self.registry.tryGet(Comps.Position, entity)) |p| {
+            const h = p.render_buf_head;
+            p.render_buf_pos[h] = pos;
+            p.render_buf_time[h] = @as(i64, @truncate(@import("std").Io.Timestamp.now(@import("imports.zig").io, .awake).nanoseconds));
+            p.render_buf_head = (h + 1) % 3;
+            if (p.render_buf_count < 3) p.render_buf_count += 1;
+        }
         self.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
         self.registry.add(entity, Comps.Collider{ .width = info.collider_width, .height = info.collider_height });
         self.registry.add(entity, Comps.MoveSpeed{ .value = info.move_speed });
@@ -394,12 +401,7 @@ pub const Server = struct {
         self.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
         self.registry.add(entity, Comps.Facing{});
         self.registry.add(entity, Comps.ModelName{ .id = info.model_id });
-        if (self.animation_system.allocBoneSlot()) |bone_offset| {
-            self.registry.add(entity, Comps.AnimationState{
-                .clip_name = @import("rend_ctx.zig").ClipName.idle,
-                .bone_offset = bone_offset,
-            });
-        }
+        // AnimationState 由主线程 pollServerSnapshot 补充（避免跨线程 allocBoneSlot 竞态）
     }
 
     fn handleActionBreak(self: *Server, ray: Raycast.Ray) void {

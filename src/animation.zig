@@ -82,6 +82,11 @@ pub const AnimationSystem = struct {
                 state.time = @mod(state.time, clip.duration);
             }
 
+            if (@as(u32, @intCast(state.bone_offset)) >= 0xFF000000) {
+                const Log = @import("log.zig");
+                Log.err("ANIM BUG: entity={} bone_offset=0x{X:0>8}", .{ entity, @as(u32, @intCast(state.bone_offset)) });
+                continue;
+            }
             evaluateClip(self, skel, clip, state.bone_offset, state.time);
 
             const end = state.bone_offset + skel.joint_count;
