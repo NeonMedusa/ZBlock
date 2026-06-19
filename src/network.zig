@@ -5,6 +5,7 @@ const winsock = @import("winsock.zig");
 
 const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
+const ECS = @import("zigecs");
 
 pub const SERVER_PORT: u16 = 9123;
 
@@ -27,6 +28,7 @@ pub const ClientInput = struct {
 /// 服务端 → 客户端：实体状态快照
 pub const EntitySnapshot = struct {
     player_id: u32,
+    entity: ECS.Entity, // 完整 ECS 实体（index+version），精确匹配
     pos: Vec3,
     facing_yaw: f32,
     facing_pitch: f32,

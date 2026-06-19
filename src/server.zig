@@ -176,7 +176,7 @@ pub const Server = struct {
 
     /// 运行一个物理 tick（固定 30Hz）
     /// 运行一个物理 tick：先处理所有待处理输入，再跑一次物理
-    pub fn tick(self: *Server, inputs: []const PlayerInput, res_manager: *ResManager) !void {
+    pub fn tick(self: *Server, inputs: []const PlayerInput, _: *ResManager) !void {
         self.tick_count += 1;
 
         // 依次处理每个输入
@@ -290,8 +290,6 @@ pub const Server = struct {
         }
         self.block_world.updateAI(&self.registry, TICK_DT);
 
-        self.animation_system.update(&self.registry, res_manager, TICK_DT);
-
         self.updateEntities() catch {};
         self.updateChunks() catch {};
 
@@ -318,6 +316,7 @@ pub const Server = struct {
                 const facing = view.get(Comps.Facing, e);
                 self.snapshots[self.snapshot_count] = .{
                     .player_id = p.id,
+                    .entity = e,
                     .pos = pos.vec,
                     .facing_yaw = facing.yaw,
                     .facing_pitch = facing.pitch,
@@ -335,6 +334,7 @@ pub const Server = struct {
                 const facing = view.get(Comps.Facing, e);
                 self.snapshots[self.snapshot_count] = .{
                     .player_id = std.math.maxInt(u32),
+                    .entity = e,
                     .pos = pos.vec,
                     .facing_yaw = facing.yaw,
                     .facing_pitch = facing.pitch,

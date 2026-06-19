@@ -57,58 +57,35 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             }
         }
 
-        var view = game.server.registry.view(.{ Comps.ModelName, Comps.Position, Comps.Collider }, .{});
-        var iter = view.entityIterator();
-        while (iter.next()) |entity| {
-            const entity_pos = view.getConst(Comps.Position, entity);
-            const alpha = game.accumulator / TICK_DT;
-            const render_pos = Vec3.lerp(entity_pos.prev, entity_pos.vec, alpha);
-            const col = view.get(Comps.Collider, entity);
-            const half_w = col.width / 2;
-            const aabb_min = Vec3.new(render_pos.x - half_w, render_pos.y, render_pos.z - half_w);
-            const aabb_max = Vec3.new(render_pos.x + half_w, render_pos.y + col.height, render_pos.z + half_w);
-            if (!frustum.intersectsAABB(aabb_min, aabb_max)) continue;
-            // 跳过本地玩家模型（第一人称不渲染自己）
-            if (game.server.registry.tryGet(Comps.Player, entity)) |player| {
-                if (player.id == game.server.player_id) continue;
-            }
-            const bone_off = anim_map.get(@as(u32, @intCast(entity.index))) orelse -1;
-            var entity_transform = Mat4.fromTranslate(render_pos);
-            if (game.server.registry.tryGet(Comps.Facing, entity)) |facing| {
-                entity_transform = Mat4.mul(entity_transform, Mat4.fromRotationY(facing.yaw)); // facing 已为弧度
-            }
-            game.res_manager.entities_data[entity_idx] = EntityData{
-                .transform = entity_transform,
-                .bone_offset = bone_off,
-            };
-
-            const model_name = view.getConst(Comps.ModelName, entity);
-            const model = game.res_manager.getOrLoadModel(model_name.id);
-
-            for (model.nodes) |node| {
-                if (node.mesh) |mesh_idx| {
-                    const mesh = model.meshes[mesh_idx];
-                    for (mesh.primitives) |primitive| {
-                        game.res_manager.instances_data[ins_idx] = .{
-                            .transform = node.matrix,
-                            .entity_idx = entity_idx,
-                            .bone_offset = bone_off,
-                        };
-
-                        game.res_manager.draw_batches[game.res_manager.draw_batch_count] = .{
-                            .vertex_buffer = primitive.vertex_buffer,
-                            .index_buffer = primitive.index_buffer,
-                            .index_count = primitive.index_count,
-                            .bind_group = primitive.material.bind_group,
-                            .instance_idx = ins_idx,
-                            .vertex_format = if (model.skeleton != null) .skinned_model else .static_model,
-                        };
-                        game.res_manager.draw_batch_count += 1;
-                        ins_idx += 1;
-                    }
+        // 渲染实体
+        if (game.network_mode == .client) {
+            // 客机：ECS view 迭代安全（无服务端线程）
+            var view = game.server.registry.view(.{ Comps.ModelName, Comps.Position, Comps.Collider }, .{});
+            var iter = view.entityIterator();
+            while (iter.next()) |entity| {
+                if (entity_idx >= 500) break;
+                const model_name = view.getConst(Comps.ModelName, entity);
+                const pos = view.get(Comps.Position, entity);
+                const col = view.get(Comps.Collider, entity);
+                // 跳过本地玩家
+                if (game.server.registry.tryGet(Comps.Player, entity)) |player| {
+                    if (player.id == game.server.player_id) continue;
                 }
+                tryRenderEntity(game, entity, &model_name, pos, col, &anim_map, &entity_idx, &ins_idx, frustum);
             }
-            entity_idx += 1;
+        } else {
+            // 主机/单人：从渲染快照缓冲区迭代（避免 ECS view 迭代器和服务端线程竞态）
+            for (game.render_snapshots[0..game.render_snapshot_count]) |s| {
+                if (entity_idx >= 500) break;
+                // 跳过本地玩家
+                if (s.player_id != std.math.maxInt(u32) and s.player_id == game.server.player_id) continue;
+                const entity = s.entity;
+                if (!game.server.registry.valid(entity)) continue;
+                const model_name = game.server.registry.tryGet(Comps.ModelName, entity) orelse continue;
+                const pos = game.server.registry.tryGet(Comps.Position, entity) orelse continue;
+                const col = game.server.registry.tryGet(Comps.Collider, entity) orelse continue;
+                tryRenderEntity(game, entity, model_name, pos, col, &anim_map, &entity_idx, &ins_idx, frustum);
+            }
         }
 
         // 为区块预留 entity 占位
@@ -350,6 +327,61 @@ pub fn drawUI(game: *Game) void {
     drawFrame(game, false);
 }
 
+fn tryRenderEntity(
+    game: *Game,
+    entity: ECS.Entity,
+    model_name: *const Comps.ModelName,
+    pos: *Comps.Position,
+    col: *const Comps.Collider,
+    anim_map: *const std.AutoHashMap(u32, i32),
+    entity_idx: *u32,
+    ins_idx: *u32,
+    frustum: Frustum,
+) void {
+    const now_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
+    const elapsed = @as(f32, @floatFromInt(@as(i64, @truncate(now_ns)) - game.last_snapshot_time_ns));
+    const alpha = @min(elapsed / 33_333_333.0, 1.0);
+    const render_pos = Vec3.lerp(pos.render_prev, pos.render_vec, alpha);
+    const half_w = col.width / 2;
+    const aabb_min = Vec3.new(render_pos.x - half_w, render_pos.y, render_pos.z - half_w);
+    const aabb_max = Vec3.new(render_pos.x + half_w, render_pos.y + col.height, render_pos.z + half_w);
+    if (!frustum.intersectsAABB(aabb_min, aabb_max)) return;
+    const bone_off = anim_map.get(@as(u32, @intCast(entity.index))) orelse -1;
+    var entity_transform = Mat4.fromTranslate(render_pos);
+    if (game.server.registry.tryGet(Comps.Facing, entity)) |facing| {
+        entity_transform = Mat4.mul(entity_transform, Mat4.fromRotationY(facing.yaw));
+    }
+    game.res_manager.entities_data[entity_idx.*] = EntityData{
+        .transform = entity_transform,
+        .bone_offset = bone_off,
+    };
+
+    const model = game.res_manager.getOrLoadModel(model_name.id);
+    for (model.nodes) |node| {
+        if (node.mesh) |mesh_idx| {
+            const mesh = model.meshes[mesh_idx];
+            for (mesh.primitives) |primitive| {
+                game.res_manager.instances_data[ins_idx.*] = .{
+                    .transform = node.matrix,
+                    .entity_idx = entity_idx.*,
+                    .bone_offset = bone_off,
+                };
+                game.res_manager.draw_batches[game.res_manager.draw_batch_count] = .{
+                    .vertex_buffer = primitive.vertex_buffer,
+                    .index_buffer = primitive.index_buffer,
+                    .index_count = primitive.index_count,
+                    .bind_group = primitive.material.bind_group,
+                    .instance_idx = ins_idx.*,
+                    .vertex_format = if (model.skeleton != null) .skinned_model else .static_model,
+                };
+                game.res_manager.draw_batch_count += 1;
+                ins_idx.* += 1;
+            }
+        }
+    }
+    entity_idx.* += 1;
+}
+
 const Wgpu = @import("imports.zig").Wgpu;
 
 const Vec3 = Algebra.Vec3;
@@ -364,5 +396,6 @@ const Algebra = @import("algebra.zig");
 const RendCTX = @import("rend_ctx.zig");
 const Game = @import("game.zig");
 const Comps = @import("components.zig").Components;
+const ECS = @import("zigecs");
 
 const TICK_DT = @import("block_world.zig").TICK_DT;

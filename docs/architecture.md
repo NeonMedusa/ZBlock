@@ -97,18 +97,34 @@ src/
 | MoveIntent/朝向/飞行 | 服务端 tick | 服务端 tick |
 | break/place | 服务端 tick | 服务端 tick |
 | 区块加载 | `updateChunks`（磁盘） | `updateChunks`（网络发送） |
-| 渲染 | 快照缓冲区 + 累计器插值 | 快照缓冲区 + 累计器插值 |
+| 渲染 | `lerp(render_prev, render_vec, time_alpha)`
+  主机：遍历 `render_snapshots`（避免 ECS view 迭代器与服务端线程竞态）
+  客机：ECS view 迭代（无服务端线程，安全）
+  相机：主机用 render_prev/render_vec + time_alpha，客机用 prev/vec + accumulator/TICK_DT | 同主机 |
 
 ### 快照与插值
 
 ```
 服务端 tick 结束 → publishSnapshot()
-  → snapshots[64] (mutex 保护, 含所有实体的位置/朝向)
+  → snapshots[64] (mutex 保护, 含 Entity + 位置/朝向)
   → 网络线程读 snapshots → sendState
-  → 主线程: pollServerSnapshot (主机) / clientTick state (客机)
-  → pushSnapshot() → snap_prev/snap_curr
-  → 渲染: lerp(snap_prev, snap_curr, accumulator/TICK_DT)
+  → 主线程:
+      主机: pollServerSnapshot()
+        → 复制到 render_snapshots 缓冲区
+        → 更新 ECS 的 render_prev/render_vec（按 entity 精确匹配）
+        → 记录 last_snapshot_time_ns
+      客机: clientReceivePackets()
+        → 复制到 render_snapshots 缓冲区
+        → 更新 prev/vec + render_prev/render_vec
+        → 记录 last_snapshot_time_ns
+  → 渲染:
+      实体: lerp(render_prev, render_vec, (now - last_snapshot_time_ns) / 33ms)
+      主机相机: lerp(render_prev, render_vec, (now - last_snapshot_time_ns) / 33ms)
+      客机相机: lerp(prev, vec, accumulator / TICK_DT)
 ```
+
+注意：`EntitySnapshot` 存储完整 `ECS.Entity{index, version}` 而非仅 `entity_idx`，
+确保精确匹配不被回收实体干扰。
 
 ### 动态区块加载/卸载
 

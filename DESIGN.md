@@ -72,29 +72,43 @@
 
 - **输入**：`collectPlayerInput` → `pushInput`（主机走队列，客机走 TCP → 网络线程 → 队列）
 - **处理**：服务端线程根据 `input.player_id` 找到对应实体，统一处理 MoveIntent/朝向/break/place/fly
-- **渲染**：都从快照缓冲区读数，用 `accumulator/TICK_DT` 做累计器插值
+- **渲染**：
+  - 主机实体：遍历 `render_snapshots`（避免 ECS view 迭代器竞态），`lerp(render_prev, render_vec, time_alpha)`
+  - 主机相机：同上
+  - 客机实体：ECS view 迭代（无服务端线程），同上
+  - 客机相机：`lerp(prev, vec, accumulator/TICK_DT)`
 - **区块**：`updateChunks` 遍历所有玩家，主机从磁盘加载/卸载，远程通过 `pending_chunks` 发送
 
 ### 快照与插值
 
 ```
 服务端 tick 结束 → publishSnapshot()
-  → snapshots[64] + snapshot_tick (mutex 保护)
-  → hostNetworkThread 读 snapshots 组包（不再直接从 ECS 读）
+  → snapshots[64] (mutex 保护, 含完整 ECS.Entity{index,version} + 位置/朝向)
+  → hostNetworkThread 读 snapshots 组包
   → sendState(tick_count, host_time, entities)
 
 主线程:
-  pollServerSnapshot(主机) / clientReceivePackets(客机, 每帧)
-  → pushInterpPos(pos, local_timestamp)
-  → 渲染: getInterpPos() → lerp 或 render.zig lerp(prev, vec, alpha)
+  主机: pollServerSnapshot()
+    → 复制到 render_snapshots 缓冲区
+    → 按 entity 精确匹配，更新 render_prev/render_vec
+  客机: clientReceivePackets()（每帧非阻塞）
+    → 复制到 render_snapshots 缓冲区
+    → 更新 prev/vec（客机相机用）+ render_prev/render_vec（实体渲染用）
+
+  实体渲染: lerp(render_prev, render_vec, (now - last_snapshot_time_ns) / 33ms)
+  主机相机: 同上
+  客机相机: lerp(prev, vec, accumulator / TICK_DT)
 ```
+
+注：`time_alpha = (now - last_snapshot_time_ns) / 33ms`，不受 tick 耗时抖动影响。
+环形缓冲区已移除，改为 2 位置插值（render_prev/render_vec）。
 
 ### 客机收包
 
 - `clientTick()` 30Hz 发输入
 - `clientReceivePackets()` 每帧非阻塞收包（独立于 30Hz tick）
 - 统一处理 tag=2（chunk）、tag=1（state）、tag=3（unload）
-- 所有实体（含远程）通过 `prev/vec` 做插值渲染
+- 所有实体通过 `render_prev/render_vec` 做时间戳插值渲染
 
 ---
 
