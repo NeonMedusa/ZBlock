@@ -58,6 +58,8 @@ pub const Server = struct {
     // 待发送给客机的区块更新（服务端线程填充，网络线程消费）
     pending_chunks: std.ArrayListUnmanaged(Vec3i) = .empty,
     pending_chunks_mutex: std.Io.Mutex = .init,
+    pending_block_updates: std.ArrayListUnmanaged(Network.BlockUpdate) = .empty,
+    pending_block_updates_mutex: std.Io.Mutex = .init,
     pending_unloads: std.ArrayListUnmanaged(Vec3i) = .empty,
     pending_unloads_mutex: std.Io.Mutex = .init,
 
@@ -83,6 +85,7 @@ pub const Server = struct {
     pub fn deinit(self: *Server) void {
         self.input_queue.deinit(self.allocator);
         self.pending_chunks.deinit(self.allocator);
+        self.pending_block_updates.deinit(self.allocator);
         self.pending_unloads.deinit(self.allocator);
         var it = self.player_chunks.valueIterator();
         while (it.next()) |list| list.deinit(self.allocator);
@@ -424,7 +427,18 @@ pub const Server = struct {
             }
         } else if (block_hit.hit) {
             self.block_world.setBlock(block_hit.block_pos, .fromName("air")) catch {};
-            self.enqueueChunkUpdate(block_hit.block_pos);
+            // 推入方块增量更新
+            {
+                const upd = Network.BlockUpdate{
+                    .x = block_hit.block_pos.x,
+                    .y = @as(u16, @intCast(block_hit.block_pos.y)),
+                    .z = block_hit.block_pos.z,
+                    .block_id = 0, // air
+                };
+                self.pending_block_updates_mutex.lockUncancelable(io);
+                self.pending_block_updates.append(self.allocator, upd) catch {};
+                self.pending_block_updates_mutex.unlock(io);
+            }
         }
     }
 
@@ -449,7 +463,18 @@ pub const Server = struct {
             break :blk if (fn_.z > 0) .south else .north;
         };
         self.block_world.setBlock(place_pos, BlockState{ .block_id = BlockId.fromInt(block_id), .facing = facing }) catch {};
-        self.enqueueChunkUpdate(place_pos);
+        // 推入方块增量更新
+        {
+            const upd = Network.BlockUpdate{
+                .x = place_pos.x,
+                .y = @as(u16, @intCast(place_pos.y)),
+                .z = place_pos.z,
+                .block_id = @as(u16, @intCast(block_id)),
+            };
+            self.pending_block_updates_mutex.lockUncancelable(io);
+            self.pending_block_updates.append(self.allocator, upd) catch {};
+            self.pending_block_updates_mutex.unlock(io);
+        }
     }
 
     fn updateEntities(self: *Server) !void {
@@ -544,8 +569,18 @@ pub const Server = struct {
             const prev_cx = @divFloor(prev_origin.x, CHUNK_WIDTH_I32);
             const prev_cz = @divFloor(prev_origin.z, CHUNK_WIDTH_I32);
 
-            // 无论主机还是客机，只要移动了就更新区块
-            if (pcx == prev_cx and pcz == prev_cz) continue;
+            // 远程玩家首次连接时强制加载（prev==vec 时会跳过，需要额外判断）
+            var is_new_remote = false;
+            if (player.id != self.player_id) {
+                const gop = try self.player_chunks.getOrPut(self.allocator, player.id);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .empty;
+                    is_new_remote = true;
+                }
+            }
+
+            // 没有移动又不是新玩家 → 跳过
+            if (pcx == prev_cx and pcz == prev_cz and !is_new_remote) continue;
 
             if (player.id == self.player_id) {
                 // 主机玩家：从磁盘加载/卸载
@@ -596,9 +631,7 @@ pub const Server = struct {
             } else {
                 // 远程玩家：增量发送新出现的区块 + 卸载已远离的区块
                 const pid = player.id;
-                const gop = try self.player_chunks.getOrPut(self.allocator, pid);
-                if (!gop.found_existing) gop.value_ptr.* = .empty;
-                const loaded = &gop.value_ptr.*;
+                const loaded = self.player_chunks.getPtr(pid) orelse continue;
 
                 const load_range: i32 = self.chunk_radius;
                 const lr_sq = load_range * load_range;

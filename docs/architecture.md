@@ -137,6 +137,13 @@ src/
   - 已远离的区块 → `enqueueChunkUnload`（网络线程发 `sendChunkUnload`）
 - 主机卸载前检查是否有其他玩家仍然需要该区块
 
+### 方块增量同步
+
+- 破坏/放置方块不再发送全量 chunk（tag=2），改为嵌入 state 包的 `block_updates[]`
+- 每条更新：`{x, y, z, block_id}`（12 字节），量级远小于全量 chunk
+- 客机 `clientReceivePackets` 处理 state 时一并执行 `block_world.setBlock`
+- 新玩家首次进入仍然走全量 chunk 加载（tag=2）；运行中的变更走增量
+
 ### 客机收包
 
 - `clientReceivePackets()` 每帧非阻塞调用（`poll(0)`）

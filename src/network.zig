@@ -1,7 +1,7 @@
 const winsock = @import("winsock.zig");
 // network.zig — 局域网联机网络模块（TCP，直接 posix socket）
 // 包格式：u32(tag + serial) | payload
-// tag=0: ClientInput, tag=1: ServerState
+// tag=0: ClientInput, tag=1: ServerState (含 block_updates[])
 
 const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
@@ -34,11 +34,20 @@ pub const EntitySnapshot = struct {
     facing_pitch: f32,
 };
 
+/// 方块增量更新（嵌入 ServerState，不消耗额外 tag）
+pub const BlockUpdate = struct {
+    x: i32,
+    y: u16,
+    z: i32,
+    block_id: u16,
+};
+
 pub const ServerState = struct {
     serial: u32,
     tick_count: u64, // 服务端 tick 序号（插值时间线用）
     host_time: i64,  // 主机发送时的单调时钟 ns（延迟测量用）
     entities: []const EntitySnapshot,
+    block_updates: []const BlockUpdate,
 };
 
 /// 设置 socket 接收超时（Windows 用 DWORD 毫秒，其他平台用 timeval）
@@ -111,7 +120,8 @@ pub fn recvInput(fd: winsock.socket_t, input: *ClientInput) bool {
 /// 发送 ServerState（阻塞）
 pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
     const tag: u32 = 1;
-    const payload_len = 8 + 8 + 8 + state.entities.len * @sizeOf(EntitySnapshot);
+    const bu_count_u32: u32 = @intCast(state.block_updates.len);
+    const payload_len = 8 + 8 + 8 + state.entities.len * @sizeOf(EntitySnapshot) + 4 + state.block_updates.len * @sizeOf(BlockUpdate);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.heap.page_allocator);
     buf.ensureTotalCapacity(std.heap.page_allocator, payload_len) catch {};
@@ -119,13 +129,18 @@ pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
     std.mem.writeInt(u32, buf.items[0..4], tag << 30 | (state.serial & 0x3FFFFFFF), .little);
     const count_u32: u32 = @intCast(state.entities.len);
     std.mem.writeInt(u32, buf.items[4..8], count_u32, .little);
-    // host_time（单调时钟 ns，用于延迟测量）
     std.mem.writeInt(i64, buf.items[8..16], state.host_time, .little);
     std.mem.writeInt(u64, buf.items[16..24], state.tick_count, .little);
     var offset: usize = 24;
     for (state.entities) |*e| {
         @memcpy(buf.items[offset..][0..@sizeOf(EntitySnapshot)], std.mem.asBytes(e));
         offset += @sizeOf(EntitySnapshot);
+    }
+    std.mem.writeInt(u32, buf.items[offset..][0..4], bu_count_u32, .little);
+    offset += 4;
+    for (state.block_updates) |*u| {
+        @memcpy(buf.items[offset..][0..@sizeOf(BlockUpdate)], std.mem.asBytes(u));
+        offset += @sizeOf(BlockUpdate);
     }
     _ = winsock.@"send"(fd, buf.items.ptr, @intCast(buf.items.len), 0);
 }
@@ -218,13 +233,25 @@ pub fn recvState(fd: winsock.socket_t, allocator: std.mem.Allocator, state: *Ser
     const count = std.mem.readInt(u32, header[4..8], .little);
     state.host_time = std.mem.readInt(i64, header[8..16], .little);
     state.tick_count = std.mem.readInt(u64, header[16..24], .little);
-    if (count > 64) return false; // sanity
+    if (count > 64) return false;
     const snapshots = allocator.alloc(EntitySnapshot, count) catch return false;
     if (count > 0) {
         const snap_bytes = recvAll(fd, std.mem.sliceAsBytes(snapshots));
         if (snap_bytes == 0) return false;
     }
     state.entities = snapshots;
+
+    // 读取方块增量更新
+    var bu_header: [4]u8 = undefined;
+    if (recvAll(fd, &bu_header) < 4) return false;
+    const bu_count = std.mem.readInt(u32, &bu_header, .little);
+    if (bu_count > 256) return false;
+    const updates = allocator.alloc(BlockUpdate, bu_count) catch return false;
+    if (bu_count > 0) {
+        const bu_bytes = recvAll(fd, std.mem.sliceAsBytes(updates));
+        if (bu_bytes == 0) return false;
+    }
+    state.block_updates = updates;
     return true;
 }
 

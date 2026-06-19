@@ -242,6 +242,34 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 ### 实现思路
 
 快照不需要复制整个地图。可以：
+
+---
+
+## 待办：多客机支持
+
+当前网络实现只支持一个客机（单 `client_fd` + `remote_player`）。
+
+### 需要改的
+
+- `hostNetworkThread` 改为 `select()` 轮询 `listen_fd` + 多个 `client_fd`
+- 替换 `client_fd`/`remote_player` 为 `clients: ArrayList(ClientInfo)`
+  ```zig
+  pub const ClientInfo = struct {
+      fd: socket_t,
+      entity: ECS.Entity,
+      player_id: u32,
+      disconnect: bool,
+  };
+  ```
+- 每客机独立的 `pending_chunks` 队列（各自位置不同）
+- `player_id` 从 0（主机）开始递增分配
+- 断线标记 per-client（非单个 `client_disconnected`）
+
+### 不做的事
+
+- 不改区块增量同步方案（正交）
+- 不改 UDP（仍用 TCP）
+- 玩家数量上限暂定 8 人
 - 记录所有在 Boss 战期间被修改的方块坐标 + 旧方块 ID
 - 战斗结束时逐格恢复
 

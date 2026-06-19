@@ -974,7 +974,21 @@ fn hostNetworkThread(self: *Game) void {
             // state 包后发，排在队列末尾，客机读到的是最新的
             state_serial += 1;
             const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-            Network.sendState(cfd, &.{ .serial = state_serial, .tick_count = snap_tick, .host_time = now_ns, .entities = snapshots[0..count] });
+            {
+                // 取出待发送的方块更新，嵌入 state 包
+                self.server.pending_block_updates_mutex.lockUncancelable(io);
+                var updates = self.server.pending_block_updates;
+                self.server.pending_block_updates = .empty;
+                self.server.pending_block_updates_mutex.unlock(io);
+                Network.sendState(cfd, &.{
+                    .serial = state_serial,
+                    .tick_count = snap_tick,
+                    .host_time = now_ns,
+                    .entities = snapshots[0..count],
+                    .block_updates = updates.items,
+                });
+                updates.deinit(self.server.allocator);
+            }
         }
         // 客机断线，关闭 cfd（defer 会执行），准备 accept 下一个
         self.client_connected.store(false, .release);
@@ -1119,7 +1133,10 @@ fn clientReceivePackets(self: *Game) void {
     }
 
     if (!state_initialized) return;
-    defer self.allocator.free(state.entities);
+    defer {
+        self.allocator.free(state.entities);
+        if (state.block_updates.len > 0) self.allocator.free(state.block_updates);
+    }
 
     // 复制到渲染快照缓冲区
     self.render_snapshot_count = @as(u32, @intCast(state.entities.len));
@@ -1134,6 +1151,12 @@ fn clientReceivePackets(self: *Game) void {
         self.latency_max_ns = @max(self.latency_max_ns, latency_ns);
         self.latency_sum_ns += latency_ns;
         self.latency_samples += 1;
+    }
+
+    // 处理方块增量更新
+    for (state.block_updates) |upd| {
+        const block_state = if (upd.block_id == 0) BlockState.fromName("air") else BlockState.init(BlockId.fromInt(upd.block_id));
+        self.server.block_world.setBlock(Vec3i.new(upd.x, @as(i32, @intCast(upd.y)), upd.z), block_state) catch |err| Log.err("setBlock error: {}", .{err});
     }
 
     for (state.entities, 0..) |snap, i| {
@@ -1503,6 +1526,7 @@ const BlockWorld = @import("block_world.zig");
 const TICK_DT = BlockWorld.TICK_DT;
 const BlockRegistry = @import("block_registry.zig");
 const BlockState = BlockRegistry.BlockState;
+const BlockId = BlockRegistry.BlockId;
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
