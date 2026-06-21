@@ -24,19 +24,16 @@ const TICK_DT: f32 = 1.0 / 30.0;
 
 pub const PlayerInput = struct {
     player_id: u32 = 0,
-    move_dir: Vec3 = Vec3.zero,
-    jump: bool = false,
-    sprint_held: bool = false,
-    sneak: bool = false,
-    facing_dir: Vec3 = Vec3.new(0, 0, -1),
+    pos: Vec3 = Vec3.zero,
     cam_yaw: f32 = 0,
     cam_pitch: f32 = 0,
     break_block: bool = false,
     place_block: bool = false,
     wants_fly: bool = false,
-    attack: bool = false,
     hotbar_slot: u32 = 0,
     place_block_id: u32 = 0,
+    target: Vec3i = Vec3i.zero,
+    place_face: u8 = 0,
 };
 
 pub const Server = struct {
@@ -56,7 +53,7 @@ pub const Server = struct {
     server_thread: ?std.Thread = null,
 
     // 待发送给客机的区块更新（服务端线程填充，网络线程消费）
-    pending_chunks: std.ArrayListUnmanaged(Vec3i) = .empty,
+    pending_chunks: std.ArrayListUnmanaged(struct { origin: Vec3i, player_id: u32 }) = .empty,
     pending_chunks_mutex: std.Io.Mutex = .init,
     pending_block_updates: std.ArrayListUnmanaged(Network.BlockUpdate) = .empty,
     pending_block_updates_mutex: std.Io.Mutex = .init,
@@ -153,7 +150,7 @@ pub const Server = struct {
 
     /// 处理单个玩家的输入（更新 MoveIntent/朝向/动作等，不跑物理）
     /// 投递区块更新（服务端线程调用，网络线程消费）
-    pub fn enqueueChunkUpdate(self: *Server, block_pos: Vec3i) void {
+    pub fn enqueueChunkUpdate(self: *Server, block_pos: Vec3i, player_id: u32) void {
         const origin = Vec3i.new(
             @divFloor(block_pos.x, 16) * 16,
             0,
@@ -162,9 +159,9 @@ pub const Server = struct {
         self.pending_chunks_mutex.lockUncancelable(io);
         defer self.pending_chunks_mutex.unlock(io);
         for (self.pending_chunks.items) |o| {
-            if (o.x == origin.x and o.z == origin.z) return;
+            if (o.origin.x == origin.x and o.origin.z == origin.z and o.player_id == player_id) return;
         }
-        self.pending_chunks.append(self.allocator, origin) catch {};
+        self.pending_chunks.append(self.allocator, .{ .origin = origin, .player_id = player_id }) catch {};
     }
 
     /// 投递区块卸载（服务端线程调用，网络线程消费）
@@ -197,69 +194,37 @@ pub const Server = struct {
             }
             const entity = target_entity orelse continue;
 
-            if (self.registry.tryGet(Comps.MoveIntent, entity)) |intent| {
-                intent.direction = input.move_dir;
-                // 垂直移动：飞行或游泳时用 jump/sneak 控制上下
-                if (input.jump) intent.direction.y = 1.0;
-                if (input.sneak) intent.direction.y = -1.0;
-                if (input.jump) intent.jump = true;
-
-                const has_movement = @sqrt(input.move_dir.x * input.move_dir.x + input.move_dir.z * input.move_dir.z) > 0.01;
-                if (input.player_id == 0) {
-                    if (has_movement) {
-                        intent.sprint = self.sprint_toggled;
-                    } else {
-                        intent.sprint = false;
-                        self.sprint_toggled = false;
-                    }
-                } else {
-                    if (has_movement) {
-                        intent.sprint = input.sprint_held;
-                    } else {
-                        intent.sprint = false;
-                    }
+            if (input.player_id != self.player_id) {
+                // ── 远程客机玩家：直接应用位置/速度，不跑物理 ──
+                if (self.registry.tryGet(Comps.Position, entity)) |pos| {
+                    pos.vec = input.pos;
                 }
-
-                if (input.sneak) {
-                    intent.sneak = true;
-                    if (!self.registry.has(Comps.Flying, entity)) intent.sprint = false;
-                } else {
-                    intent.sneak = false;
-                }
-            }
-
-            if (self.registry.tryGet(Comps.Facing, entity)) |facing| {
-                if (input.player_id != 0) {
+                if (self.registry.tryGet(Comps.Facing, entity)) |facing| {
                     facing.yaw = -input.cam_yaw + std.math.pi / 2.0;
                     facing.pitch = input.cam_pitch;
                 }
-            }
-
-            if (input.wants_fly) {
-                if (self.registry.has(Comps.Flying, entity)) {
-                    _ = self.registry.remove(Comps.Flying, entity);
-                } else {
-                    self.registry.add(entity, Comps.Flying{});
+            } else {
+                // ── 主机玩家：MoveIntent 已由主线程 produceMoveIntent 写入，
+                // 服务端只处理朝向和飞行切换 ──
+                if (self.registry.tryGet(Comps.Facing, entity)) |facing| {
+                    facing.yaw = -input.cam_yaw + std.math.pi / 2.0;
+                    facing.pitch = input.cam_pitch;
+                }
+                if (input.wants_fly) {
+                    if (self.registry.has(Comps.Flying, entity)) {
+                        _ = self.registry.remove(Comps.Flying, entity);
+                    } else {
+                        self.registry.add(entity, Comps.Flying{});
+                    }
                 }
             }
 
-            // 所有玩家的 break/place 都在服务端线程处理
-            if (input.break_block or input.place_block) {
-                if (self.registry.tryGet(Comps.Position, entity)) |pos| {
-                    const eye = pos.vec.add(Vec3.new(0, 1.6, 0));
-                    const front = Vec3.new(
-                        @cos(input.cam_yaw) * @cos(input.cam_pitch),
-                        @sin(input.cam_pitch),
-                        @sin(input.cam_yaw) * @cos(input.cam_pitch),
-                    ).norm();
-                    const ray = Raycast.Ray{ .origin = eye, .direction = front };
-                    if (input.break_block) self.handleActionBreak(ray);
-                    if (input.place_block) self.handleActionPlaceSlot(ray, input.place_block_id);
-                }
-            }
+            // 客机直接提交目标坐标，服务器不做射线检测
+            if (input.break_block) self.handleActionBreak(input.player_id, input.target.x, input.target.y, input.target.z);
+            if (input.place_block) self.handleActionPlaceSlot(input.place_block_id, input.player_id, input.target.x, input.target.y, input.target.z, input.place_face);
         }
 
-        // 物理（只跑一次，与输入数量无关）
+        // 物理（只跑一次，与输入数量无关）——仅对主机玩家和 AI 有效
         self.block_world.updatePhysics(&self.registry, TICK_DT);
 
         // AI 追踪玩家：每个 AI 追踪最近的玩家
@@ -412,69 +377,37 @@ pub const Server = struct {
         }
     }
 
-    fn handleActionBreak(self: *Server, ray: Raycast.Ray) void {
-        const entity_hit = Raycast.raycastEntities(&self.registry, &self.block_world.bvh, ray, 8.0);
-        const block_hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
-
-        if (entity_hit.hit and (!block_hit.hit or entity_hit.distance < block_hit.distance)) {
-            if (self.registry.tryGet(Comps.Player, entity_hit.entity)) |p| {
-                if (p.id == self.player_id) return; // 不打自己
-            }
-            if (self.registry.tryGet(Comps.Health, entity_hit.entity)) |health| {
-                health.current -= 10;
-                if (health.current <= 0) {
-                    if (self.registry.tryGet(Comps.AIAgent, entity_hit.entity)) |_| {
-                        // 怪物死亡掉落暂不处理（需要 Inventory 访问）
-                    }
-                    self.block_world.cleanupEntity(&self.registry, entity_hit.entity);
-                    self.registry.destroy(entity_hit.entity);
-                }
-            }
-        } else if (block_hit.hit) {
-            self.block_world.setBlock(block_hit.block_pos, .fromName("air")) catch {};
-            // 推入方块增量更新
-            {
-                const upd = Network.BlockUpdate{
-                    .x = block_hit.block_pos.x,
-                    .y = @as(u16, @intCast(block_hit.block_pos.y)),
-                    .z = block_hit.block_pos.z,
-                    .block_id = 0, // air
-                };
-                self.pending_block_updates_mutex.lockUncancelable(io);
-                self.pending_block_updates.append(self.allocator, upd) catch {};
-                self.pending_block_updates_mutex.unlock(io);
-            }
-        }
-    }
-
-    fn handleActionPlaceSlot(self: *Server, ray: Raycast.Ray, block_id: u32) void {
+    fn handleActionPlaceSlot(self: *Server, block_id: u32, origin_player: u32, target_x: i32, target_y: i32, target_z: i32, place_face: u8) void {
         if (block_id == 0) return;
-        const hit = Raycast.raycastWorld(&self.block_world, ray, 8.0);
-        if (!hit.hit) return;
-        const place_pos = Vec3i.new(
-            hit.block_pos.x + hit.face_normal.x,
-            hit.block_pos.y + hit.face_normal.y,
-            hit.block_pos.z + hit.face_normal.z,
-        );
-        if (self.block_world.getBlockAt(Vec3.new(
-            @as(f32, @floatFromInt(place_pos.x)) + 0.5,
-            @as(f32, @floatFromInt(place_pos.y)) + 0.5,
-            @as(f32, @floatFromInt(place_pos.z)) + 0.5,
-        )).prototype().is_solid) return;
-        const facing: Direction = blk: {
-            const fn_ = hit.face_normal;
-            if (fn_.y != 0) break :blk if (fn_.y > 0) .up else .down;
-            if (fn_.x != 0) break :blk if (fn_.x > 0) .west else .east;
-            break :blk if (fn_.z > 0) .south else .north;
-        };
+        const place_pos = Vec3i.new(target_x, target_y, target_z);
+        const facing: Direction = @enumFromInt(place_face);
         self.block_world.setBlock(place_pos, BlockState{ .block_id = BlockId.fromInt(block_id), .facing = facing }) catch {};
-        // 推入方块增量更新
         {
             const upd = Network.BlockUpdate{
                 .x = place_pos.x,
-                .y = @as(u16, @intCast(place_pos.y)),
+                .y = place_pos.y,
                 .z = place_pos.z,
                 .block_id = @as(u16, @intCast(block_id)),
+                .facing = place_face,
+                .origin_player_id = origin_player,
+            };
+            self.pending_block_updates_mutex.lockUncancelable(io);
+            self.pending_block_updates.append(self.allocator, upd) catch {};
+            self.pending_block_updates_mutex.unlock(io);
+        }
+    }
+
+    fn handleActionBreak(self: *Server, origin_player: u32, target_x: i32, target_y: i32, target_z: i32) void {
+        const break_pos = Vec3i.new(target_x, target_y, target_z);
+        self.block_world.setBlock(break_pos, .fromName("air")) catch {};
+        {
+            const upd = Network.BlockUpdate{
+                .x = break_pos.x,
+                .y = break_pos.y,
+                .z = break_pos.z,
+                .block_id = 0,
+                .facing = 0,
+                .origin_player_id = origin_player,
             };
             self.pending_block_updates_mutex.lockUncancelable(io);
             self.pending_block_updates.append(self.allocator, upd) catch {};
@@ -659,7 +592,7 @@ pub const Server = struct {
                             }
                             if (already) continue;
                             try loaded.append(self.allocator, origin);
-                            self.enqueueChunkUpdate(origin);
+                            self.enqueueChunkUpdate(origin, pid);
                         } else {
                             self.block_world.loadChunk(origin) catch {};
                         }

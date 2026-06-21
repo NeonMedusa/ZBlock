@@ -7,7 +7,7 @@ pub fn build(b: *std.Build) void {
 
     // 创建主程序
     const exe = b.addExecutable(.{
-        .name = "ZigGame",
+        .name = "ZBlock",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,

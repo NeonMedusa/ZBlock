@@ -310,9 +310,9 @@ pub fn buildChunkMeshCPU(
                         const world_pos = rot.rotate(local_pos).add(center);
 
                         const cv = ChunkVertex{
-                            .bx = @truncate(@as(u32, @intFromFloat(world_pos.x - @as(f32, @floatFromInt(chunk_origin.x))))),
-                            .by = @truncate(@as(u32, @intFromFloat(world_pos.y))),
-                            .bz = @truncate(@as(u32, @intFromFloat(world_pos.z - @as(f32, @floatFromInt(chunk_origin.z))))),
+                            .bx = @truncate(@as(u32, @intFromFloat(world_pos.x - @as(f32, @floatFromInt(chunk_origin.x)) + 0.01))),
+                            .by = @truncate(@as(u32, @intFromFloat(world_pos.y + 0.01))),
+                            .bz = @truncate(@as(u32, @intFromFloat(world_pos.z - @as(f32, @floatFromInt(chunk_origin.z)) + 0.01))),
                             .face_dir = @truncate(@as(u32, @intFromEnum(local_dir))),
                             .world_dir = @truncate(@as(u32, @intFromEnum(world_dir))),
                             .corner = @truncate(ci),

@@ -1,28 +1,26 @@
 const winsock = @import("winsock.zig");
 // network.zig — 局域网联机网络模块（TCP，直接 posix socket）
 // 包格式：u32(tag + serial) | payload
-// tag=0: ClientInput, tag=1: ServerState (含 block_updates[])
+// tag=0: ClientInput（客机位置+方块操作）, tag=1: ServerState（快照+block_updates[]）
 
 const std = @import("std");
 const Vec3 = @import("algebra.zig").Vec3;
+const Vec3i = @import("algebra.zig").Vec3i;
 const ECS = @import("zigecs");
 
 pub const SERVER_PORT: u16 = 9123;
 
-/// 客户端 → 服务端：输入意图（含动作请求）
+/// 客户端 → 服务端：客机位置/朝向/方块操作（不含移动意图，物理在客机本地跑）
 pub const ClientInput = struct {
     serial: u32,
-    move_dir: Vec3,
-    jump: bool,
-    sprint: bool,
-    sneak: bool,
+    pos: Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
     break_block: bool,
     place_block: bool,
-    attack: bool,
-    hotbar_slot: u32, // 客机当前选中的热栏槽位
-    wants_fly: bool,
+    hotbar_slot: u32,
+    target: Vec3i = Vec3i.zero,
+    place_face: u8 = 0,
 };
 
 /// 服务端 → 客户端：实体状态快照
@@ -37,9 +35,11 @@ pub const EntitySnapshot = struct {
 /// 方块增量更新（嵌入 ServerState，不消耗额外 tag）
 pub const BlockUpdate = struct {
     x: i32,
-    y: u16,
+    y: i32,
     z: i32,
     block_id: u16,
+    facing: u8,
+    origin_player_id: u32, // 发起者，网络线程据此跳过发给发起者
 };
 
 pub const ServerState = struct {
@@ -172,6 +172,17 @@ pub fn sendChunk(fd: winsock.socket_t, serial: u32, origin_x: i32, origin_z: i32
     @memcpy(buf.items[off..][0..index_data.len], index_data);
 
     _ = winsock.@"send"(fd, buf.items.ptr, @intCast(buf.items.len), 0);
+}
+
+/// 发送 welcome（无 tag，裸 4 字节）：分配 player_id 给新连接的客机
+pub fn sendWelcome(fd: winsock.socket_t, player_id: u32) void {
+    _ = winsock.@"send"(fd, @ptrCast(&player_id), 4, 0);
+}
+
+pub fn recvWelcome(fd: winsock.socket_t) u32 {
+    var pid: u32 = undefined;
+    _ = recvAll(fd, std.mem.asBytes(&pid));
+    return pid;
 }
 
 /// 发送区块卸载指令（tag=3）

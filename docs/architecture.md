@@ -60,47 +60,46 @@ src/
 ├── winsock.zig            — Windows 原生 socket 封装（ws2_32 extern）
 ```
 
-## E/S 彻底分离（2026-06-17）
+## 分工总览
 
-### 架构概述
-
-服务端逻辑（物理、AI、动画）在独立线程运行，与渲染/输入完全分离。
-所有玩家（主机和远程客机）的输入通过统一的 `pushInput` 队列进入服务端线程。
+| 谁 | 负责什么 |
+|----|---------|
+| **客机** | 自己 WASD + 本地 `updatePhysics` → 算出自己的位置 |
+| **客机** | 自己射线检测 → 算出 break/place 的目标坐标 |
+| **客机** | 方块操作本地先执行（零延迟手感） |
+| **客机** | 每 tick 把自己的位置 + 目标坐标发给主机 |
+| | |
+| **主机** | 收到客机的位置 → 直接写进 ECS（不跑物理） |
+| **主机** | 收到客机的目标坐标 → 执行 break/place 并广播给其他客机 |
+| **主机** | 跑 AI 实体的寻路和物理 |
+| **主机** | 跑自己的物理（`produceMoveIntent` → `updatePhysics`） |
+| **主机** | `publishSnapshot` → 所有实体的位置发给所有客机 |
 
 ```
-主线程:
-  collectPlayerInput(player_id) → pushInput(队列)
-  tick(): clientReceivePackets() (客机) / host 逻辑
-  渲染: getSnapPos() → lerp(snap_prev, snap_curr, accumulator/TICK_DT)
-
-服务端线程(独立线程, 固定 30Hz):
-  1. Sleep 到下一个 tick 截止时间
-  2. drain 所有输入
-  3. 处理每个输入 → MoveIntent/朝向/break/place/fly
-  4. updatePhysics (30Hz 固定)
-  5. updateAI → updateEntities → updateChunks
-  6. publishSnapshot → 快照缓冲区(mutex)
-
-网络线程(仅 host 模式):
-  accept → 创建远程玩家实体
-  循环: recvInput → pushInput(player_id=1)
-        读 server.snapshots → sendState
-        读 server.pending_chunks → sendChunk
-        读 server.pending_unloads → sendChunkUnload
+客机                        主机
+  │                         │
+  ├─WASD→MoveIntent         │
+  ├─updatePhysics(本地)      │
+  ├─setBlock(本地先改)       │
+  │                         │
+  └─TCP(pos+target)───────→ ├─pos→ECS(不跑物理)
+                            ├─target→setBlock→广播
+                            ├─AI寻路/物理
+                            ├─produceMoveIntent→updatePhysics(自己)
+                            └─publishSnapshot→所有客机
 ```
 
-### 玩家平等
+### 玩家分工
 
 | 操作 | 主机 | 远程客机 |
 |------|------|---------|
-| 输入来源 | `collectPlayerInput → pushInput` | TCP → 网络线程 → `pushInput` |
-| MoveIntent/朝向/飞行 | 服务端 tick | 服务端 tick |
-| break/place | 服务端 tick | 服务端 tick |
+| 移动解算 | 服务端 `updatePhysics` | 客机本地 `updatePhysics` |
+| 输入提交 | `collectHostActions` → 队列 | `clientTick` → TCP 位置/速度 |
+| break/place | 客机提交目标坐标，服务端直接应用并广播 | 同主机 |
 | 区块加载 | `updateChunks`（磁盘） | `updateChunks`（网络发送） |
-| 渲染 | `lerp(render_prev, render_vec, time_alpha)`
-  主机：遍历 `render_snapshots`（避免 ECS view 迭代器与服务端线程竞态）
-  客机：ECS view 迭代（无服务端线程，安全）
-  相机：主机用 render_prev/render_vec + time_alpha，客机用 prev/vec + accumulator/TICK_DT | 同主机 |
+| 渲染实体 | 主机遍历 `render_snapshots`；客机 ECS view（无服务端线程）
+  两者都用 3 槽环缓冲，`render_time = now - 33ms` | 同主机 |
+| 渲染相机 | 3 槽环缓冲 | `lerp(pos.prev, pos.vec, accumulator/TICK_DT)` |
 
 ### 快照与插值
 
@@ -116,9 +115,10 @@ src/
         → 复制到 render_snapshots 缓冲区
         → 推入实体 3 槽环形缓冲区
   → 渲染（主机/客机统一）:
-      实体 & 相机: 搜索 3 槽环缓冲，render_time = now - 33ms
+      实体: 搜索 3 槽环缓冲，render_time = now - 33ms
         → 找到 bracket → lerp(pos[older], pos[newer], alpha)
         → 缓冲区不足（count < 2）→ 返回最新原始位置
+      相机（主机/客机统一）: 搜索 3 槽环缓冲
 ```
 
 注意：`EntitySnapshot` 存储完整 `ECS.Entity{index, version}` 而非仅 `entity_idx`，
@@ -278,19 +278,28 @@ packed_pos (32 bits):
 
 ## 固定 tick 游戏循环
 
-物理、AI、动画以固定速率运行（30 tick/s），与渲染帧率无关。
+物理以 30 tick/s 固定速率运行，与渲染帧率无关。
 
 ```
-frame_timer (Timestamp.now) → dt → accumulator
-while accumulator >= TICK_DT:
-    tick_count += 1
-    physics / AI / animation     ← 固定 TICK_DT 步长
+主机:
+  accumulator += dt
+  while accumulator >= TICK_DT:
+    collectHostActions() → pushInput(服务端队列)
     accumulator -= TICK_DT
-render(alpha = accumulator / TICK_DT)  ← 插值渲染
+  render()  ← 插值渲染
 
-客机：
-  clientTick() 30Hz 发输入
-  clientReceivePackets() 每帧收包（独立于 30Hz tick）
+服务端线程（30Hz 独立线程）:
+  Sleep 到下一个 tick 截止时间
+  处理输入队列 → 朝向/动作
+  updatePhysics（主机玩家+AI）
+  publishSnapshot()
+
+客机:
+  clientTick() 30Hz:
+    produceMoveIntent() → updatePhysics（本地物理）
+    → sendInput(TCP, pos/vel/cam/动作)
+  clientReceivePackets() 每帧收包
+  render()  ← 实体用环缓冲，相机 lerp(prev, vec, accumulator/TICK_DT)
 ```
 
 - `tick_count: u64` — 逻辑 tick 计数，1 tick = 1/30s

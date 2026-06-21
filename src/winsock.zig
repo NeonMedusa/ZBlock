@@ -45,6 +45,22 @@ pub extern "ws2_32" fn select(nfds: i32, readfds: ?*fd_set, writefds: ?*fd_set, 
 pub extern "ws2_32" fn WSAStartup(wVersionRequested: u16, lpWSAData: *anyopaque) callconv(.c) i32;
 pub extern "ws2_32" fn WSACleanup() callconv(.c) i32;
 
+pub fn FD_SET(fd: socket_t, set: *fd_set) void {
+    const idx = set.fd_count;
+    if (idx < FD_SETSIZE) {
+        set.fd_array[idx] = @as(usize, @intCast(fd));
+        set.fd_count = idx + 1;
+    }
+}
+
+pub fn FD_ISSET(fd: socket_t, set: *fd_set) bool {
+    const ufd = @as(usize, @intCast(fd));
+    for (set.fd_array[0..set.fd_count]) |f| {
+        if (f == ufd) return true;
+    }
+    return false;
+}
+
 /// 初始化 Winsock（在进程启动时调用一次）
 pub fn startup() void {
     var data: [512]u8 = undefined;

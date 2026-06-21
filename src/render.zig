@@ -344,7 +344,7 @@ fn tryRenderEntity(
     var render_pos: Vec3 = undefined;
     {
         var found = false;
-        if (pos.render_buf_count >= 2) {
+        if (pos.render_buf_count >= 2 and pos.render_buf_count <= 3) {
             const newest = (pos.render_buf_head + 2) % 3;
             var ri: u32 = 0;
             while (ri < pos.render_buf_count - 1) {

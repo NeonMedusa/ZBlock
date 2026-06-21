@@ -20,7 +20,7 @@ pub fn update(_: *@This(), game: *Game) void {
     //                 相当于一个"光标"，每放一个 widget 就会向下移动
     //                 这里从窗口垂直居中偏上 20px 的位置开始
     ui.cursor_col_x = ui.centerX(game.window.width, 240);
-    ui.cursor_y = game.window.height / 2 - 56 - 20;
+    ui.cursor_y = game.window.height / 2 - 148;
 
     // ── 3. 放置两个按钮 ──
     //

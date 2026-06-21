@@ -259,9 +259,8 @@ game loop:
   while (accumulator >= TICK_DT)
     produceMoveIntent()
     block_world.updatePhysics()
-    // 动画更新（ECS 驱动，根据 AnimationState + ModelName 遍历实体）
-    animation_system.update(registry, res_manager, dt)
     updateEntities()
+    // 动画更新已移至主线程 pollServerSnapshot（避免与服务端线程竞态）
     accumulator -= TICK_DT
 
   // 渲染（变帧率）

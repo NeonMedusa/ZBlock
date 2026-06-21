@@ -66,15 +66,13 @@
         读 server.pending_unloads → sendChunkUnload
 ```
 
-### 玩家平等性
+### 玩家移动分工
 
-主机玩家和远程客机的输入路径完全统一：
-
-- **输入**：`collectPlayerInput` → `pushInput`（主机走队列，客机走 TCP → 网络线程 → 队列）
-- **处理**：服务端线程根据 `input.player_id` 找到对应实体，统一处理 MoveIntent/朝向/break/place/fly
-- **渲染**：3 槽 per-entity 环形缓冲区，`render_time = now - 33ms`，主机/客机/相机统一
-- **动画**：`allocBoneSlot` 只由主线程调用（initGame / pollServerSnapshot / clientReceivePackets），服务端/网络线程不分配
-- **区块**：`updateChunks` 遍历所有玩家，主机从磁盘加载/卸载，远程通过 `pending_chunks` 发送
+- **客机玩家**：`produceMoveIntent` → 本地 `updatePhysics` → 每 tick 提交位置给服务器
+- **主机玩家**：`produceMoveIntent` → 服务端 `updatePhysics`，不经过网络
+- **服务端**：远程客机直接应用提交的位置（不跑物理），AI 实体继续跑物理和寻路
+- **动作**（break/place/fly/camera）：主机和客机都提交目标坐标，服务端执行并广播 block_update
+- **输入队列**：仅用于主机玩家的动作，移动字段已移除
 
 ### 快照与插值
 
@@ -103,10 +101,10 @@
 
 ### 客机收包
 
-- `clientTick()` 30Hz 发输入
-- `clientReceivePackets()` 每帧非阻塞收包（独立于 30Hz tick）
+- `clientTick()` 30Hz 发位置/速度（物理在本地跑）
+- `clientReceivePackets()` 每帧非阻塞收包
 - 统一处理 tag=2（chunk）、tag=1（state）、tag=3（unload）
-- 所有实体通过 `render_prev/render_vec` 做时间戳插值渲染
+- 所有实体通过 3 槽环缓冲做插值渲染
 
 ---
 
@@ -247,33 +245,7 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 
 ## 待办：多客机支持
 
-当前网络实现只支持一个客机（单 `client_fd` + `remote_player`）。
-
-### 需要改的
-
-- `hostNetworkThread` 改为 `select()` 轮询 `listen_fd` + 多个 `client_fd`
-- 替换 `client_fd`/`remote_player` 为 `clients: ArrayList(ClientInfo)`
-  ```zig
-  pub const ClientInfo = struct {
-      fd: socket_t,
-      entity: ECS.Entity,
-      player_id: u32,
-      disconnect: bool,
-  };
-  ```
-- 每客机独立的 `pending_chunks` 队列（各自位置不同）
-- `player_id` 从 0（主机）开始递增分配
-- 断线标记 per-client（非单个 `client_disconnected`）
-
-### 不做的事
-
-- 不改区块增量同步方案（正交）
-- 不改 UDP（仍用 TCP）
-- 玩家数量上限暂定 8 人
-- 记录所有在 Boss 战期间被修改的方块坐标 + 旧方块 ID
-- 战斗结束时逐格恢复
-
-这样快照体积小、速度快。
+内容已合并到上方网络协议演进方向阶段二中，此处不再重复。
 
 ---
 
@@ -382,10 +354,91 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 
 ### 网络协议演进方向
 
-1. **当前**：TCP，全量状态每 tick 发送（30Hz）
-2. **短期**：增加 delta 压缩（只发送变化的字段）
-3. **中期**：迁移到 UDP，序列号 + ACK，支持丢包重传
-4. **长期**：状态同步 + 事件帧双通道（可靠通道发状态，不可靠通道发位置更新）
+#### 阶段一（当前）—— TCP 全量同步
+- 每 tick 发送所有实体的完整 `EntitySnapshot`（位置/朝向）
+- 区块加载全量 chunk（`sendChunk`）
+- 方块变更嵌入 state 包（`block_updates[]`）
+- 单 socket，单客户端
+
+#### 阶段二——增量同步 + 多客户端
+- 实体位置只发变化的（entity_id + delta），而非全快照
+- 多客户端：`select()` 轮询多个 `client_fd`
+  - `hostNetworkThread` 替换单 `client_fd`/`remote_player` 为 `clients: ArrayList(ClientInfo)`
+    ```zig
+    pub const ClientInfo = struct {
+        fd: socket_t,
+        entity: ECS.Entity,
+        player_id: u32,
+        disconnect: bool,
+    };
+    ```
+  - 断线标记 per-client（非单个 `client_disconnected`）
+- 每客户端独立的 `pending_chunks` 队列（各自位置不同）
+- 玩家 ID 从 0（主机）递增分配，上限 8 人
+- 不改 UDP（仍用 TCP），玩家数量上限暂定 8 人
+
+#### 阶段三——UDP 迁移
+- Laminar / enet 可靠 UDP，分离可靠/不可靠通道
+- 状态同步走不可靠通道（丢包等下帧覆盖）
+- 方块操作、权限验证走可靠通道
+- 序列号 + ACK + 重传
+
+#### 阶段四——客户端预测 + 服务端仲裁（终极形态）
+
+**架构分层：**
+
+逻辑层（保证规则正确）：
+```
+权威服务器
+  ↓
+输入保持（防丢包导致走走停停）
+  ↓
+客户端预测（本地立即模拟，零延迟手感）
+  ↓
+服务端分级校正 + 输入重放
+  ↓
+快照广播
+  ↓
+延迟补偿（Server Rewind，命中判定公平）
+  ↓
+可靠事件（重要消息不丢）
+  ↓
+兴趣管理（按距离过滤实体，省带宽）
+```
+
+表现层（保证视觉稳定）：
+```
+小数Tick连续采样
+  ↓
+动态插值缓冲（根据网络状况调整）
+  ↓
+速度衰减外推（缺包时不停顿）
+  ↓
+平滑追随目标（校正时不突兀）
+```
+
+**客户端流程：**
+1. 输入 → 本地立即预测（零延迟）
+2. 同时将输入发给服务器
+3. 服务器权威运算 → 返回状态快照
+4. 客户端收到后：对比预测 → 分级校正 → 重放未确认输入
+5. 远端玩家通过快照插值渲染（50ms延迟缓冲）
+6. 事件（方块操作、命中）走可靠通道，确保送达
+7. 实体位置走不可靠通道（丢包等下帧覆盖）
+
+**多通道拆分：**
+| 通道 | 内容 | 可靠性 |
+|------|------|--------|
+| 不可靠 | 实体位置更新 | 丢包不重传，下帧覆盖 |
+| 可靠 | 方块操作、命中确认、玩家出入 | 超时重传 + 幂等去重 |
+| 可靠(有序) | 聊天、系统消息 | 保证顺序 |
+
+**必要前提：**
+- 确定性模拟（同样的输入 → 同样的输出，不能有随机数）
+- 客机侧保存最近 N 帧输入历史（用于重放）
+- 服务端保留最近 N 帧快照历史（用于延迟补偿）
+- 客机有独立的本地物理/逻辑副本（预测回路）
+- 需要可靠 UDP 库（Laminar/enet）或多通道 TCP 改造
 
 ### 讨论记录
 
@@ -393,4 +446,9 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 - 2026-06-19：发现 zig-ecs 并非线程安全，服务端线程写 Position 会踩坏 AnimationState 的 bone_offset。
   当前方案：pollServerSnapshot 中检测非法 bone_offset 并重新分配。
   将来做物理骨骼动画时，要么给 zig-ecs 加读写锁，要么换支持并发的 ECS（如 EnTT）。
+- 2026-06-19：chunk 顶点编码修复。`ChunkVertex.bx/by/bz` 在 `@intFromFloat` 前加 `+ 0.01` epsilon。
+  根因推测：x/y/z 为 0 时，浮点运算引入的微小负数误差被 `@intFromFloat` 向零截断后，
+  与相邻面的正数值坍缩到相同整数，导致退化三角形（零面积面）。
+  epsilon 将这些值推到远离零的稳定区域，保证每个面的顶点落在正确整数位置。
+  注：`ZBlock_内存调色板` 分支也需要此修复，届时手动改 `chunk_mesh.zig` 三行即可。
 

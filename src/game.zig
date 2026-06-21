@@ -59,10 +59,14 @@ menu_state: MenuState = .MainMenu,
 network_mode: NetworkMode = .single,
 listen_fd: winsock.socket_t = undefined,
 net_listening: bool = false, // listen_fd 是否有效
-client_fd: winsock.socket_t = undefined, // 有效值由网络线程写入
+
+clients: std.ArrayListUnmanaged(ClientInfo) = .empty,
+next_player_id: u32 = 1,
+
+client_fd: winsock.socket_t = undefined, // 客机端：主机 fd
 client_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-remote_player: ?ECS.Entity = null,
-client_disconnected: bool = false, // 网络线程检测到断线，主线程清理
+remote_player: ?ECS.Entity = null, // 客机端：自身玩家实体
+snapshot_info: std.AutoHashMapUnmanaged(u64, struct { entity: ECS.Entity, player_id: u32 }) = .{}, // 客机端：快照索引→(实体, player_id)
 net_thread: ?std.Thread = null,
 net_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 net_mutex: std.Io.Mutex = .init, // 保护 net_cam_yaw/pitch
@@ -73,8 +77,6 @@ break_once: bool = false, // 鼠标左键单击标志
 place_once: bool = false, // 鼠标右键单击标志
 net_cam_yaw: f32 = 0, // 主机相机的朝向（给网络线程读）
 net_cam_pitch: f32 = 0,
-snapshot_info: std.AutoHashMapUnmanaged(u64, struct { entity: ECS.Entity, player_id: u32 }) = .{}, // 客机端：快照索引→(实体, player_id)
-
 last_snapshot_serial: u64 = std.math.maxInt(u64),
 
 /// 渲染用快照缓冲区（主线程独有，无竞态，主机/客机共用）
@@ -445,7 +447,6 @@ fn initGame(self: *Game) !void {
                         .clip_name = @import("rend_ctx.zig").ClipName.walk,
                         .bone_offset = bone_offset,
                     });
-
                 }
             }
         }
@@ -472,6 +473,8 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.network_mode = .single;
     self.net_saved_client_pos = Vec3.zero;
     self.net_thread = null;
+    self.clients = .empty;
+    self.next_player_id = 1;
     self.remote_player = null;
     self.snapshot_info = .{};
     self.server.player_id = 0;
@@ -482,7 +485,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.render_snapshot_count = 0;
     self.last_snapshot_time_ns = 0;
     // 创建窗口
-    const window = try Window.init(self, "ZigGame", 1280, 720);
+    const window = try Window.init(self, "ZBlock", 1280, 720);
     self.window = window;
 
     // 初始化输入系统
@@ -653,7 +656,12 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     }
     self.client_fd = cfd;
     self.client_connected.store(true, .release);
-    Log.info("connected\n", .{});
+
+    // 接收 welcome 消息，获取分配的 player_id
+    const assigned_id = Network.recvWelcome(cfd);
+    Log.info("recvWelcome raw={}\n", .{assigned_id});
+    self.server.player_id = assigned_id;
+    Log.info("connected as player_id={}", .{assigned_id});
 
     // 清空快照实体映射
     self.snapshot_info = .{};
@@ -679,12 +687,17 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     // 创建本地玩家实体（第一人称，不可见，用于接收主机发回的自身位置）
     {
         const entity = self.server.registry.create();
-        self.server.registry.add(entity, Comps.Player{ .id = 1, .mode = .survival });
+        self.server.registry.add(entity, Comps.Player{ .id = self.server.player_id, .mode = .survival });
         self.server.registry.add(entity, Comps.Position{ .vec = Vec3.new(0, 130, 0), .prev = Vec3.new(0, 130, 0) });
-    if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, Vec3.new(0, 130, 0));
+        if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, Vec3.new(0, 130, 0));
+        self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
+        self.server.registry.add(entity, Comps.Collider{ .width = 0.6, .height = 1.8 });
+        self.server.registry.add(entity, Comps.MoveSpeed{ .value = 4.0 });
+        self.server.registry.add(entity, Comps.JumpVelocity{ .value = 14.0 });
+        self.server.registry.add(entity, Comps.OnGround{ .value = false });
+        self.server.registry.add(entity, Comps.MoveIntent{});
         self.server.registry.add(entity, Comps.Facing{});
         self.remote_player = entity;
-        self.server.player_id = 1;
     }
 
     self.menu_state = .Gameplay;
@@ -712,12 +725,16 @@ pub fn returnToMenu(self: *Game) void {
         t.join();
         self.net_thread = null;
     }
+    // 关闭所有客户端连接
+    for (self.clients.items) |c| _ = winsock.closesocket(c.fd);
+    self.clients.deinit(self.allocator);
+    self.clients = .empty;
+    self.next_player_id = 1;
     self.render_snapshot_count = 0;
     self.last_snapshot_time_ns = 0;
     self.host_snap_valid = false;
     self.server.animation_system.next_bone_offset = 0;
     self.server.animation_system.max_bone_slot = 0;
-    self.remote_player = null;
     const was_client = self.network_mode == .client;
     self.network_mode = .single;
     self.client_connected.store(false, .release);
@@ -771,22 +788,25 @@ pub fn returnToMenu(self: *Game) void {
 /// 运行一个物理 tick（纯逻辑，不碰渲染/输入）
 fn tick(self: *Game) !void {
     // 收集玩家输入并投递到服务端线程
-    const input = collectPlayerInput(self);
+    const input = collectHostActions(self);
     try self.server.pushInput(input);
 
     // ── 联机：主机更新共享数据（供网络线程读取）──
     if (self.network_mode == .host) {
-        // 客机断线清理
-        if (self.client_disconnected) {
-            self.client_disconnected = false;
-            Log.info("client left, cleaning up", .{});
-            if (self.remote_player) |rp| {
-                if (self.server.registry.tryGet(Comps.Position, rp)) |pos| {
+        // 客机断线清理（网络线程已标记 disconnect，tick 中清理 ECS）
+        var ci: usize = 0;
+        while (ci < self.clients.items.len) {
+            if (self.clients.items[ci].disconnect) {
+                const c = &self.clients.items[ci];
+                if (self.server.registry.tryGet(Comps.Position, c.entity)) |pos| {
                     self.net_saved_client_pos = pos.vec;
                 }
-                self.server.block_world.cleanupEntity(&self.server.registry, rp);
-                if (self.server.registry.valid(rp)) self.server.registry.destroy(rp);
-                self.remote_player = null;
+                self.server.block_world.cleanupEntity(&self.server.registry, c.entity);
+                if (self.server.registry.valid(c.entity)) self.server.registry.destroy(c.entity);
+                _ = self.clients.swapRemove(ci);
+                Log.info("client id={} cleaned up", .{c.player_id});
+            } else {
+                ci += 1;
             }
         }
 
@@ -813,194 +833,203 @@ fn hostNetworkThread(self: *Game) void {
         }
     }
 
-    var accept_print_timer: u32 = 0;
+    var print_timer: u32 = 0;
     while (self.net_running.load(.acquire)) {
-        if (accept_print_timer == 0) {
-            Log.info("network: waiting for player...", .{});
-            accept_print_timer = 25; // 每 ~5 秒打印一次（poll 200ms × 25）
+        if (print_timer == 0) {
+            Log.info("network: {} client(s) connected", .{self.clients.items.len});
+            print_timer = 200; // 每 ~6 秒打印一次（select 通常 ~33ms 返回一次）
         }
-        accept_print_timer -= 1;
-        // 用 poll 轮询，避免 blocking accept 被关闭 socket 打断时 Windows 报 WSAEINTR
+        print_timer -= 1;
+
+        // ── 构建 fd_set（listen + 所有客户端） ──
         var readfds = winsock.fd_set{
-            .fd_count = 1,
-            .fd_array = [_]usize{@as(usize, @intCast(self.listen_fd))} ** winsock.FD_SETSIZE,
+            .fd_count = 0,
+            .fd_array = [_]usize{0} ** winsock.FD_SETSIZE,
         };
-        var tv = winsock.timeval{ .sec = 0, .usec = 200000 };
-        const sel_rc = winsock.select(0, &readfds, null, null, &tv);
+        var max_fd: winsock.socket_t = self.listen_fd;
+        winsock.FD_SET(self.listen_fd, &readfds);
+        for (self.clients.items) |c| {
+            winsock.FD_SET(c.fd, &readfds);
+            if (c.fd > max_fd) max_fd = c.fd;
+        }
+        var tv = winsock.timeval{ .sec = 0, .usec = 100000 };
+        const sel_rc = winsock.select(max_fd + 1, &readfds, null, null, &tv);
         if (sel_rc < 0) {
-            Log.err("network: select error", .{});
+            if (self.net_running.load(.acquire)) Log.err("network: select error", .{});
             return;
         }
-        if (sel_rc == 0) continue;
-        if (!self.net_running.load(.acquire)) return;
-        const cfd = winsock.accept(self.listen_fd, null, null);
-        if (cfd < 0) {
-            Log.err("network: accept error", .{});
-            return;
-        }
-        if (!self.net_running.load(.acquire)) return;
-        Log.info("network: player joined", .{});
-        defer _ = winsock.closesocket(cfd);
 
-        self.net_mutex.lockUncancelable(io);
-        self.client_fd = cfd;
-        self.client_connected.store(true, .release);
-        self.net_mutex.unlock(io);
+        // ── 处理新连接 ──
+        if (winsock.FD_ISSET(self.listen_fd, &readfds)) {
+            const cfd = winsock.accept(self.listen_fd, null, null);
+            if (cfd >= 0 and self.net_running.load(.acquire)) {
+                const pid = self.next_player_id;
+                self.next_player_id += 1;
 
-        var state_serial: u32 = 0;
-        // 创建远程玩家实体
-        {
-            const pinfo = EntityTypeId.fromName("player").info();
-            const entity = self.server.registry.create();
-            self.server.registry.add(entity, Comps.Player{ .id = 1, .mode = .survival });
-            self.server.registry.add(entity, Comps.ModelName{ .id = pinfo.model_id });
-            const spawn_pos = if (self.net_saved_client_pos.x != 0 or self.net_saved_client_pos.y != 0 or self.net_saved_client_pos.z != 0)
-                self.net_saved_client_pos
-            else blk: {
-                var pv = self.server.registry.view(.{ Comps.Player, Comps.Position }, .{});
-                var pi = pv.entityIterator();
-                var found = Vec3.zero;
-                while (pi.next()) |pe| {
-                    if (pv.get(Comps.Player, pe).id == 0) {
-                        found = pv.get(Comps.Position, pe).vec;
-                        break;
-                    }
-                }
-                break :blk found;
-            };
-            self.server.registry.add(entity, Comps.Position{ .vec = spawn_pos, .prev = spawn_pos });
-    if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, spawn_pos);
-            self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
-            self.server.registry.add(entity, Comps.Collider{ .width = pinfo.collider_width, .height = pinfo.collider_height });
-            self.server.registry.add(entity, Comps.MoveSpeed{ .value = pinfo.move_speed });
-            self.server.registry.add(entity, Comps.JumpVelocity{ .value = pinfo.jump_vel });
-            self.server.registry.add(entity, Comps.OnGround{ .value = false });
-            self.server.registry.add(entity, Comps.Facing{});
-            self.server.registry.add(entity, Comps.MoveIntent{});
-            if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
-                self.server.registry.add(entity, Comps.AnimationState{
-                    .clip_name = @import("rend_ctx.zig").ClipName.idle,
-                    .bone_offset = bone_offset,
-                });
-            }
-            self.remote_player = entity;
-        }
-
-        var input: Network.ClientInput = undefined;
-        while (self.net_running.load(.acquire)) {
-            const got = Network.recvInput(cfd, &input);
-            if (!got) {
-                break;
-            }
-            if (!got or !self.net_running.load(.acquire)) break;
-
-            // 将 ClientInput 转为 PlayerInput 投递到服务端
-            {
-                const pi = PlayerInput{
-                    .player_id = 1,
-                    .move_dir = input.move_dir,
-                    .jump = input.jump,
-                    .sprint_held = input.sprint,
-                    .sneak = input.sneak,
-                    .cam_yaw = input.cam_yaw,
-                    .cam_pitch = input.cam_pitch,
-                    .break_block = input.break_block,
-                    .place_block = input.place_block,
-                    .wants_fly = input.wants_fly,
-                    .attack = input.attack,
-                    .hotbar_slot = input.hotbar_slot,
-                    .place_block_id = self.hotbar.slots[if (input.hotbar_slot < 9) input.hotbar_slot else self.hotbar.selected].item_id,
-                };
-                self.server.pushInput(pi) catch {};
-            }
-
-            // 读取共享数据
-            self.net_mutex.lockUncancelable(io);
-            const cam_yaw = self.net_cam_yaw;
-            const cam_pitch = self.net_cam_pitch;
-            // 取出服务端线程填充的区块更新
-            self.server.pending_chunks_mutex.lockUncancelable(io);
-            var chunks_to_send = self.server.pending_chunks;
-            self.server.pending_chunks = .empty;
-            self.server.pending_chunks_mutex.unlock(io);
-            self.net_mutex.unlock(io);
-
-            // 从服务端快照缓冲区读取（由 publishSnapshot 在 tick 边界写入）
-            var snapshots: [64]Network.EntitySnapshot = undefined;
-            var count: usize = 0;
-            var snap_tick: u64 = 0;
-            {
-                self.server.snapshot_mutex.lockUncancelable(io);
-                defer self.server.snapshot_mutex.unlock(io);
-                count = self.server.snapshot_count;
-                snap_tick = self.server.snapshot_tick;
-                if (count > 0) {
-                    @memcpy(std.mem.sliceAsBytes(snapshots[0..count]), std.mem.sliceAsBytes(self.server.snapshots[0..count]));
-                    // 修正主机玩家朝向：snapshot 中 player_id=0 的朝向需要替换为相机朝向
-                    for (snapshots[0..count]) |*s| {
-                        if (s.player_id == 0) {
-                            s.facing_yaw = -cam_yaw + std.math.pi / 2.0;
-                            s.facing_pitch = cam_pitch;
+                // 创建远程玩家实体
+                const pinfo = EntityTypeId.fromName("player").info();
+                const entity = self.server.registry.create();
+                self.server.registry.add(entity, Comps.Player{ .id = pid, .mode = .survival });
+                self.server.registry.add(entity, Comps.ModelName{ .id = pinfo.model_id });
+                const spawn_pos = if (self.net_saved_client_pos.x != 0 or self.net_saved_client_pos.y != 0 or self.net_saved_client_pos.z != 0)
+                    self.net_saved_client_pos
+                else blk: {
+                    var pv = self.server.registry.view(.{ Comps.Player, Comps.Position }, .{});
+                    var pi = pv.entityIterator();
+                    var found = Vec3.zero;
+                    while (pi.next()) |pe| {
+                        if (pv.get(Comps.Player, pe).id == 0) {
+                            found = pv.get(Comps.Position, pe).vec;
+                            break;
                         }
                     }
+                    break :blk found;
+                };
+                self.server.registry.add(entity, Comps.Position{ .vec = spawn_pos, .prev = spawn_pos });
+                if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, spawn_pos);
+                self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
+                self.server.registry.add(entity, Comps.Collider{ .width = pinfo.collider_width, .height = pinfo.collider_height });
+                self.server.registry.add(entity, Comps.Facing{});
+                // 不加 MoveIntent/MoveSpeed/JumpVelocity/OnGround，服务端不对远程客机玩家跑物理解算
+                if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                    self.server.registry.add(entity, Comps.AnimationState{
+                        .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                        .bone_offset = bone_offset,
+                    });
                 }
-            }
-            // 先发区块更新（无阻塞），再发状态包——这样 state 总是在 TCP 队列末尾，
-            // 客机 Phase 2 读到的是最新 state，延迟最低
-            // 先发区块更新（让 state 排在队列末尾，客机读到的是最新 state）
-            if (chunks_to_send.items.len > 0) {
-                const origin = chunks_to_send.items[0];
-                if (self.server.block_world.chunks.getPtr(origin)) |loaded| {
-                    const pal_json = buildPaletteJson(loaded.chunk.palette.items, std.heap.page_allocator);
-                    const bpi = loaded.chunk.index_bits;
-                    const data_size = (BlockWorld.CHUNK_WIDTH * BlockWorld.CHUNK_HEIGHT * BlockWorld.CHUNK_WIDTH * @as(u32, @intCast(bpi)) + 7) / 8;
-                    _ = Network.sendChunk(cfd, 0, origin.x, origin.z, pal_json, loaded.chunk.index_data[0..data_size]);
-                    std.heap.page_allocator.free(pal_json);
-                }
-                // 剩余的放回队列
-                if (chunks_to_send.items.len > 1) {
-                    self.server.pending_chunks_mutex.lockUncancelable(io);
-                    for (chunks_to_send.items[1..]) |o| {
-                        self.server.pending_chunks.append(self.server.allocator, o) catch {};
-                    }
-                    self.server.pending_chunks_mutex.unlock(io);
-                }
-            }
-            chunks_to_send.deinit(self.server.allocator);
-
-            // 发送卸载指令
-            self.server.pending_unloads_mutex.lockUncancelable(io);
-            var unloads = self.server.pending_unloads;
-            self.server.pending_unloads = .empty;
-            self.server.pending_unloads_mutex.unlock(io);
-            for (unloads.items) |origin| {
-                Network.sendChunkUnload(cfd, origin.x, origin.z);
-            }
-            unloads.deinit(self.server.allocator);
-
-            // state 包后发，排在队列末尾，客机读到的是最新的
-            state_serial += 1;
-            const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-            {
-                // 取出待发送的方块更新，嵌入 state 包
-                self.server.pending_block_updates_mutex.lockUncancelable(io);
-                var updates = self.server.pending_block_updates;
-                self.server.pending_block_updates = .empty;
-                self.server.pending_block_updates_mutex.unlock(io);
-                Network.sendState(cfd, &.{
-                    .serial = state_serial,
-                    .tick_count = snap_tick,
-                    .host_time = now_ns,
-                    .entities = snapshots[0..count],
-                    .block_updates = updates.items,
-                });
-                updates.deinit(self.server.allocator);
+                self.clients.append(self.server.allocator, .{
+                    .fd = cfd,
+                    .entity = entity,
+                    .player_id = pid,
+                    .disconnect = false,
+                    .saved_pos = spawn_pos,
+                }) catch {};
+                Network.sendWelcome(cfd, pid);
+                Log.info("network: player joined as id={}, fd={}", .{ pid, cfd });
+            } else if (cfd >= 0) {
+                _ = winsock.closesocket(cfd);
             }
         }
-        // 客机断线，关闭 cfd（defer 会执行），准备 accept 下一个
-        self.client_connected.store(false, .release);
-        self.client_disconnected = true;
-        Log.info("client disconnected", .{});
+
+        // ── 处理客户端输入 ──
+        for (self.clients.items) |*c| {
+            if (!winsock.FD_ISSET(c.fd, &readfds)) continue;
+            var input: Network.ClientInput = undefined;
+            const got = Network.recvInput(c.fd, &input);
+            if (!got) {
+                c.disconnect = true;
+                continue;
+            }
+            self.server.pushInput(.{
+                .player_id = c.player_id,
+                .pos = input.pos,
+                .cam_yaw = input.cam_yaw,
+                .cam_pitch = input.cam_pitch,
+                .break_block = input.break_block,
+                .place_block = input.place_block,
+                .hotbar_slot = input.hotbar_slot,
+                .place_block_id = self.hotbar.slots[if (input.hotbar_slot < 9) input.hotbar_slot else self.hotbar.selected].item_id,
+                .target = input.target,
+                .place_face = input.place_face,
+            }) catch {};
+        }
+
+        // ── 读取共享数据（一次拷贝，遍历发送） ──
+        self.net_mutex.lockUncancelable(io);
+        const cam_yaw = self.net_cam_yaw;
+        const cam_pitch = self.net_cam_pitch;
+        self.server.pending_chunks_mutex.lockUncancelable(io);
+        var chunks_to_send = self.server.pending_chunks;
+        self.server.pending_chunks = .empty;
+        self.server.pending_chunks_mutex.unlock(io);
+        self.net_mutex.unlock(io);
+
+        var snapshots: [64]Network.EntitySnapshot = undefined;
+        var count: usize = 0;
+        var snap_tick: u64 = 0;
+        {
+            self.server.snapshot_mutex.lockUncancelable(io);
+            defer self.server.snapshot_mutex.unlock(io);
+            count = self.server.snapshot_count;
+            snap_tick = self.server.snapshot_tick;
+            if (count > 0) {
+                @memcpy(std.mem.sliceAsBytes(snapshots[0..count]), std.mem.sliceAsBytes(self.server.snapshots[0..count]));
+                for (snapshots[0..count]) |*s| {
+                    if (s.player_id == 0) {
+                        s.facing_yaw = -cam_yaw + std.math.pi / 2.0;
+                        s.facing_pitch = cam_pitch;
+                    }
+                }
+            }
+        }
+
+        // 取出方块更新（一次读出，所有客户端共享）
+        self.server.pending_block_updates_mutex.lockUncancelable(io);
+        var block_updates = self.server.pending_block_updates;
+        self.server.pending_block_updates = .empty;
+        self.server.pending_block_updates_mutex.unlock(io);
+
+        // ── 遍历所有客户端，各自发送 ──
+        var ci: usize = 0;
+        while (ci < self.clients.items.len) {
+            const c = &self.clients.items[ci];
+            if (c.disconnect) {
+                // 断线清理
+                _ = winsock.closesocket(c.fd);
+                if (self.server.registry.valid(c.entity)) {
+                    self.server.block_world.cleanupEntity(&self.server.registry, c.entity);
+                    self.server.registry.destroy(c.entity);
+                }
+                // 从 player_chunks 中移除
+                _ = self.server.player_chunks.remove(c.player_id);
+                Log.info("client id={} disconnected", .{c.player_id});
+                _ = self.clients.swapRemove(ci);
+                continue;
+            }
+
+            // ── 发送属于该客户的区块 ──
+            var chunk_i: usize = 0;
+            while (chunk_i < chunks_to_send.items.len) {
+                const entry = chunks_to_send.items[chunk_i];
+                if (entry.player_id == c.player_id) {
+                    if (self.server.block_world.chunks.getPtr(entry.origin)) |loaded| {
+                        const pal_json = buildPaletteJson(loaded.chunk.palette.items, std.heap.page_allocator);
+                        const bpi = loaded.chunk.index_bits;
+                        const data_size = (BlockWorld.CHUNK_WIDTH * BlockWorld.CHUNK_HEIGHT * BlockWorld.CHUNK_WIDTH * @as(u32, @intCast(bpi)) + 7) / 8;
+                        _ = Network.sendChunk(c.fd, 0, entry.origin.x, entry.origin.z, pal_json, loaded.chunk.index_data[0..data_size]);
+                        std.heap.page_allocator.free(pal_json);
+                    }
+                    _ = chunks_to_send.swapRemove(chunk_i);
+                } else {
+                    chunk_i += 1;
+                }
+            }
+
+            c.saved_pos = self.net_saved_client_pos;
+            ci += 1;
+        }
+        chunks_to_send.deinit(self.server.allocator);
+
+        // ── 发送 state 给所有在线客户端 ──
+        const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+        for (self.clients.items) |*c| {
+            const state_serial = self.server.tick_count;
+            // 过滤掉 origin=自己的 block_update（已由本地预测处理）
+            var filtered: std.ArrayListUnmanaged(Network.BlockUpdate) = .empty;
+            defer filtered.deinit(self.server.allocator);
+            for (block_updates.items) |*u| {
+                if (u.origin_player_id != c.player_id)
+                    filtered.append(self.server.allocator, u.*) catch {};
+            }
+            Network.sendState(c.fd, &.{
+                .serial = @truncate(state_serial),
+                .tick_count = snap_tick,
+                .host_time = now_ns,
+                .entities = snapshots[0..count],
+                .block_updates = filtered.items,
+            });
+        }
+        block_updates.deinit(self.server.allocator);
     }
 }
 
@@ -1021,18 +1050,93 @@ fn buildPaletteJson(palette: []const BlockState, allocator: std.mem.Allocator) [
     return buf.toOwnedSlice(allocator) catch unreachable;
 }
 
-/// 从键盘/鼠标采集玩家输入，传给 Server.tick()
-fn collectPlayerInput(self: *Game) PlayerInput {
-    // 相机相对方向
-    const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
-    const right_h = self.camera.front.cross(self.camera.up);
-    const rnorm = Vec3.new(right_h.x, 0, right_h.z).norm();
-    var raw_dir = Vec3.zero;
-    if (self.keybinds.isHeld(&self.input, .forward)) raw_dir = raw_dir.add(front_h);
-    if (self.keybinds.isHeld(&self.input, .back)) raw_dir = raw_dir.sub(front_h);
-    if (self.keybinds.isHeld(&self.input, .left)) raw_dir = raw_dir.sub(rnorm);
-    if (self.keybinds.isHeld(&self.input, .right)) raw_dir = raw_dir.add(rnorm);
+/// 读取 WASD/跳/潜行/冲刺，直接写入 MoveIntent 组件（主机/客机共用）
+fn produceMoveIntent(self: *Game) void {
+    var view = self.server.registry.view(.{ Comps.Player, Comps.MoveIntent }, .{});
+    var iter = view.entityIterator();
+    while (iter.next()) |entity| {
+        const player = view.get(Comps.Player, entity);
+        if (player.id != self.server.player_id) continue;
+        var intent = view.get(Comps.MoveIntent, entity);
 
+        const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
+        const camera_right = self.camera.front.cross(self.camera.up);
+        const right_h = Vec3.new(camera_right.x, 0, camera_right.z).norm();
+
+        var move_dir = Vec3.zero;
+        if (self.keybinds.isHeld(&self.input, .forward)) move_dir = move_dir.add(front_h);
+        if (self.keybinds.isHeld(&self.input, .back)) move_dir = move_dir.sub(front_h);
+        if (self.keybinds.isHeld(&self.input, .left)) move_dir = move_dir.sub(right_h);
+        if (self.keybinds.isHeld(&self.input, .right)) move_dir = move_dir.add(right_h);
+
+        if (self.keybinds.isHeld(&self.input, .jump)) {
+            intent.jump = true;
+            move_dir.y = 1.0;
+        }
+        if (self.keybinds.isHeld(&self.input, .swim_down)) {
+            move_dir.y = -1.0;
+        }
+
+        const has_movement = self.keybinds.isHeld(&self.input, .forward) or
+            self.keybinds.isHeld(&self.input, .back) or
+            self.keybinds.isHeld(&self.input, .left) or
+            self.keybinds.isHeld(&self.input, .right);
+        if (!has_movement) {
+            intent.sprint = false;
+            self.server.sprint_toggled = false;
+        } else {
+            intent.sprint = self.server.sprint_toggled;
+        }
+
+        if (self.keybinds.isHeld(&self.input, .sneak)) {
+            intent.sneak = true;
+            if (!self.server.flying) intent.sprint = false;
+        } else {
+            intent.sneak = false;
+        }
+
+        if (move_dir.len2() > 0.001) move_dir = move_dir.norm();
+        intent.direction = move_dir;
+    }
+}
+
+/// 本地预测 + 返回目标坐标（主机/客机共用）
+fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8) void {
+    if (self.break_once) {
+        const ray = Raycast.Ray.init(self.camera.position, self.camera.front);
+        const hit = Raycast.raycastWorld(&self.server.block_world, ray, 8.0);
+        if (hit.hit) {
+            target.* = hit.block_pos;
+            self.server.block_world.setBlock(hit.block_pos, BlockState.fromName("air")) catch {};
+        }
+    }
+    if (self.place_once) {
+        const ray = Raycast.Ray.init(self.camera.position, self.camera.front);
+        const hit = Raycast.raycastWorld(&self.server.block_world, ray, 8.0);
+        if (hit.hit) {
+            const place_pos = Vec3i.new(
+                hit.block_pos.x + hit.face_normal.x,
+                hit.block_pos.y + hit.face_normal.y,
+                hit.block_pos.z + hit.face_normal.z,
+            );
+            const sel = self.hotbar.slots[self.hotbar.selected];
+            if (sel.item_id > 0) {
+                const facing: Direction = blk: {
+                    const fn_ = hit.face_normal;
+                    if (fn_.y != 0) break :blk if (fn_.y > 0) Direction.up else Direction.down;
+                    if (fn_.x != 0) break :blk if (fn_.x > 0) Direction.west else Direction.east;
+                    break :blk if (fn_.z > 0) Direction.south else Direction.north;
+                };
+                target.* = place_pos;
+                place_face.* = @intFromEnum(facing);
+                self.server.block_world.setBlock(place_pos, BlockState{ .block_id = BlockId.fromInt(sel.item_id), .facing = facing }) catch {};
+            }
+        }
+    }
+}
+
+/// 采集主机玩家的动作（break/place/fly/camera），通过服务端队列处理
+fn collectHostActions(self: *Game) PlayerInput {
     const wants_fly = self.server_wants_fly;
     self.server_wants_fly = false;
     defer {
@@ -1040,13 +1144,15 @@ fn collectPlayerInput(self: *Game) PlayerInput {
         self.place_once = false;
     }
 
+    var target = Vec3i.zero;
+    var place_face: u8 = 0;
+    predictBlockAction(self, &target, &place_face);
+
+    // 写入 MoveIntent（与 clientTick 一致，主机玩家移动不再经过服务端队列）
+    produceMoveIntent(self);
+
     return .{
         .player_id = self.server.player_id,
-        .move_dir = raw_dir.norm(),
-        .jump = self.input.isKeyHeld(.space),
-        .sprint_held = self.input.isKeyHeld(.left_shift),
-        .sneak = self.input.isKeyHeld(.left_control),
-        .facing_dir = self.camera.front,
         .cam_yaw = self.camera.yaw,
         .cam_pitch = self.camera.pitch,
         .break_block = self.break_once,
@@ -1054,6 +1160,8 @@ fn collectPlayerInput(self: *Game) PlayerInput {
         .wants_fly = wants_fly,
         .hotbar_slot = self.hotbar.selected,
         .place_block_id = self.hotbar.slots[self.hotbar.selected].item_id,
+        .target = target,
+        .place_face = place_face,
     };
 }
 
@@ -1062,39 +1170,44 @@ fn collectPlayerInput(self: *Game) PlayerInput {
 /// 客机：发输入（30Hz，跟随物理 tick）
 fn clientTick(self: *Game) !void {
     self._tick_start_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+
     var intent: Network.ClientInput = undefined;
     intent.serial = @truncate(self.server.tick_count);
-    {
-        const front_h = Vec3.new(self.camera.front.x, 0, self.camera.front.z).norm();
-        const right_h = self.camera.front.cross(self.camera.up);
-        const rnorm = Vec3.new(right_h.x, 0, right_h.z).norm();
-        var raw_dir = Vec3.zero;
-        if (self.input.isKeyHeld(.w)) raw_dir = raw_dir.add(front_h);
-        if (self.input.isKeyHeld(.s)) raw_dir = raw_dir.sub(front_h);
-        if (self.input.isKeyHeld(.a)) raw_dir = raw_dir.sub(rnorm);
-        if (self.input.isKeyHeld(.d)) raw_dir = raw_dir.add(rnorm);
-        intent.move_dir = raw_dir.norm();
+    // 清零目标坐标/朝向（避免 undefined 垃圾被发给服务器）
+    intent.target = Vec3i.zero;
+    intent.place_face = 0;
+
+    // 设置移动意图（WASD），复用服务端物理系统
+    // 键盘 → MoveIntent（与主机/单人游戏一致的逻辑）
+    produceMoveIntent(self);
+    // 飞行切换（双击空格）
+    if (self.server_wants_fly) {
+        self.server_wants_fly = false;
+        const rp = self.remote_player.?;
+        if (self.server.registry.has(Comps.Flying, rp)) {
+            _ = self.server.registry.remove(Comps.Flying, rp);
+        } else {
+            self.server.registry.add(rp, Comps.Flying{});
+        }
     }
-    intent.jump = self.input.isKeyHeld(.space);
-    const has_movement = @sqrt(intent.move_dir.x * intent.move_dir.x + intent.move_dir.z * intent.move_dir.z) > 0.01;
-    if (has_movement) {
-        intent.sprint = self.server.sprint_toggled;
-    } else {
-        intent.sprint = false;
-        self.server.sprint_toggled = false;
+    // 跑本地物理（碰撞、重力）
+    self.server.block_world.updatePhysics(&self.server.registry, TICK_DT);
+    // 推入环缓冲（相机插值用，与主机逻辑统一）
+    if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos2| pushEntityPos(pos2, pos2.vec);
+    // 读取物理运算后的位置，提交给服务器
+    if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos| {
+        intent.pos = pos.vec;
     }
-    intent.sneak = self.input.isKeyHeld(.left_control);
     intent.cam_yaw = self.camera.yaw;
     intent.cam_pitch = self.camera.pitch;
 
+    // 本地预测（与主机 collectHostActions 共用 predictBlockAction）
+    predictBlockAction(self, &intent.target, &intent.place_face);
     intent.break_block = self.break_once;
     intent.place_block = self.place_once;
     self.break_once = false;
     self.place_once = false;
-    intent.attack = false;
     intent.hotbar_slot = self.hotbar.selected;
-    intent.wants_fly = self.server_wants_fly;
-    self.server_wants_fly = false;
 
     Network.sendInput(@as(winsock.socket_t, @intCast(self.client_fd)), &intent);
 }
@@ -1112,13 +1225,21 @@ fn clientReceivePackets(self: *Game) void {
         };
         var tv = winsock.timeval{ .sec = 0, .usec = 0 };
         const sel_rc = winsock.select(0, &readfds, null, null, &tv);
-        if (sel_rc <= 0) break;
+        if (sel_rc < 0) break;
+        if (sel_rc == 0) break; // 无数据，下帧再试
         const tag = Network.peekTag(self.client_fd);
-        if (tag == 0) break;
+        if (tag == 0) {
+            // select 说有数据但 peekTag 返回 0 → 连接已关闭
+            self.disconnectClient();
+            return;
+        }
         if (tag == 2) {
             self.chunk_count += 1;
             const result = Network.recvChunk(self.client_fd, self.allocator);
-            if (result == null) { self.disconnectClient(); return; }
+            if (result == null) {
+                self.disconnectClient();
+                return;
+            }
             if (result) |chunk| {
                 if (chunk.palette.len > 2) {
                     self.server.block_world.insertChunkFromNetwork(chunk.origin_x, chunk.origin_z, chunk.palette, chunk.data) catch {};
@@ -1127,10 +1248,29 @@ fn clientReceivePackets(self: *Game) void {
                 self.allocator.free(chunk.data);
             }
         } else if (tag == 1) {
+            // 释放上一个 state 的 entities
             if (state_initialized) self.allocator.free(state.entities);
+
             const got = Network.recvState(self.client_fd, self.allocator, &state);
-            if (!got) { self.disconnectClient(); return; }
+            if (!got) {
+                self.disconnectClient();
+                return;
+            }
             state_initialized = true;
+
+            // 立即应用 block_updates（不等到循环结束，避免被后续 state 覆盖）
+            for (state.block_updates) |upd| {
+                const block_state = if (upd.block_id == 0)
+                    BlockState.fromName("air")
+                else
+                    BlockState{ .block_id = BlockId.fromInt(upd.block_id), .facing = @enumFromInt(upd.facing) };
+                self.server.block_world.setBlock(Vec3i.new(upd.x, @as(i32, @intCast(upd.y)), upd.z), block_state) catch {};
+            }
+            // block_updates 已应用，立即释放
+            if (state.block_updates.len > 0) {
+                self.allocator.free(state.block_updates);
+                state.block_updates = &.{}; // 防止后续 defer 重复释放
+            }
         } else if (tag == 3) {
             const unload = Network.recvChunkUnload(self.client_fd);
             if (unload) |u| {
@@ -1140,10 +1280,7 @@ fn clientReceivePackets(self: *Game) void {
     }
 
     if (!state_initialized) return;
-    defer {
-        self.allocator.free(state.entities);
-        if (state.block_updates.len > 0) self.allocator.free(state.block_updates);
-    }
+    defer self.allocator.free(state.entities);
 
     // 复制到渲染快照缓冲区
     self.render_snapshot_count = @as(u32, @intCast(state.entities.len));
@@ -1160,19 +1297,9 @@ fn clientReceivePackets(self: *Game) void {
         self.latency_samples += 1;
     }
 
-    // 处理方块增量更新
-    for (state.block_updates) |upd| {
-        const block_state = if (upd.block_id == 0) BlockState.fromName("air") else BlockState.init(BlockId.fromInt(upd.block_id));
-        self.server.block_world.setBlock(Vec3i.new(upd.x, @as(i32, @intCast(upd.y)), upd.z), block_state) catch |err| Log.err("setBlock error: {}", .{err});
-    }
-
     for (state.entities, 0..) |snap, i| {
         if (snap.player_id == self.server.player_id) {
-            if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos| {
-                pushEntityPos(pos, snap.pos);
-                pos.prev = pos.vec;
-                pos.vec = snap.pos;
-            }
+            // 不覆盖 pos.vec（本地物理已算好），也不推环缓冲（clientTick 已推）
             if (self.server.registry.tryGet(Comps.Facing, self.remote_player.?)) |facing| {
                 facing.yaw = snap.facing_yaw;
                 facing.pitch = snap.facing_pitch;
@@ -1187,7 +1314,7 @@ fn clientReceivePackets(self: *Game) void {
             const entity = self.server.registry.create();
             self.server.registry.add(entity, Comps.ModelName{ .id = einfo.model_id });
             self.server.registry.add(entity, Comps.Position{ .vec = snap.pos, .prev = snap.pos });
-    if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, snap.pos);
+            if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, snap.pos);
             self.server.registry.add(entity, Comps.Collider{ .width = einfo.collider_width, .height = einfo.collider_height });
             self.server.registry.add(entity, Comps.Facing{});
             gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id };
@@ -1243,7 +1370,6 @@ fn clientReceivePackets(self: *Game) void {
     }
     self.server.animation_system.update(&self.server.registry, &self.res_manager, TICK_DT);
 }
-
 
 /// 客户端断开连接，回到主菜单
 pub fn disconnectClient(self: *Game) void {
@@ -1348,7 +1474,6 @@ fn pollServerSnapshot(self: *Game) void {
         }
         self.last_snapshot_time_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
         self.host_snap_valid = true;
-
     }
 
     // 主机/单人：动画更新（主线程，与服务端分离）
@@ -1394,7 +1519,7 @@ fn syncCameraFromPlayer(self: *Game) void {
             const rend_time = rend_now -| 33_000_000;
             var rend_pos: Vec3 = undefined;
             var found = false;
-            if (pos.render_buf_count >= 2) {
+            if (pos.render_buf_count >= 2 and pos.render_buf_count <= 3) {
                 const newest = (pos.render_buf_head + 2) % 3;
                 var ri: u32 = 0;
                 while (ri < pos.render_buf_count - 1) {
@@ -1422,9 +1547,6 @@ fn syncCameraFromPlayer(self: *Game) void {
     }
 }
 
-fn enqueueChunkUpdate(self: *Game, block_pos: Vec3i) void {
-    self.server.enqueueChunkUpdate(block_pos);
-}
 /// 尝试将物品加入热栏/背包（优先堆叠，次优先空位）
 fn tryItemToInventory(self: *Game, item_id: u32, count: u32) void {
     var remaining = count;
@@ -1494,7 +1616,6 @@ fn spawnEnemy(self: *Game, comptime type_name: []const u8, pos: Vec3) !void {
     self.server.registry.add(entity, Comps.MoveIntent{});
     self.server.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
     self.server.registry.add(entity, Comps.AttackCooldown{ .interval = info.attack_interval });
-
 }
 
 const Game = @This();
@@ -1535,6 +1656,7 @@ const TICK_DT = BlockWorld.TICK_DT;
 const BlockRegistry = @import("block_registry.zig");
 const BlockState = BlockRegistry.BlockState;
 const BlockId = BlockRegistry.BlockId;
+const Direction = @import("direction.zig").Direction;
 const AABB = @import("aabb.zig").AABB;
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const Hotbar = @import("inventory.zig").Hotbar;
@@ -1552,3 +1674,11 @@ const Server = @import("server.zig").Server;
 const PlayerInput = @import("server.zig").PlayerInput;
 const Network = @import("network.zig");
 const Log = @import("log.zig");
+
+pub const ClientInfo = struct {
+    fd: winsock.socket_t,
+    entity: ECS.Entity,
+    player_id: u32,
+    disconnect: bool,
+    saved_pos: Vec3,
+};
