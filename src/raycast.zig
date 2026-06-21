@@ -214,7 +214,7 @@ pub fn raycastEntities(registry: *ECS.Registry, bvh: *const Bvh, ray: Ray, max_d
 }
 
 /// 带独立参数的射线-AABB 精测（避免创建 Ray 对象）
-fn rayAABBEx(min_x: f32, max_x: f32, min_y: f32, max_y: f32, min_z: f32, max_z: f32, origin: Vec3, dir: Vec3) ?f32 {
+pub fn rayAABBEx(min_x: f32, max_x: f32, min_y: f32, max_y: f32, min_z: f32, max_z: f32, origin: Vec3, dir: Vec3) ?f32 {
     const tx1 = (min_x - origin.x) / dir.x;
     const tx2 = (max_x - origin.x) / dir.x;
     var tmin = @min(tx1, tx2);
@@ -233,4 +233,3 @@ fn rayAABBEx(min_x: f32, max_x: f32, min_y: f32, max_y: f32, min_z: f32, max_z: 
     if (tmax >= tmin and tmax >= 0) return @max(tmin, 0);
     return null;
 }
-

@@ -18,6 +18,8 @@ const BlockRegistry = @import("block_registry.zig");
 const BlockState = BlockRegistry.BlockState;
 const BlockId = BlockRegistry.BlockId;
 const Direction = @import("direction.zig").Direction;
+const registries = @import("registries.zig");
+const Drops = @import("drops.zig");
 const Network = @import("network.zig");
 const EntityTypeId = @import("entity_registry.zig").EntityTypeId;
 const TICK_DT: f32 = 1.0 / 30.0;
@@ -34,6 +36,8 @@ pub const PlayerInput = struct {
     place_block_id: u32 = 0,
     target: Vec3i = Vec3i.zero,
     place_face: u8 = 0,
+    attack_entity: bool = false,
+    attack_target_raw: u32 = 0,
 };
 
 pub const Server = struct {
@@ -57,6 +61,8 @@ pub const Server = struct {
     pending_chunks_mutex: std.Io.Mutex = .init,
     pending_block_updates: std.ArrayListUnmanaged(Network.BlockUpdate) = .empty,
     pending_block_updates_mutex: std.Io.Mutex = .init,
+    pending_drops: std.ArrayListUnmanaged(Network.DropUpdate) = .empty, // 待发送掉落（handleActionAttack 填充，网络线程消费）
+    pending_drops_mutex: std.Io.Mutex = .init,
     pending_unloads: std.ArrayListUnmanaged(Vec3i) = .empty,
     pending_unloads_mutex: std.Io.Mutex = .init,
 
@@ -219,13 +225,14 @@ pub const Server = struct {
                 }
             }
 
-            // 客机直接提交目标坐标，服务器不做射线检测
+            // 客机直接提交目标坐标/实体，服务器不做射线检测
             if (input.break_block) self.handleActionBreak(input.player_id, input.target.x, input.target.y, input.target.z);
             if (input.place_block) self.handleActionPlaceSlot(input.place_block_id, input.player_id, input.target.x, input.target.y, input.target.z, input.place_face);
+            if (input.attack_entity) self.handleActionAttack(input.player_id, input.attack_target_raw);
         }
 
         // 物理（只跑一次，与输入数量无关）——仅对主机玩家和 AI 有效
-        self.block_world.updatePhysics(&self.registry, TICK_DT);
+        self.block_world.updatePhysics(&self.registry, TICK_DT, false, 0); // 服务端：推 AI + 主机玩家（ID=0），不推远程客机
 
         // AI 追踪玩家：每个 AI 追踪最近的玩家
         {
@@ -395,6 +402,32 @@ pub const Server = struct {
             self.pending_block_updates_mutex.lockUncancelable(io);
             self.pending_block_updates.append(self.allocator, upd) catch {};
             self.pending_block_updates_mutex.unlock(io);
+        }
+    }
+
+    /// 信任客机，直接应用伤害和掉落（不验算射线）
+    fn handleActionAttack(self: *Server, origin_player: u32, target_raw: u32) void {
+        const target_entity: ECS.Entity = @bitCast(target_raw);
+        if (!self.registry.valid(target_entity)) return;
+        if (self.registry.tryGet(Comps.Health, target_entity)) |health| {
+            health.current -= 10;
+            if (health.current <= 0) {
+                // 计算掉落
+                if (self.registry.tryGet(Comps.AIAgent, target_entity)) |agent| {
+                    const rolls = Drops.rollEntityDrops(@as(usize, agent.type_id.id));
+                    self.pending_drops_mutex.lockUncancelable(io);
+                    for (rolls.items[0..rolls.count]) |r| {
+                        self.pending_drops.append(self.allocator, .{
+                            .item_id = r.item_id,
+                            .count = r.count,
+                            .target_player_id = origin_player,
+                        }) catch {};
+                    }
+                    self.pending_drops_mutex.unlock(io);
+                }
+                self.block_world.cleanupEntity(&self.registry, target_entity);
+                self.registry.destroy(target_entity);
+            }
         }
     }
 

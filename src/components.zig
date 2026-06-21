@@ -30,6 +30,28 @@ pub const Components = struct {
         render_buf_time: [3]i64 = undefined,
         render_buf_head: u32 = 0,
         render_buf_count: u32 = 0,
+
+        /// 从 3 槽环形缓冲区查找插值位置，rend_time = now_ns - 33ms
+        pub fn interpPos(self: *const @This(), rend_time: i64) Vec3 {
+            if (self.render_buf_count >= 2 and self.render_buf_count <= 3) {
+                const newest = (self.render_buf_head + 2) % 3;
+                var ri: u32 = 0;
+                while (ri < self.render_buf_count - 1) {
+                    const ni = (newest + 3 - ri) % 3;
+                    const oi = (ni + 2) % 3;
+                    if (self.render_buf_time[oi] <= rend_time and self.render_buf_time[ni] > rend_time) {
+                        const interval = self.render_buf_time[ni] - self.render_buf_time[oi];
+                        if (interval > 0) {
+                            const alpha = @min(@max(@as(f32, @floatFromInt(rend_time - self.render_buf_time[oi])) / @as(f32, @floatFromInt(interval)), 0.0), 1.0);
+                            return Vec3.lerp(self.render_buf_pos[oi], self.render_buf_pos[ni], alpha);
+                        } else return self.render_buf_pos[ni];
+                    }
+                    ri += 1;
+                }
+            }
+            if (self.render_buf_count > 0) return self.render_buf_pos[(self.render_buf_head + 2) % 3];
+            return Vec3.zero;
+        }
     };
     pub const Velocity = struct { vec: Vec3 = Vec3.zero };
     pub const Collider = struct { // 物理碰撞箱（相对于位置）

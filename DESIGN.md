@@ -99,11 +99,26 @@
 注：3 槽环缓冲无需持久化时间参考，alpha 永不为零，无速度断续感。
 `EntitySnapshot.entity` 存储完整 {index, version}，不被回收实体干扰。
 
+### 实体攻击与掉落
+
+**流程（信任客机）：**
+
+1. 客机本地 raycast 检测实体（遍历 Position+Collider，不依赖 BVH）
+2. 命中非自身实体 → 设置 attack_entity + attack_target_raw 发给服务端
+3. 服务端 `handleActionAttack`：直接扣血，死亡时计算掉落
+4. 掉落写入 `pending_drops[]` → 网络线程过滤写入 `ServerState.drops`
+5. 客机收到后匹配 `target_player_id` → `tryItemToInventory`
+
+**主机模式**：伤害/掉落全在 `predictBlockAction` 本地完成，不经过网络。
+
+**防双拿**：掉落由服务端计算，`target_player_id` 唯一指定归属，客机不做本地掉落预测。
+
 ### 客机收包
 
 - `clientTick()` 30Hz 发位置/速度（物理在本地跑）
 - `clientReceivePackets()` 每帧非阻塞收包
 - 统一处理 tag=2（chunk）、tag=1（state）、tag=3（unload）
+- state 内含 entities + block_updates + drops
 - 所有实体通过 3 槽环缓冲做插值渲染
 
 ---

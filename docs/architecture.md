@@ -96,6 +96,8 @@ src/
 | 移动解算 | 服务端 `updatePhysics` | 客机本地 `updatePhysics` |
 | 输入提交 | `collectHostActions` → 队列 | `clientTick` → TCP 位置/速度 |
 | break/place | 客机提交目标坐标，服务端直接应用并广播 | 同主机 |
+| 实体攻击 | 主机本地 raycast + 直接扣血掉宝 | 客机本地 raycast → 提交 `attack_entity` → 服务端 `handleActionAttack` 扣血+掉宝 → `ServerState.drops` 带回 |
+| 掉落归属 | 主机本地 `tryItemToInventory` | 服务端 `pending_drops[target_player_id]` → 网络线程过滤 → 客机收到后 `tryItemToInventory` |
 | 区块加载 | `updateChunks`（磁盘） | `updateChunks`（网络发送） |
 | 渲染实体 | 主机遍历 `render_snapshots`；客机 ECS view（无服务端线程）
   两者都用 3 槽环缓冲，`render_time = now - 33ms` | 同主机 |
@@ -308,17 +310,23 @@ packed_pos (32 bits):
 - 天空时间 = `tick_count × TICK_DT + accumulator`，与渲染插值一致
 - 多人模式下暂停时相机继续跟随
 
-### 实体碰撞检测与射线检测（BVH）
+### 实体碰撞检测（BVH）
 
-使用**动态 AABB 树（BVH）**加速实体间碰撞和射线检测（`src/bvh.zig`）：
+使用**动态 AABB 树（BVH）**加速实体间碰撞和排斥（`src/bvh.zig`）：
 
-- **排斥力宽相位**：每个物理 tick 开头清空并重建 BVH，遍历所有实体插入紧凑 AABB
+- **排斥力宽相位**：每个物理 tick 开头清空并重建 BVH，遍历 `Position+Collider+Velocity` 实体
   - 胖 AABB（margin=50%）粗筛候选对 → 紧凑 AABB 二次精筛 → 施加排斥力
+  - `updatePhysics` 参数 `push_players` + `local_player_id` 控制谁被推：
+    - **客机** `push_players=true`：只推 `Player.id == local_player_id` 的实体（自己）
+    - **服务端** `push_players=false`：推非玩家实体（AI）+ `local_player_id` 匹配的主机玩家
   - 将 O(n²) 降至接近 O(n log n)
-- **射线检测**：物理 tick 之间 BVH 保持有效，射线遍历树（O(log n)）取代线性扫描全部实体
-  - BVH 节点 AABB 粗筛 → 叶子节点的紧凑 AABB 精测 → 返回最近实体
 - 树结构采用增量插入 + SAH 启发式搜索兄弟节点
 - BVH 叶子节点存储完整的 `ECS.Entity`（含 version），不再丢失 zig-ecs 版本号信息
+
+### 实体射线检测（客机）
+
+客机左键攻击时遍历 `Position+Collider` 实体做 AABB-ray 相交测试（线性扫描，不依赖 BVH）。
+快照实体数量少，线性扫描足够快。服务端 AI 寻路/攻击仍使用 BVH 加速的 `raycastEntities`。
 
 ---
 

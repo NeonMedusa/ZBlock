@@ -21,6 +21,8 @@ pub const ClientInput = struct {
     hotbar_slot: u32,
     target: Vec3i = Vec3i.zero,
     place_face: u8 = 0,
+    attack_entity: bool = false,
+    attack_target_raw: u32 = 0, // 服务端 ECS.Entity 编码为 u32
 };
 
 /// 服务端 → 客户端：实体状态快照
@@ -42,12 +44,20 @@ pub const BlockUpdate = struct {
     origin_player_id: u32, // 发起者，网络线程据此跳过发给发起者
 };
 
+/// 掉落更新（嵌入 ServerState）
+pub const DropUpdate = struct {
+    item_id: u32,
+    count: u32,
+    target_player_id: u32,
+};
+
 pub const ServerState = struct {
     serial: u32,
     tick_count: u64, // 服务端 tick 序号（插值时间线用）
     host_time: i64,  // 主机发送时的单调时钟 ns（延迟测量用）
     entities: []const EntitySnapshot,
     block_updates: []const BlockUpdate,
+    drops: []const DropUpdate,
 };
 
 /// 设置 socket 接收超时（Windows 用 DWORD 毫秒，其他平台用 timeval）
@@ -121,7 +131,8 @@ pub fn recvInput(fd: winsock.socket_t, input: *ClientInput) bool {
 pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
     const tag: u32 = 1;
     const bu_count_u32: u32 = @intCast(state.block_updates.len);
-    const payload_len = 8 + 8 + 8 + state.entities.len * @sizeOf(EntitySnapshot) + 4 + state.block_updates.len * @sizeOf(BlockUpdate);
+    const drop_count_u32: u32 = @intCast(state.drops.len);
+    const payload_len = 8 + 8 + 8 + state.entities.len * @sizeOf(EntitySnapshot) + 4 + state.block_updates.len * @sizeOf(BlockUpdate) + 4 + state.drops.len * @sizeOf(DropUpdate);
     var buf: std.ArrayListUnmanaged(u8) = .empty;
     defer buf.deinit(std.heap.page_allocator);
     buf.ensureTotalCapacity(std.heap.page_allocator, payload_len) catch {};
@@ -141,6 +152,12 @@ pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
     for (state.block_updates) |*u| {
         @memcpy(buf.items[offset..][0..@sizeOf(BlockUpdate)], std.mem.asBytes(u));
         offset += @sizeOf(BlockUpdate);
+    }
+    std.mem.writeInt(u32, buf.items[offset..][0..4], drop_count_u32, .little);
+    offset += 4;
+    for (state.drops) |*d| {
+        @memcpy(buf.items[offset..][0..@sizeOf(DropUpdate)], std.mem.asBytes(d));
+        offset += @sizeOf(DropUpdate);
     }
     _ = winsock.@"send"(fd, buf.items.ptr, @intCast(buf.items.len), 0);
 }
@@ -263,6 +280,18 @@ pub fn recvState(fd: winsock.socket_t, allocator: std.mem.Allocator, state: *Ser
         if (bu_bytes == 0) return false;
     }
     state.block_updates = updates;
+
+    // 读取掉落更新
+    var drop_header: [4]u8 = undefined;
+    if (recvAll(fd, &drop_header) < 4) return false;
+    const drop_count = std.mem.readInt(u32, &drop_header, .little);
+    if (drop_count > 64) return false;
+    const drops = allocator.alloc(DropUpdate, drop_count) catch return false;
+    if (drop_count > 0) {
+        const drop_bytes = recvAll(fd, std.mem.sliceAsBytes(drops));
+        if (drop_bytes == 0) return false;
+    }
+    state.drops = drops;
     return true;
 }
 

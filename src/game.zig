@@ -66,7 +66,7 @@ next_player_id: u32 = 1,
 client_fd: winsock.socket_t = undefined, // 客机端：主机 fd
 client_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 remote_player: ?ECS.Entity = null, // 客机端：自身玩家实体
-snapshot_info: std.AutoHashMapUnmanaged(u64, struct { entity: ECS.Entity, player_id: u32 }) = .{}, // 客机端：快照索引→(实体, player_id)
+snapshot_info: std.AutoHashMapUnmanaged(u64, struct { entity: ECS.Entity, player_id: u32, server_entity_raw: u32 }) = .{}, // 客机端：快照索引→(实体, player_id, 服务端实体标识)
 net_thread: ?std.Thread = null,
 net_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
 net_mutex: std.Io.Mutex = .init, // 保护 net_cam_yaw/pitch
@@ -925,6 +925,8 @@ fn hostNetworkThread(self: *Game) void {
                 .place_block_id = self.hotbar.slots[if (input.hotbar_slot < 9) input.hotbar_slot else self.hotbar.selected].item_id,
                 .target = input.target,
                 .place_face = input.place_face,
+                .attack_entity = input.attack_entity,
+                .attack_target_raw = input.attack_target_raw,
             }) catch {};
         }
 
@@ -957,11 +959,15 @@ fn hostNetworkThread(self: *Game) void {
             }
         }
 
-        // 取出方块更新（一次读出，所有客户端共享）
+        // 取出方块更新和掉落（一次读出，所有客户端共享）
         self.server.pending_block_updates_mutex.lockUncancelable(io);
         var block_updates = self.server.pending_block_updates;
         self.server.pending_block_updates = .empty;
         self.server.pending_block_updates_mutex.unlock(io);
+        self.server.pending_drops_mutex.lockUncancelable(io);
+        var pending_drops = self.server.pending_drops;
+        self.server.pending_drops = .empty;
+        self.server.pending_drops_mutex.unlock(io);
 
         // ── 遍历所有客户端，各自发送 ──
         var ci: usize = 0;
@@ -1009,21 +1015,30 @@ fn hostNetworkThread(self: *Game) void {
         for (self.clients.items) |*c| {
             const state_serial = self.server.tick_count;
             // 过滤掉 origin=自己的 block_update（已由本地预测处理）
-            var filtered: std.ArrayListUnmanaged(Network.BlockUpdate) = .empty;
-            defer filtered.deinit(self.server.allocator);
+            var filtered_bu: std.ArrayListUnmanaged(Network.BlockUpdate) = .empty;
+            defer filtered_bu.deinit(self.server.allocator);
             for (block_updates.items) |*u| {
                 if (u.origin_player_id != c.player_id)
-                    filtered.append(self.server.allocator, u.*) catch {};
+                    filtered_bu.append(self.server.allocator, u.*) catch {};
+            }
+            // 过滤出该客户端的掉落
+            var filtered_drops: std.ArrayListUnmanaged(Network.DropUpdate) = .empty;
+            defer filtered_drops.deinit(self.server.allocator);
+            for (pending_drops.items) |*d| {
+                if (d.target_player_id == c.player_id)
+                    filtered_drops.append(self.server.allocator, d.*) catch {};
             }
             Network.sendState(c.fd, &.{
                 .serial = @truncate(state_serial),
                 .tick_count = snap_tick,
                 .host_time = now_ns,
                 .entities = snapshots[0..count],
-                .block_updates = filtered.items,
+                .block_updates = filtered_bu.items,
+                .drops = filtered_drops.items,
             });
         }
         block_updates.deinit(self.server.allocator);
+        pending_drops.deinit(self.server.allocator);
     }
 }
 
@@ -1095,13 +1110,65 @@ fn produceMoveIntent(self: *Game) void {
 }
 
 /// 本地预测 + 返回目标坐标（主机/客机共用）
-fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8) void {
+/// 左键：同时检测实体和方块，谁近打谁
+/// attack_target_raw：输出命中的服务端实体标识（客机用，host 模式忽略）
+fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8, attack_target_raw: *u32) void {
     if (self.break_once) {
         const ray = Raycast.Ray.init(self.camera.position, self.camera.front);
-        const hit = Raycast.raycastWorld(&self.server.block_world, ray, 8.0);
-        if (hit.hit) {
-            target.* = hit.block_pos;
-            self.server.block_world.setBlock(hit.block_pos, BlockState.fromName("air")) catch {};
+        const block_hit = Raycast.raycastWorld(&self.server.block_world, ray, 8.0);
+        var entity_hit: ?ECS.Entity = null;
+        var entity_dist: f32 = 8.0;
+        // 遍历注册表检测实体（依赖 BVH 不可靠，直接迭代 Position+Collider）
+        {
+            var ev = self.server.registry.view(.{ Comps.Position, Comps.Collider }, .{});
+            var ei = ev.entityIterator();
+            while (ei.next()) |e| {
+                const epos = ev.get(Comps.Position, e);
+                const ecol = ev.get(Comps.Collider, e);
+                const half = ecol.width / 2.0;
+                const t = Raycast.rayAABBEx(epos.vec.x - half, epos.vec.x + half, epos.vec.y, epos.vec.y + ecol.height, epos.vec.z - half, epos.vec.z + half, ray.origin, ray.direction);
+                if (t == null or t.? > entity_dist or t.? <= 0) continue;
+                entity_hit = e;
+                entity_dist = t.?;
+            }
+        }
+
+        if (entity_hit) |e| {
+            if (!block_hit.hit or entity_dist < block_hit.distance) {
+                // 检查是否自伤
+                const is_self = if (self.server.registry.tryGet(Comps.Player, e)) |p| p.id == self.server.player_id else false;
+                if (!is_self) {
+                    // 主机模式：本地应用伤害
+                    if (self.network_mode != .client) {
+                        if (self.server.registry.tryGet(Comps.Health, e)) |health| {
+                            health.current -= 10;
+                            if (health.current <= 0) {
+                                if (self.server.registry.tryGet(Comps.AIAgent, e)) |agent| {
+                                    const rolls = Drops.rollEntityDrops(@as(usize, agent.type_id.id));
+                                    for (rolls.items[0..rolls.count]) |r| tryItemToInventory(self, r.item_id, r.count);
+                                }
+                                self.server.block_world.cleanupEntity(&self.server.registry, e);
+                                self.server.registry.destroy(e);
+                            }
+                        }
+                    }
+                    // 输出服务端实体标识
+                    if (self.network_mode == .client) {
+                        var iter = self.snapshot_info.iterator();
+                        while (iter.next()) |entry| {
+                            if (std.meta.eql(entry.value_ptr.*.entity, e)) {
+                                attack_target_raw.* = entry.value_ptr.*.server_entity_raw;
+                                break;
+                            }
+                        }
+                    } else {
+                        attack_target_raw.* = @as(u32, @bitCast(e));
+                    }
+                }
+            }
+        } else if (block_hit.hit) {
+            target.* = block_hit.block_pos;
+            self.server.block_world.setBlock(block_hit.block_pos, BlockState.fromName("air")) catch {};
         }
     }
     if (self.place_once) {
@@ -1167,7 +1234,8 @@ fn collectHostActions(self: *Game) PlayerInput {
 
     var target = Vec3i.zero;
     var place_face: u8 = 0;
-    predictBlockAction(self, &target, &place_face);
+    var attack_raw: u32 = 0;
+    predictBlockAction(self, &target, &place_face, &attack_raw);
 
     // 写入 MoveIntent（与 clientTick 一致，主机玩家移动不再经过服务端队列）
     produceMoveIntent(self);
@@ -1211,8 +1279,8 @@ fn clientTick(self: *Game) !void {
             self.server.registry.add(rp, Comps.Flying{});
         }
     }
-    // 跑本地物理（碰撞、重力）
-    self.server.block_world.updatePhysics(&self.server.registry, TICK_DT);
+    // 跑本地物理（碰撞、重力）——客机：只推自己 ID 匹配的玩家实体
+    self.server.block_world.updatePhysics(&self.server.registry, TICK_DT, true, self.server.player_id);
     // 推入环缓冲（相机插值用，与主机逻辑统一）
     if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos2| pushEntityPos(pos2, pos2.vec);
     // 读取物理运算后的位置，提交给服务器
@@ -1223,12 +1291,17 @@ fn clientTick(self: *Game) !void {
     intent.cam_pitch = self.camera.pitch;
 
     // 本地预测（与主机 collectHostActions 共用 predictBlockAction）
-    predictBlockAction(self, &intent.target, &intent.place_face);
+    var attack_raw: u32 = 0;
+    predictBlockAction(self, &intent.target, &intent.place_face, &attack_raw);
     intent.break_block = self.break_once;
     intent.place_block = self.place_once;
     self.break_once = false;
     self.place_once = false;
     intent.hotbar_slot = self.hotbar.selected;
+    if (attack_raw != 0) {
+        intent.attack_entity = true;
+        intent.attack_target_raw = attack_raw;
+    }
 
     Network.sendInput(@as(winsock.socket_t, @intCast(self.client_fd)), &intent);
 }
@@ -1269,8 +1342,11 @@ fn clientReceivePackets(self: *Game) void {
                 self.allocator.free(chunk.data);
             }
         } else if (tag == 1) {
-            // 释放上一个 state 的 entities
-            if (state_initialized) self.allocator.free(state.entities);
+            // 释放上一个 state 的 entities 和 drops
+            if (state_initialized) {
+                self.allocator.free(state.entities);
+                if (state.drops.len > 0) self.allocator.free(state.drops);
+            }
 
             const got = Network.recvState(self.client_fd, self.allocator, &state);
             if (!got) {
@@ -1292,6 +1368,16 @@ fn clientReceivePackets(self: *Game) void {
                 self.allocator.free(state.block_updates);
                 state.block_updates = &.{}; // 防止后续 defer 重复释放
             }
+            // 处理掉落（target_player_id == self 时加入背包）
+            for (state.drops) |drop| {
+                if (drop.target_player_id == self.server.player_id) {
+                    tryItemToInventory(self, drop.item_id, drop.count);
+                }
+            }
+            if (state.drops.len > 0) {
+                self.allocator.free(state.drops);
+                state.drops = &.{};
+            }
         } else if (tag == 3) {
             const unload = Network.recvChunkUnload(self.client_fd);
             if (unload) |u| {
@@ -1301,7 +1387,10 @@ fn clientReceivePackets(self: *Game) void {
     }
 
     if (!state_initialized) return;
-    defer self.allocator.free(state.entities);
+    defer {
+        self.allocator.free(state.entities);
+        if (state.drops.len > 0) self.allocator.free(state.drops);
+    }
 
     // 复制到渲染快照缓冲区
     self.render_snapshot_count = @as(u32, @intCast(state.entities.len));
@@ -1337,8 +1426,9 @@ fn clientReceivePackets(self: *Game) void {
             self.server.registry.add(entity, Comps.Position{ .vec = snap.pos, .prev = snap.pos });
             if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, snap.pos);
             self.server.registry.add(entity, Comps.Collider{ .width = einfo.collider_width, .height = einfo.collider_height });
+            self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero }); // 进入 BVH 供实体碰撞检测
             self.server.registry.add(entity, Comps.Facing{});
-            gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id };
+            gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id, .server_entity_raw = @as(u32, @bitCast(snap.entity)) };
         } else {
             if (self.server.registry.tryGet(Comps.Position, gop.value_ptr.*.entity)) |pos| {
                 pushEntityPos(pos, snap.pos);
@@ -1538,27 +1628,7 @@ fn syncCameraFromPlayer(self: *Game) void {
             // 从实体 3 槽环形缓冲区查插值位置（主机/客机统一）
             const rend_now = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
             const rend_time = rend_now -| 33_000_000;
-            var rend_pos: Vec3 = undefined;
-            var found = false;
-            if (pos.render_buf_count >= 2 and pos.render_buf_count <= 3) {
-                const newest = (pos.render_buf_head + 2) % 3;
-                var ri: u32 = 0;
-                while (ri < pos.render_buf_count - 1) {
-                    const ni = (newest + 3 - ri) % 3;
-                    const oi = (ni + 2) % 3;
-                    if (pos.render_buf_time[oi] <= rend_time and pos.render_buf_time[ni] > rend_time) {
-                        const interval = pos.render_buf_time[ni] - pos.render_buf_time[oi];
-                        if (interval > 0) {
-                            const alpha = @min(@max(@as(f32, @floatFromInt(rend_time - pos.render_buf_time[oi])) / @as(f32, @floatFromInt(interval)), 0.0), 1.0);
-                            rend_pos = Vec3.lerp(pos.render_buf_pos[oi], pos.render_buf_pos[ni], alpha);
-                        } else rend_pos = pos.render_buf_pos[ni];
-                        found = true;
-                        break;
-                    }
-                    ri += 1;
-                }
-            }
-            const render_pos = if (found) rend_pos else if (pos.render_buf_count > 0) pos.render_buf_pos[(pos.render_buf_head + 2) % 3] else Vec3.zero;
+            const render_pos = pos.interpPos(rend_time);
             const eye = render_pos.add(Vec3.new(0, 1.6, 0));
             self.camera.position = eye;
             self.ubo.camera_pos = eye;
@@ -1673,6 +1743,7 @@ const SkyPipeline = @import("sky.zig").SkyPipeline;
 const ShadowPipeline = @import("shadow.zig").ShadowPipeline;
 
 const BlockWorld = @import("block_world.zig");
+const Drops = @import("drops.zig");
 const TICK_DT = BlockWorld.TICK_DT;
 const BlockRegistry = @import("block_registry.zig");
 const BlockState = BlockRegistry.BlockState;

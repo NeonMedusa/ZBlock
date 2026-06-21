@@ -887,7 +887,9 @@ pub const BlockWorld = struct {
     }
 
     /// 物理更新：每帧处理实体的垂直移动、水平移动、潜行边缘保护、碰撞解算以及实体间排斥。
-    pub fn updatePhysics(self: *BlockWorld, registry: *ECS.Registry, dt: f32) void {
+    /// push_players: true  = 客户端模式：只推 local_player_id 匹配的自身玩家实体
+    ///               false = 服务端模式：推所有 AI + host_player_id 匹配的主机玩家
+    pub fn updatePhysics(self: *BlockWorld, registry: *ECS.Registry, dt: f32, push_players: bool, local_player_id: u32) void {
         // ============================================================
         // 第一阶段：遍历所有物理实体，更新速度与位置
         // ============================================================
@@ -1071,6 +1073,8 @@ pub const BlockWorld = struct {
             const Ctx = struct {
                 registry: *ECS.Registry,
                 repel: f32,
+                push_players: bool,
+                local_player_id: u32,
                 fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void {
                     const ea = a;
                     const eb = b;
@@ -1101,13 +1105,25 @@ pub const BlockWorld = struct {
                     const overlap_z = @min(box_a.max_z - box_b.min_z, box_b.max_z - box_a.min_z);
                     const push = @max(overlap_x, overlap_z) * ctx.repel;
 
-                    vel_a.vec.x -= nx * push;
-                    vel_a.vec.z -= nz * push;
-                    vel_b.vec.x += nx * push;
-                    vel_b.vec.z += nz * push;
+                    // 推 A：玩家只推自己；AI 仅在服务端（push_players=false）被推
+                    {
+                        const player = ctx.registry.tryGet(Comps.Player, ea);
+                        const should_push = if (player) |p| p.id == ctx.local_player_id else !ctx.push_players;
+                        if (should_push) {
+                            vel_a.vec.x -= nx * push; vel_a.vec.z -= nz * push;
+                        }
+                    }
+                    // 推 B
+                    {
+                        const player = ctx.registry.tryGet(Comps.Player, eb);
+                        const should_push = if (player) |p| p.id == ctx.local_player_id else !ctx.push_players;
+                        if (should_push) {
+                            vel_b.vec.x += nx * push; vel_b.vec.z += nz * push;
+                        }
+                    }
                 }
             };
-            self.bvh.queryPairs(Ctx{ .registry = registry, .repel = REPEL_FORCE }, Ctx.callback);
+            self.bvh.queryPairs(Ctx{ .registry = registry, .repel = REPEL_FORCE, .push_players = push_players, .local_player_id = local_player_id }, Ctx.callback);
         }
     }
 
