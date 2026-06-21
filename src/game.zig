@@ -618,7 +618,7 @@ pub fn deinit(self: *@This()) void {
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
     Log.info("startSave begin '{s}'", .{name});
-    self.server.chunk_radius = 4;
+    self.server.chunk_radius = 32;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，Server 已经被重建，只需要重建 BlockWorld
@@ -641,7 +641,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
     self.last_snapshot_serial = std.math.maxInt(u64);
     self.host_snap_valid = false;
-    self.server.chunk_radius = 4;
+    self.server.chunk_radius = 32;
     self.network_mode = .client;
 
     self.net_thread = null;

@@ -21,7 +21,19 @@ fn drawFrame(game: *Game, comptime world: bool) void {
     game.ubo.ambient_ground = game.sky_pipeline.state.ambient_ground;
     game.ubo.time = sky_time;
 
+    var chunk_origins: [4096]Vec3i = undefined;
+    var chunk_count: u32 = 0;
     if (world) {
+        // 持锁整帧，保护 chunks map 不被服务端线程修改
+        game.server.block_world.chunk_mutex.lockSharedUncancelable(io);
+        {
+            var chunk_it = game.server.block_world.chunks.iterator();
+            while (chunk_it.next()) |entry| {
+                if (chunk_count >= chunk_origins.len) break;
+                chunk_origins[chunk_count] = entry.key_ptr.*;
+                chunk_count += 1;
+            }
+        }
         // inverse(proj × view_rot)：从 NDC 方向反算世界方向（全屏三角 cubemap）
         var view_rot = game.ubo.view_matrix;
         view_rot.m[3][0] = 0;
@@ -95,20 +107,14 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         };
         entity_idx += 1;
 
-        // 为每个已加载的 chunk 生成一个实例（携带 chunk 原点偏移）
+        // 用快照构建实例数据
         chunk_instance_idx = ins_idx;
-        {
-            game.server.block_world.chunk_mutex.lockSharedUncancelable(io);
-            defer game.server.block_world.chunk_mutex.unlockShared(io);
-            var chunk_it = game.server.block_world.chunks.iterator();
-            while (chunk_it.next()) |entry| {
-                const origin = entry.key_ptr.*;
-                game.res_manager.instances_data[ins_idx] = InstanceData{
-                    .transform = Mat4.fromTranslate(Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)))),
-                    .entity_idx = chunk_entity_idx,
-                };
-                ins_idx += 1;
-            }
+        for (chunk_origins[0..chunk_count]) |origin| {
+            game.res_manager.instances_data[ins_idx] = InstanceData{
+                .transform = Mat4.fromTranslate(Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)))),
+                .entity_idx = chunk_entity_idx,
+            };
+            ins_idx += 1;
         }
 
         // 上传 GPU 数据
@@ -158,13 +164,11 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         // 阴影 pass：使用 chunk_handle 渲染区块
         {
             var chunk_ins_idx = chunk_instance_idx;
-            game.server.block_world.chunk_mutex.lockSharedUncancelable(io);
-            defer game.server.block_world.chunk_mutex.unlockShared(io);
-            var s_chunk_it = game.server.block_world.chunks.iterator();
             Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.chunk_handle);
-            while (s_chunk_it.next()) |entry| {
-                const loaded = &entry.value_ptr.*;
-                const origin = entry.key_ptr.*;
+            for (chunk_origins[0..chunk_count]) |origin| {
+                const loaded = game.server.block_world.chunks.getPtr(origin) orelse {
+                    chunk_ins_idx += 1; continue;
+                };
                 const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
                 const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));
                 if (!shadow_frustum.intersectsAABB(min, max)) {
@@ -251,12 +255,10 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_chunk);
         {
             var chunk_ins_idx = chunk_instance_idx;
-            game.server.block_world.chunk_mutex.lockSharedUncancelable(io);
-            defer game.server.block_world.chunk_mutex.unlockShared(io);
-            var chunk_it = game.server.block_world.chunks.iterator();
-            while (chunk_it.next()) |entry| {
-                const loaded = &entry.value_ptr.*;
-                const origin = entry.key_ptr.*;
+            for (chunk_origins[0..chunk_count]) |origin| {
+                const loaded = game.server.block_world.chunks.getPtr(origin) orelse {
+                    chunk_ins_idx += 1; continue;
+                };
                 const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
                 const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));
                 if (!frustum.intersectsAABB(min, max)) {
@@ -278,6 +280,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             }
         }
     }
+    if (world) game.server.block_world.chunk_mutex.unlockShared(io);
 
     // 下层 UI（槽位背景等）
     if (game.ui_system.bg_index_count > 0) {
@@ -407,6 +410,7 @@ fn tryRenderEntity(
 const Wgpu = @import("imports.zig").Wgpu;
 
 const Vec3 = Algebra.Vec3;
+const Vec3i = Algebra.Vec3i;
 const Mat4 = Algebra.Mat4;
 
 const EntityData = RendCTX.EntityData;

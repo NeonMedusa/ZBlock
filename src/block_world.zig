@@ -355,8 +355,8 @@ pub const BlockWorld = struct {
         var material_registry = try MaterialRegistry.init(allocator, gctx, pipeline);
         errdefer material_registry.deinit();
 
-        const count = (chunk_radius + 1) * (chunk_radius + 1);
-        const max_chunks = count * 3; // 3x 预分配余量，覆盖加载 + 异步排队等场景
+        const count = (chunk_radius * 2 + 1) * (chunk_radius * 2 + 1);
+        const max_chunks = count * 5; // 5x 预分配余量，覆盖加载 + 异步排队、多人游戏等场景
 
         var chunks = std.AutoHashMap(Vec3i, LoadedChunk).init(allocator);
         errdefer chunks.deinit();
