@@ -381,6 +381,7 @@ pub const Server = struct {
         if (block_id == 0) return;
         const place_pos = Vec3i.new(target_x, target_y, target_z);
         const facing: Direction = @enumFromInt(place_face);
+        // 信任客机，不验算实体重叠
         self.block_world.setBlock(place_pos, BlockState{ .block_id = BlockId.fromInt(block_id), .facing = facing }) catch {};
         {
             const upd = Network.BlockUpdate{

@@ -13,8 +13,9 @@ pub const WireframePipeline = struct {
     pipeline_layout: Wgpu.WGPUPipelineLayout,
     shader_module: Wgpu.WGPUShaderModule,
 
-    pub fn init(game: *Game, shader_file_path: []const u8) !WireframePipeline {
-        const shader_module = try game.gctx.createShaderModule(io, shader_file_path);
+    pub fn init(game: *Game, comptime shader_path: []const u8) !WireframePipeline {
+        const shader_src = Gctx.loadEmbeddedShader(shader_path);
+        const shader_module = game.gctx.createShaderModuleFromSource(&shader_src);
 
         // 创建全局绑定组布局（只包含 scene_uniform，因为线框不需要 entities_data 和 ins_data）
         // 但为了与主渲染管线统一，你也可以保留所有三个 binding，但线框着色器只使用 scene_uniform。

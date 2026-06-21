@@ -13,8 +13,9 @@ pipeline_static: Wgpu.WGPURenderPipeline,
 pipeline_skinned: Wgpu.WGPURenderPipeline,
 pipeline_chunk: Wgpu.WGPURenderPipeline,
 
-pub fn init(game: *Game, shader_file_path: []const u8) !@This() {
-    const shader_module = try game.gctx.createShaderModule(io, shader_file_path);
+pub fn init(game: *Game, comptime shader_path: []const u8) !@This() {
+    const shader_src = Gctx.loadEmbeddedShader(shader_path);
+    const shader_module = game.gctx.createShaderModuleFromSource(&shader_src);
     // 创建 binding group layout
     const global_bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
         .{ // scene_uniform

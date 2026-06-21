@@ -206,15 +206,12 @@ fn requestDeviceCallback(
 }
 
 // 创建shader模块
-pub fn createShaderModule(gctx: *Gctx, io: std.Io, shader_file_path: []const u8) !Wgpu.WGPUShaderModule {
-    const allocator = std.heap.page_allocator;
-    const shader_code = try std.Io.Dir.cwd().readFileAlloc(io, shader_file_path, allocator, .unlimited);
-    defer allocator.free(shader_code);
-
+/// 从内存中的 WGSL 源码创建 shader module（替代文件读取）
+pub fn createShaderModuleFromSource(gctx: *Gctx, source: []const u8) Wgpu.WGPUShaderModule {
     const shader_source = Wgpu.struct_WGPUShaderSourceWGSL{
         .code = .{
-            .data = shader_code.ptr,
-            .length = shader_code.len,
+            .data = source.ptr,
+            .length = source.len,
         },
         .chain = .{
             .sType = Wgpu.WGPUSType_ShaderSourceWGSL,
@@ -224,6 +221,22 @@ pub fn createShaderModule(gctx: *Gctx, io: std.Io, shader_file_path: []const u8)
         .nextInChain = &shader_source.chain,
     };
     return Wgpu.wgpuDeviceCreateShaderModule(gctx.device, &shader_desc);
+}
+
+/// 编译期嵌入 shader 文件，运行时 XOR 解密（简单防随手提取）
+pub fn loadEmbeddedShader(comptime path: []const u8) [@embedFile(path).len]u8 {
+    const embedded = @embedFile(path);
+    // 编译期加密 → 二进制里存的是加密数据
+    const encrypted: [embedded.len]u8 = comptime blk: {
+        @setEvalBranchQuota(100_000);
+        var buf: [embedded.len]u8 = undefined;
+        for (&buf, embedded) |*d, s| d.* = s ^ 0x5A;
+        break :blk buf;
+    };
+    // 运行时解密还原明文
+    var result: [encrypted.len]u8 = undefined;
+    for (&result, encrypted) |*d, s| d.* = s ^ 0x5A;
+    return result;
 }
 
 // 编译期自动生成WGPUVertexAttribute

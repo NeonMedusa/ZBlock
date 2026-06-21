@@ -25,7 +25,9 @@ pub const ShadowPipeline = struct {
     light_vp: Mat4,
 
     pub fn init(gctx: *Gctx) !ShadowPipeline {
-        const shader_module = try gctx.createShaderModule(io, "resources\\shaders\\shadow_shader.wgsl");
+        comptime { _ = @import("gctx.zig"); }
+        const shader_src = @import("gctx.zig").loadEmbeddedShader("shaders/shadow_shader.wgsl");
+        const shader_module = gctx.createShaderModuleFromSource(&shader_src);
         const map_size: u32 = 2048; // 2048² 深度贴图
 
         // BGL: binding 0 = LightUniform, binding 1 = ins_data (storage)

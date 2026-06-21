@@ -281,7 +281,8 @@ pub const SkyPipeline = struct {
     moon_sampler: Wgpu.WGPUSampler,
 
     pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
-        const shader_module = try gctx.createShaderModule(io, "resources/shaders/sky_shader.wgsl");
+        const shader_src = @import("gctx.zig").loadEmbeddedShader("shaders/sky_shader.wgsl");
+        const shader_module = gctx.createShaderModuleFromSource(&shader_src);
 
         // CPU 烘培 3D 噪声 cubemap（6 面，每面 512²）
         const noise = @import("noise.zig");

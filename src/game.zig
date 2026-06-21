@@ -510,10 +510,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.shadow_pipeline = try ShadowPipeline.init(&self.gctx);
 
     // 创建渲染管线
-    self.render_pipeline = try RenderPipeline.init(
-        self,
-        "resources/shaders/render_shader.wgsl",
-    );
+    self.render_pipeline = try RenderPipeline.init(self, "shaders/render_shader.wgsl");
 
     // 将阴影深度贴图 + 比较采样器绑定到渲染管线 group 2
     const shadow_bind_group = Wgpu.wgpuDeviceCreateBindGroup(self.gctx.device, &.{
@@ -527,10 +524,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     self.render_pipeline.setShadowBindGroup(shadow_bind_group);
 
     // 线框管线（调试用）
-    self.wireframe_pipeline = try WireframePipeline.init(
-        self,
-        "resources/shaders/wireframe_shader.wgsl",
-    );
+    self.wireframe_pipeline = try WireframePipeline.init(self, "shaders/wireframe_shader.wgsl");
 
     // 程序化天空
     self.sky_pipeline = try SkyPipeline.init(&self.gctx, 42);
@@ -618,7 +612,7 @@ pub fn deinit(self: *@This()) void {
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
     Log.info("startSave begin '{s}'", .{name});
-    self.server.chunk_radius = 32;
+    self.server.chunk_radius = 4;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，Server 已经被重建，只需要重建 BlockWorld
@@ -641,7 +635,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
     self.last_snapshot_serial = std.math.maxInt(u64);
     self.host_snap_valid = false;
-    self.server.chunk_radius = 32;
+    self.server.chunk_radius = 4;
     self.network_mode = .client;
 
     self.net_thread = null;
@@ -1127,6 +1121,33 @@ fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8) void {
                     if (fn_.x != 0) break :blk if (fn_.x > 0) Direction.west else Direction.east;
                     break :blk if (fn_.z > 0) Direction.south else Direction.north;
                 };
+                // 检查是否与实体重叠（注释掉 if (!can_place) return; 即可关闭）
+                var can_place = true;
+                {
+                    const block_box = AABB{
+                        .min_x = @as(f32, @floatFromInt(place_pos.x)),
+                        .max_x = @as(f32, @floatFromInt(place_pos.x + 1)),
+                        .min_y = @as(f32, @floatFromInt(place_pos.y)),
+                        .max_y = @as(f32, @floatFromInt(place_pos.y + 1)),
+                        .min_z = @as(f32, @floatFromInt(place_pos.z)),
+                        .max_z = @as(f32, @floatFromInt(place_pos.z + 1)),
+                    };
+                    var ev = self.server.registry.view(.{ Comps.Position, Comps.Collider }, .{});
+                    var ei = ev.entityIterator();
+                    while (ei.next()) |entity| {
+                        const epos = ev.get(Comps.Position, entity);
+                        const ecol = ev.get(Comps.Collider, entity);
+                        const ebox = BlockWorld.BlockWorld.getEntityAABB(epos.vec, ecol);
+                        if (ebox.min_x < block_box.max_x and ebox.max_x > block_box.min_x and
+                            ebox.min_y < block_box.max_y and ebox.max_y > block_box.min_y and
+                            ebox.min_z < block_box.max_z and ebox.max_z > block_box.min_z)
+                        {
+                            can_place = false;
+                            break;
+                        }
+                    }
+                }
+                if (!can_place) return; // ← 注释这行关闭实体重叠检查
                 target.* = place_pos;
                 place_face.* = @intFromEnum(facing);
                 self.server.block_world.setBlock(place_pos, BlockState{ .block_id = BlockId.fromInt(sel.item_id), .facing = facing }) catch {};

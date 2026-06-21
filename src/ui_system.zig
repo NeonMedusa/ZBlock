@@ -298,7 +298,7 @@ pub fn init(allocator: std.mem.Allocator, gctx: *Gctx, game: *Game, font_path: [
     self.sdf_sampler = sdf_sampler;
     self.glyph_slots = .{null} ** GLYPH_SLOTS;
     self.next_slot = 0;
-    self.render_pipeline = try UiRenderPipeline.init(gctx, "resources/shaders/ui_render_shader.wgsl", &self);
+    self.render_pipeline = try UiRenderPipeline.init(gctx, "shaders/ui_render_shader.wgsl", &self);
     return self;
 }
 
@@ -757,8 +757,9 @@ const UiRenderPipeline = struct {
     pipeline_layout: Wgpu.WGPUPipelineLayout,
     shader_module: Wgpu.WGPUShaderModule,
 
-    pub fn init(gctx: *Gctx, shader_file_path: []const u8, ui_system: *UiSystem) !@This() {
-        const shader_module = try gctx.createShaderModule(io, shader_file_path);
+    pub fn init(gctx: *Gctx, comptime shader_path: []const u8, ui_system: *UiSystem) !@This() {
+        const shader_src = Gctx.loadEmbeddedShader(shader_path);
+        const shader_module = gctx.createShaderModuleFromSource(&shader_src);
 
         // Binding 布局（3 个入口）
         const bgl_entries = [_]Wgpu.WGPUBindGroupLayoutEntry{
