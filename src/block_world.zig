@@ -168,6 +168,24 @@ pub const Chunk = struct {
                     break :blk base_height_f + threshold * plain_scale + (@exp2(slope * mountain_factor) - 1.0) * mountain_scale;
                 }));
 
+                // 河流：ridge 噪声压低地面高度，后续地表方块逻辑自动处理
+                // const river_scale: f32 = 0.012; // 越大河流越窄弯曲，越小越宽平直
+                // const river_thresh: f32 = 0.7; // 越低河流越多/宽，越高越少/窄
+                // const river_depth_mult: f32 = 40.0; // 越大越深
+                // const river_mountain_limit: f32 = 0.55; // 山脉阈值，高于此值河流逐渐消失
+                // const river_fade_margin: f32 = 0.08; // 过渡带宽度，越大过渡越平缓
+                // const river_fade = 1.0 - @min(@max((noise_val - (river_mountain_limit - river_fade_margin)) / (river_fade_margin * 2.0), 0.0), 1.0);
+                // if (noise_val < river_mountain_limit + river_fade_margin) {
+                //     const river_raw = 1.0 - @abs(Noise.snoise2(
+                //         @as(f32, @floatFromInt(world_x)) * river_scale + 12345.0,
+                //         @as(f32, @floatFromInt(world_z)) * river_scale + 67890.0,
+                //     ));
+                //     if (river_raw > river_thresh) {
+                //         const depth = (river_raw - river_thresh) * river_depth_mult * river_fade;
+                //         ground_position -|= @as(i32, @intFromFloat(depth));
+                //     }
+                // }
+
                 const biome_noise = Noise.perlin2d(
                     @as(f32, @floatFromInt(world_x)) * biome_noise_scale,
                     @as(f32, @floatFromInt(world_z)) * biome_noise_scale,
@@ -177,7 +195,7 @@ pub const Chunk = struct {
 
                 for (0..CHUNK_HEIGHT) |y| {
                     const y_i32: i32 = @intCast(y);
-                    const block_id: BlockId = blk: {
+                    var block_id: BlockId = blk: {
                         if (y_i32 > ground_position) {
                             if (y_i32 < sea_level) break :blk .fromName("water");
                             break :blk .fromName("air");
@@ -192,6 +210,28 @@ pub const Chunk = struct {
                             break :blk .fromName("dirt");
                         }
                     };
+
+                    // 洞穴：Ridged 交集法
+                    // 两个 |snoise3| 薄片相交 → 细长弯曲管道
+                    const cave_scale_a: f32 = 0.04; // A 噪声尺度（大→洞大）
+                    const cave_scale_b: f32 = 0.06; // B 噪声尺度（与 A 略异，产生非对称交叉）
+                    const cave_threshold: f32 = 0.7; // 越高洞穴越多/宽，越低越少/窄
+                    if (block_id != BlockId.fromName("air") and block_id != BlockId.fromName("water") and y_i32 < ground_position - 1) {
+                        const ridged_a = @abs(Noise.snoise3(
+                            @as(f32, @floatFromInt(world_x)) * cave_scale_a + 1000.0,
+                            @as(f32, @floatFromInt(y_i32)) * cave_scale_a,
+                            @as(f32, @floatFromInt(world_z)) * cave_scale_a,
+                        ));
+                        const ridged_b = @abs(Noise.snoise3(
+                            @as(f32, @floatFromInt(world_x)) * cave_scale_b + 2000.0,
+                            @as(f32, @floatFromInt(y_i32)) * cave_scale_b,
+                            @as(f32, @floatFromInt(world_z)) * cave_scale_b,
+                        ));
+                        if (ridged_a + ridged_b < cave_threshold) block_id = .fromName("air");
+                    }
+                    // 基岩层：y=0 无条件铺满
+                    if (y_i32 == 0) block_id = .fromName("bedrock");
+
                     const bs = BlockState.init(block_id);
                     const id_int = bs.block_id.id;
                     const pal_idx = if (idx_lookup[id_int]) |idx| idx else blk: {
@@ -1110,7 +1150,8 @@ pub const BlockWorld = struct {
                         const player = ctx.registry.tryGet(Comps.Player, ea);
                         const should_push = if (player) |p| p.id == ctx.local_player_id else !ctx.push_players;
                         if (should_push) {
-                            vel_a.vec.x -= nx * push; vel_a.vec.z -= nz * push;
+                            vel_a.vec.x -= nx * push;
+                            vel_a.vec.z -= nz * push;
                         }
                     }
                     // 推 B
@@ -1118,7 +1159,8 @@ pub const BlockWorld = struct {
                         const player = ctx.registry.tryGet(Comps.Player, eb);
                         const should_push = if (player) |p| p.id == ctx.local_player_id else !ctx.push_players;
                         if (should_push) {
-                            vel_b.vec.x += nx * push; vel_b.vec.z += nz * push;
+                            vel_b.vec.x += nx * push;
+                            vel_b.vec.z += nz * push;
                         }
                     }
                 }

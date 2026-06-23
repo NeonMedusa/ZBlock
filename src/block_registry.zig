@@ -31,7 +31,7 @@ pub const block_infos = [_]BlockProtoType{
         .occludes = false,
         .is_solid = false,
     },
-    .{
+    .{ // 草方块
         .name = "grass",
         .face_variants = .{ 0, 1, 2, 2, 2, 2 },
         // .is_directional = false,
@@ -39,19 +39,19 @@ pub const block_infos = [_]BlockProtoType{
             .item_name = "grass",
         }},
     },
-    .{
+    .{ // 石
         .name = "stone",
         .drops = &.{.{ .item_name = "stone" }},
     },
-    .{
+    .{ // 土
         .name = "dirt",
         .drops = &.{.{ .item_name = "dirt" }},
     },
-    .{
+    .{ // 沙
         .name = "sand",
         .drops = &.{.{ .item_name = "sand" }},
     },
-    .{
+    .{ // 水
         .name = "water",
         .occludes = false,
         .opacity = 0.5,
@@ -59,11 +59,20 @@ pub const block_infos = [_]BlockProtoType{
         .is_swimmable = true,
         .fluid_resistance = 0.3,
     },
-    .{
+    .{ // 雪
         .name = "snow",
         .drops = &.{.{ .item_name = "snow" }},
     },
-    .{ .name = "foo", .drops = &.{.{ .item_name = "foo" }} },
+    .{ // 基岩：无法破坏（创造模式除外），不掉落
+        .name = "bedrock",
+        .is_solid = true,
+        .durability = 0, // 0 = 不可破坏
+        .drops = &.{},
+    },
+    .{ // 调试用方块
+        .name = "foo",
+        .drops = &.{.{ .item_name = "foo" }},
+    },
 };
 
 pub const MAX_BLOCKS = block_infos.len;

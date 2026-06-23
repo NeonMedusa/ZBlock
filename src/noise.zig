@@ -191,6 +191,60 @@ pub fn fbm3(v: Vec3, octaves: u32) f32 {
     return total;
 }
 
+// 2D Simplex 梯度向量（均匀分布在单位圆上，6 个）
+const GRAD2 = [_]f32{
+    1, 0, -1, 0, 0, 1, 0, -1, 0.707, 0.707, -0.707, 0.707,
+    0.707, -0.707, -0.707, -0.707,
+};
+
+// 2D Simplex 噪声
+pub fn snoise2(xin: f32, yin: f32) f32 {
+    const F2 = 0.5 * (std.math.sqrt(3.0) - 1.0);
+    const G2 = (3.0 - std.math.sqrt(3.0)) / 6.0;
+    const s = (xin + yin) * F2;
+    const i = @floor(xin + s);
+    const j = @floor(yin + s);
+    const t = (i + j) * G2;
+    const X0 = i - t;
+    const Y0 = j - t;
+    const x0 = xin - X0;
+    const y0 = yin - Y0;
+
+    // 判断三角形
+    const i1v: i32 = if (x0 > y0) 1 else 0;
+    const j1v: i32 = if (x0 > y0) 0 else 1;
+    const x1 = x0 - @as(f32, @floatFromInt(i1v)) + G2;
+    const y1 = y0 - @as(f32, @floatFromInt(j1v)) + G2;
+    const x2 = x0 - 1.0 + 2.0 * G2;
+    const y2 = y0 - 1.0 + 2.0 * G2;
+
+    const iu = @as(usize, @as(u8, @intFromFloat(@mod(i, 256.0))));
+    const ju = @as(usize, @as(u8, @intFromFloat(@mod(j, 256.0))));
+    const gi0 = (permMod12[(iu + perm[ju]) & 255] % 8) * 2;
+    const gi1 = (permMod12[(iu + @as(usize, @intCast(i1v)) + perm[(ju + @as(usize, @intCast(j1v))) & 255]) & 255] % 8) * 2;
+    const gi2 = (permMod12[(iu + 1 + perm[(ju + 1) & 255]) & 255] % 8) * 2;
+
+    var n0: f32 = 0;
+    var t0 = 0.5 - x0 * x0 - y0 * y0;
+    if (t0 >= 0) {
+        t0 *= t0;
+        n0 = t0 * t0 * (GRAD2[gi0] * x0 + GRAD2[gi0 + 1] * y0);
+    }
+    var n1: f32 = 0;
+    var t1 = 0.5 - x1 * x1 - y1 * y1;
+    if (t1 >= 0) {
+        t1 *= t1;
+        n1 = t1 * t1 * (GRAD2[gi1] * x1 + GRAD2[gi1 + 1] * y1);
+    }
+    var n2: f32 = 0;
+    var t2 = 0.5 - x2 * x2 - y2 * y2;
+    if (t2 >= 0) {
+        t2 *= t2;
+        n2 = t2 * t2 * (GRAD2[gi2] * x2 + GRAD2[gi2 + 1] * y2);
+    }
+    return 70.0 * (n0 + n1 + n2);
+}
+
 // Simplex 噪声
 const GRAD3 = [_]f32{
     1, 1, 0, -1, 1,  0, 1, -1, 0,  -1, -1, 0,
