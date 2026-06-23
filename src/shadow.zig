@@ -25,7 +25,9 @@ pub const ShadowPipeline = struct {
     light_vp: Mat4,
 
     pub fn init(gctx: *Gctx) !ShadowPipeline {
-        comptime { _ = @import("gctx.zig"); }
+        comptime {
+            _ = @import("gctx.zig");
+        }
         const shader_src = @import("gctx.zig").loadEmbeddedShader("shaders/shadow_shader.wgsl");
         const shader_module = gctx.createShaderModuleFromSource(&shader_src);
         const map_size: u32 = 2048; // 2048² 深度贴图
@@ -191,6 +193,7 @@ pub const ShadowPipeline = struct {
 
     // 计算光源视角的 VP 矩阵（正交投影）
     // n/f 为负值，因为 view 空间中相机前方是 -Z 方向
+    // 中心 Y 也随玩家高度浮动（带 snap），使高矮方块获得相近的阴影精度
     pub fn computeLightVp(self: *ShadowPipeline, sun_dir: Vec3, player_pos: Vec3) void {
         const half_size: f32 = 128.0; // 覆盖 ±128m = 256m 宽
         const dist: f32 = 256.0; // 光源距离中心 256m
@@ -198,7 +201,7 @@ pub const ShadowPipeline = struct {
         const d = sun_dir.norm();
         const center = Vec3.new(
             @round(player_pos.x / snap) * snap,
-            60.0,
+            @round(player_pos.y / snap) * snap,
             @round(player_pos.z / snap) * snap,
         );
         const light_pos = Vec3.new(

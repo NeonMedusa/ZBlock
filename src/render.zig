@@ -43,12 +43,11 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         game.sky_pipeline.updateUniform(&game.gctx, sky_mat, sky_time);
 
         // 阴影光源方向：太阳在水平线上方用太阳，否则用月亮
-        const player_shadow_pos = Vec3.new(game.camera.position.x, 0.0, game.camera.position.z);
         const ldir = if (game.sky_pipeline.state.sun_direction.y > 0.0)
             Vec3.new(-game.sky_pipeline.state.sun_direction.x, game.sky_pipeline.state.sun_direction.y, -game.sky_pipeline.state.sun_direction.z)
         else
             Vec3.new(game.sky_pipeline.state.sun_direction.x, -game.sky_pipeline.state.sun_direction.y, game.sky_pipeline.state.sun_direction.z);
-        game.shadow_pipeline.computeLightVp(ldir, player_shadow_pos);
+        game.shadow_pipeline.computeLightVp(ldir, game.camera.position);
         game.shadow_pipeline.updateUniform(&game.gctx);
         game.ubo.shadow_vp = game.shadow_pipeline.light_vp;
 
@@ -167,7 +166,8 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             Wgpu.wgpuRenderPassEncoderSetPipeline(shadow_pass, game.shadow_pipeline.chunk_handle);
             for (chunk_origins[0..chunk_count]) |origin| {
                 const loaded = game.server.block_world.chunks.getPtr(origin) orelse {
-                    chunk_ins_idx += 1; continue;
+                    chunk_ins_idx += 1;
+                    continue;
                 };
                 const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
                 const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));
@@ -257,7 +257,8 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             var chunk_ins_idx = chunk_instance_idx;
             for (chunk_origins[0..chunk_count]) |origin| {
                 const loaded = game.server.block_world.chunks.getPtr(origin) orelse {
-                    chunk_ins_idx += 1; continue;
+                    chunk_ins_idx += 1;
+                    continue;
                 };
                 const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
                 const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));

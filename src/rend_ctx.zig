@@ -831,7 +831,6 @@ pub const SceneUniform = struct {
     shadow_vp: Mat4 = undefined, // 太阳视角 VP 矩阵（阴影贴图）
     moon_color: Vec3 = undefined, // 月亮颜色
     _pad2: f32 = undefined,
-
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
         const proj_matrix = Mat4.perspectiveReversedZ(

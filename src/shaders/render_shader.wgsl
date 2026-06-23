@@ -159,16 +159,17 @@ const SPECULAR_STRENGTH = 0.5;
 const SPECULAR_SHININESS = 32.0;
 
 // 阴影采样：法线偏移 + 径向畸变
+// off_amt 随距离线性增长（无上限），远处 bias 大以补偿径向畸变导致的分辨率下降
 fn sampleShadow(world_pos: vec3f, normal: vec3f, light_dir: vec3f) -> f32 {
     let n = normalize(normal);
     let n_dot_l = abs(dot(n, light_dir));
     let cam_dist = length(world_pos - scene_uniform.camera_pos);
-    let off_amt = min(0.03 + cam_dist * 0.005, 0.5) * (2.0 - n_dot_l); // 法线偏移：近处小远处大，正对光的面更小
+    let off_amt = (0.06 + cam_dist * 0.01) * (2.0 - n_dot_l);
     let biased = world_pos + n * off_amt;
 
     let p = scene_uniform.shadow_vp * vec4f(biased, 1.0);
     var ndc = p.xyz / p.w;
-    let df = length(ndc.xy) + 0.1; // 与 shadow_shader.wgsl 一致的径向畸变
+    let df = length(ndc.xy) + 0.1; // 径向畸变：中心密、边缘疏
     ndc.x /= df;
     ndc.y /= df;
     let uv = vec2f(ndc.x * 0.5 + 0.5, ndc.y * -0.5 + 0.5); // Y 翻转补偿 framebuffer 坐标系

@@ -84,9 +84,9 @@ SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正�
 |------|-----|------|
 | `half_size` | 128 | 覆盖 ±128m（256m 宽） |
 | `dist` | 256 | 光源距中心 256m |
-| `center Y` | 60 | 视锥中心固定在地面高度 |
+| `center Y` | `player_pos.y` snap 3m | 随玩家高度浮动，高矮方块获得相近阴影精度 |
 | `n / f` | -128 / -640 | 近/远平面，深度范围 512m |
-| `snap` | 3.0 | 中心每 3m 跳一次，消除 VP 微变导致的边缘拉锯 |
+| `snap` | 3.0 | XZ/Y 中心每 3m 跳一次，消除 VP 微变导致的边缘拉锯 |
 
 VP 矩阵 = `proj × lookAt(light_pos, center, (0,1,0))`。
 
@@ -107,11 +107,13 @@ ndc.xy /= distort
 `sampleShadow()` 中，法线偏移是唯一的抗自交手段（无管线 depth bias，无固定 shader bias）：
 
 ```
-off_amt = min(0.03 + cam_dist × 0.005, 0.5) × (2 - |N·L|)
+off_amt = (0.06 + cam_dist × 0.01) × (2 - |N·L|)
 biased  = world_pos + normalize(normal) × off_amt
 ```
 
-正对光的面（|N·L|≈1）偏移 0.03~0.1m，斜面（|N·L|≈0）自动增大至 ~0.5m，距离越远偏移越大。
+正对光的面（|N·L|≈1）偏移 ~0.06m，斜面（|N·L|≈0）自动增大，距离越远偏移越大（无上限）。
+
+理论推导：标称纹素 = `frustumSize / shadowMapSize = 0.125`，经径向畸变放大后 `bias ≥ 0.5 × texel = 0.0625 + 0.00488 × cam_dist`。
 
 ```
 biased → shadow_vp → 畸变 → UV (Y 翻转) → textureSampleCompare → 0/1
@@ -122,10 +124,10 @@ UV 范围外返回 1.0（无阴影）。
 ### 开发经验
 
 1. **ubo 时序**：必须在阴影 pass 后、主 pass 前写入，否则两 pass VP 不同帧 → 闪现
-2. **center snap**（3m）从根源上减少 VP 更新频率，比 UV snap 或 PCF 更有效
-3. **`depthBiasSlopeScale` 是 Peter Panning 的元凶**：垂直面上产生大偏置导致根部阴影分离，去掉后用**法线偏移**代替
-4. **法线偏移参数**：`0.03 + dist×0.005` 让近处小、远处大，`(2-|N·L|)` 让正对光的面自动获得更小偏移
-5. **2048² + 畸变**：畸变使有效中心精度 ~20480²，比纯分辨率暴力翻倍更高效
+2. **center Y 跟随玩家**：Y 与 XZ 同样 3m snap，使高矮方块获得相近阴影精度，解决高度相关的 acne
+3. **`depthBiasSlopeScale` 是 Peter Panning 的元凶**：去掉后用**法线偏移**代替
+4. **2048² + 畸变**：畸变使有效中心精度 ~20480²，比纯分辨率暴力翻倍更高效
+5. **bias 无上限**：远处 bias 持续增大以补偿径向畸变导致的分辨率下降，`0.06 + dist×0.01` 基于纹素大小推导
 
 ### GPU 资源
 
