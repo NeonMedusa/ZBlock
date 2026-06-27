@@ -111,6 +111,8 @@ fn windowSizeCallback(glfw_window: ?*Glfw.GLFWwindow, width: i32, height: i32) c
             game.window.center_y = @as(f32, @floatFromInt(@divTrunc(height, 2)));
             // 重建game.gctx的交换链
             game.gctx.resizeSwapChain(game.window.width_u, game.window.height_u);
+            // 重建 SSR 离屏纹理
+            game.resizeSSR();
             // 更新投影矩阵和天空缓存
             game.rebuildProjMatrix();
             // 更新UiUniform

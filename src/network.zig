@@ -315,3 +315,69 @@ fn recvAll(fd: winsock.socket_t, buf: []u8) usize {
     }
     return off;
 }
+
+// ══════════════════════════════════════════════════════════════════
+// 网络状态（NetworkManager 管理连接生命周期）
+// ══════════════════════════════════════════════════════════════════
+
+const Log = @import("log.zig");
+
+pub const NetworkManager = struct {
+    mode: enum { single, host, client } = .single,
+    listen_fd: winsock.socket_t = undefined, // 主机监听 socket
+    listening: bool = false, // listen_fd 是否有效
+
+    // 主机端
+    clients: std.ArrayListUnmanaged(ClientInfo) = .empty,
+    next_player_id: u32 = 1,
+
+    // 客机端
+    client_fd: winsock.socket_t = undefined, // 客机端：主机 fd
+    client_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    remote_player: ?ECS.Entity = null, // 客机端：自身玩家实体
+    snapshot_info: std.AutoHashMapUnmanaged(u64, struct { entity: ECS.Entity, player_id: u32, server_entity_raw: u32 }) = .empty, // 客机端：快照索引→(实体, player_id, 服务端实体标识)
+    net_thread: ?std.Thread = null,
+    net_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
+    net_mutex: std.Io.Mutex = .init, // 保护 net_cam_yaw/pitch
+    net_saved_client_pos: Vec3 = Vec3.zero, // 客机断线时保存的位置（重连后恢复）
+    server_wants_fly: bool = false, // 双击空格后设置，collectPlayerInput 消费
+    fly_timer: f64 = 0, // 飞行双击计时器（用真实帧时间递减）
+    net_cam_yaw: f32 = 0, // 主机相机的朝向（给网络线程读）
+    net_cam_pitch: f32 = 0,
+    last_snapshot_serial: u64 = std.math.maxInt(u64),
+
+    /// 渲染用快照缓冲区（主线程独有，无竞态，主机/客机共用）
+    render_snapshots: [64]EntitySnapshot = undefined,
+    render_snapshot_count: u32 = 0,
+    host_snap_valid: bool = false,
+    /// 上次快照到达时间（实体 time-alpha 用）
+    last_snapshot_time_ns: i64 = 0,
+
+    /// DEBUG: 客机统计
+    chunk_count: u64 = 0,
+    state_count: u64 = 0,
+    noop_count: u64 = 0,
+    state_serial_last: u32 = 0,
+    state_serial_gaps: u64 = 0,
+    latency_min_ns: i64 = 999_999_999,
+    latency_max_ns: i64 = 0,
+    latency_sum_ns: i64 = 0,
+    latency_samples: u64 = 0,
+    _tick_start_ns: i64 = 0,
+    _last_latency_print: u64 = 0,
+
+    pub const ClientInfo = struct {
+        fd: winsock.socket_t,
+        player_id: u32,
+        disconnect: bool = false,
+        entity: ECS.Entity = .{ .index = 0, .version = 0 },
+        saved_pos: Vec3 = Vec3.zero, // 玩家上次已知位置（断线重连用）
+        input: ClientInput = .{
+            .serial = 0,
+            .pos = Vec3.zero,
+            .cam_yaw = 0, .cam_pitch = 0,
+            .break_block = false, .place_block = false,
+            .hotbar_slot = 0,
+        },
+    };
+};

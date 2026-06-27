@@ -29,11 +29,13 @@ src/
 │
 ├── render.zig             — 帧渲染管线编排
 ├── render_pipeline.zig    — 3D 渲染管线
+├── water_pipeline.zig     — 水面渲染管线（独立 blend/vertex）
 ├── shadow.zig             — ShadowPipeline（阴影贴图方向光）
 ├── wireframe_pipeline.zig — 线框渲染管线
 ├── rend_ctx.zig           — SceneUniform / GPU 统一缓冲区定义
 ├── sky.zig                — 程序化天空盒（全屏三角、昼夜循环、星空）
 ├── gctx.zig               — WGPU 上下文
+├── network.zig            — 网络协议 + NetworkManager（连接状态管理）
 │
 ├── animation.zig          — 骨骼动画系统（CPU 更新 + storage buffer 蒙皮）
 ├── frustum.zig            — 视锥体裁剪
@@ -222,7 +224,7 @@ deinit()
 
 | Worker | 职责 | 通信方式 |
 |--------|------|---------|
-| **Mesh** | 脏区块 → 生成 greedy mesh → 上传 vertex buffer（非索引，4B/顶点） | `pending` → `completed` |
+| **Mesh** | 脏区块 → 生成 greedy mesh → 上传顶点缓冲区（不透明 4B/顶点非索引，水面 32B/顶点索引） | `pending` → `completed` |
 | **A\*** | 异步寻路计算 | `astar_pending` → `astar_completed` |
 | **IO** | 存档加载/保存（SQLite region 分片） | `io_queue_mutex` + `io_cond` 保护 `pending_saves` / `pending_loads` |
 
@@ -275,6 +277,10 @@ packed_pos (32 bits):
 - **无索引画法**：每 quad 写入 6 个顶点（24B），比索引画法（4 顶点+6 索引=40B）省 40%
 - **UV 推论**：`computeChunkUV()` 根据 `face_dir` + `corner` 在 shader 中计算 UV，不占用顶点空间
 - **对比原 32B `StaticVertex`**：显存占用降至 **87.5%**，全加载场景下节省约 **1.3GB**
+
+> **非完整方块（水面等）**：使用 `StaticVertex`（32B/顶点）+ 索引渲染（4 顶点+6 索引/面）。
+> 因为水面需要完整浮点坐标（0.8 高度的精确位置）、alpha 透明度、波纹位移等特性，
+> 不适合用 ChunkVertex 的整数截断格式。详见 `water_pipeline.zig` 和 `water_shader.wgsl`。
 
 ---
 

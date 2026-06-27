@@ -222,6 +222,65 @@ group 切换代价。
 
 ---
 
+## 水面渲染
+
+水面使用独立渲染管线 `WaterPipeline`（`water_pipeline.zig`），在不透明方块之后绘制：
+
+| 特性 | 实现 |
+|------|------|
+| 顶点格式 | `StaticVertex`（32B/顶点）+ `u32` 索引（4顶点+6索引/面） |
+| Alpha 混合 | `SrcAlpha / OneMinusSrcAlpha` |
+| 波纹动画 | 顶点着色器：正弦波叠加（`vertex_wave`） |
+| 水面高度 | 上方有水→满高；上方无水→0.8格高（斜面衔接满高水） |
+| 面剔除 | `CullMode_None`（双面渲染） |
+
+**水面 mesh 生成**：每水面方块在 `buildChunkMeshCPU` 中独立生成，存入 `LoadedChunk.water_mesh`。
+顶点位置在 mesh 生成时精确计算（完整浮点，非 ChunkVertex 的整数截断），顶面顶点根据相邻满高水方块
+动态调整高度形成斜面。跨区块邻居通过 `nb_west/nb_east/nb_north/nb_south` 指针查询。
+
+**渲染顺序**：先画所有不透明方块（深度写入），再画水面（开启 alpha blend）。
+
+### 片元着色器（`water_shader.wgsl`）
+
+水面片元着色器分多层合成：
+
+**① 波浪法线**：`wave_bump()` 使用旋转UV + 3层噪声采样 + 有限差分计算法线扰动。
+每层噪声 UV 经不同旋转角度和平移速度后，合并为一个法线偏移向量，通过 TBN 矩阵转换到视空间。
+
+**② 折射**：`water_refraction()` 从场景颜色纹理采样折射颜色，结合线性深度吸收———水越深越接近 `WATER_COLOR`。
+
+**③ 天空反射**：反射方向与视空间 up 轴的夹角决定从地平线到天顶的天空颜色插值。
+
+**④ SSR（屏幕空间反射）**：`ssr_march()` 使用 10 步指数步进 + 5 步二分搜索在深度纹理上
+追踪反射射线。返回 UV 坐标，经 `reflection_calc()` 采样颜色并做边缘淡出和假阳性抑制。
+竖直水面（水墙）跳过 SSR。
+
+**⑤ 统一反射层**：`scene_reflect = mix(sky_reflect, ssr.color, ssr_fade)` 将天空和 SSR 合并为一个反射层。
+
+**⑥ Fresnel 混合**：Schlick 近似 `0.02 + 0.98*(1-NdotV)^5`，决定折射和反射的比例。
+```
+color = mix(refracted, lit_water + scene_reflect, fresnel * REFLEX_INDEX)
+```
+其中 `REFLEX_INDEX = 0.45`。
+
+**⑦ 阴影响应**：
+- `shadow_darken = mix(0.75, 1.0, shadow)` 乘法暗化整个水面（阴影中光线穿透减少）
+- 日月高光乘 `shadow`，阴影中完全消失
+
+**⑧ 日月高光**：反射方向与太阳/月亮方向点积经 smoothstep(0.995,1.0) 得到极窄反射峰，
+乘以对应光照颜色和强度。`shadow_vp` 白天渲染太阳、晚上渲染月亮。
+
+### 关键文件
+
+| 文件 | 内容 |
+|------|------|
+| `src/water_pipeline.zig` | 管线创建、bind group 绑定 |
+| `src/shaders/water_shader.wgsl` | 片元着色器（波浪/反射/折射/SSR） |
+| `src/chunk_mesh.zig` | 水面 mesh 生成（`water_mesh`） |
+| `src/render.zig` | 水面渲染时机（不透明之后） |
+
+---
+
 ## 程序化天空盒
 
 详见 [rendering_sky.md](rendering_sky.md)

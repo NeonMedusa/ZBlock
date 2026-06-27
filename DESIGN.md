@@ -30,9 +30,9 @@
 
 ### 进程架构
 
-所有模式（单人/主机/客机）共享同一份可执行文件。三种运行模式由 `Game.network_mode` 区分：
+所有模式（单人/主机/客机）共享同一份可执行文件。三种运行模式由 `game.network.mode` 区分：
 
-| 模式 | `network_mode` | 服务端线程 | 网络线程 | 渲染 |
+| 模式 | `network.mode` | 服务端线程 | 网络线程 | 渲染 |
 |------|---------------|-----------|---------|------|
 | 单人 | `.single` | 运行（物理/AI/动画） | 无 | 同步相机 |
 | 主机 | `.host` | 运行 | 接受 TCP + 收发 | 同步相机 |
@@ -454,6 +454,41 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 - 服务端保留最近 N 帧快照历史（用于延迟补偿）
 - 客机有独立的本地物理/逻辑副本（预测回路）
 - 需要可靠 UDP 库（Laminar/enet）或多通道 TCP 改造
+
+### 非完整方块 mesh 架构
+
+水面是游戏中第一个非完整方块，采用独立的渲染管线和顶点格式：
+
+- **不透明方块**：`ChunkVertex`（4B），非索引（6 顶点/面），共享 bind group 1（材质纹理）
+- **水面**：`StaticVertex`（32B），索引（4 顶点+6 索引/面），独立管线，Alpha blend + 波纹动画
+
+水面使用独立管线的原因：
+1. Alpha 混合（`SrcAlpha / OneMinusSrcAlpha`）需要单独的 blend state
+2. 顶点着色器需要波纹位移（其他方块不需要）
+3. 片元着色器需要水色 + 透明度
+
+**水面 mesh 生成**（`chunk_mesh.zig`）：
+
+每个水面方块在 `buildChunkMeshCPU` 中独立生成顶点数据，存入 `water_vertices`/`water_indices`。
+相对于不透明方块（`ChunkVertex` 4B 压缩 + 非索引 6 顶/面），水面 mesh 的不同之处：
+
+- `StaticVertex`（32B/顶点）：完整浮点坐标，精确支持 0.8 格高度
+- `u32` 索引画法（4 顶点 + 6 索引/面）：节省顶点 buffer 带宽
+- 顶面斜坡：邻接满高水方块时抬升至 1.0，否则降至 0.8
+- 跨区块查询：通过 `nb_west/east/north/south` 指针查邻居 chunk
+
+**水面着色器**（`water_shader.wgsl`）：
+- **波浪**：旋转UV + 3层噪声 + 有限差分法线（Sildurs 式）
+- **统一反射层**：`scene_reflect = mix(天空颜色, SSR颜色, ssr_fade)`
+- **Fresnel**：Schlick `0.02+0.98*(1-NdotV)^5`，混合 `refracted` 与 `lit_water + scene_reflect`
+- **折射**：场景纹理采样 + 线性深度吸收（水深→深蓝）
+- **阴影响应**：`shadow_darken = mix(0.75, 1.0, shadow)` 乘法暗化；日月高光乘 `shadow`
+- **SSR**：10 步指数步进 + 5 步二分搜索，边缘淡出 + 假阳性抑制，竖直水面跳过
+- **日月高光**：`smoothstep(0.995, 1.0)` 窄反射峰，`shadow_vp` 白天太阳、晚上月亮
+
+后续非完整方块（半砖、楼梯、栅栏等）的 mesh 复杂度更高，可能需要更灵活的方块模型系统。
+
+---
 
 ### 讨论记录
 

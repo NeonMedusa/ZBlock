@@ -5,7 +5,16 @@
 struct SceneUniform {
     proj_matrix: mat4x4f,
     view_matrix: mat4x4f,
+    camera_pos: vec3f,
     time: f32,
+    sun_direction: vec3f,
+    sun_intensity: f32,
+    sun_color: vec3f,
+    moon_brightness: f32,
+    ambient_ground: vec3f,
+    _pad: f32,
+    shadow_vp: mat4x4f,
+    moon_color: vec3f,
 };
 
 struct VertexInput {

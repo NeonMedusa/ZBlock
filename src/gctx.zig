@@ -86,7 +86,7 @@ pub fn init(window: Window) !@This() {
     const surface_config = Wgpu.WGPUSurfaceConfiguration{
         .device = device,
         .format = Wgpu.WGPUTextureFormat_BGRA8UnormSrgb,
-        .usage = Wgpu.WGPUTextureUsage_RenderAttachment,
+        .usage = Wgpu.WGPUTextureUsage_RenderAttachment | Wgpu.WGPUTextureUsage_CopyDst,
         .alphaMode = Wgpu.WGPUCompositeAlphaMode_Auto,
         .width = window.width_u,
         .height = window.height_u,
@@ -103,7 +103,7 @@ pub fn init(window: Window) !@This() {
 
     // 创建深度纹理和视图
     const depth_texture = Wgpu.wgpuDeviceCreateTexture(device, &Wgpu.WGPUTextureDescriptor{
-        .usage = Wgpu.WGPUTextureUsage_RenderAttachment,
+        .usage = Wgpu.WGPUTextureUsage_RenderAttachment | Wgpu.WGPUTextureUsage_TextureBinding | Wgpu.WGPUTextureUsage_CopySrc,
         .dimension = Wgpu.WGPUTextureDimension_2D,
         .size = .{
             .width = surface_config.width,
@@ -152,7 +152,7 @@ fn recreateDepthTexture(self: *Gctx, width: u32, height: u32) void {
         Wgpu.wgpuTextureRelease(self.depth_texture);
     // 创建新的深度纹理
     self.depth_texture = Wgpu.wgpuDeviceCreateTexture(self.device, &.{
-        .usage = Wgpu.WGPUTextureUsage_RenderAttachment,
+        .usage = Wgpu.WGPUTextureUsage_RenderAttachment | Wgpu.WGPUTextureUsage_TextureBinding | Wgpu.WGPUTextureUsage_CopySrc,
         .dimension = Wgpu.WGPUTextureDimension_2D,
         .size = .{
             .width = width,
@@ -226,11 +226,16 @@ pub fn createShaderModuleFromSource(gctx: *Gctx, source: []const u8) Wgpu.WGPUSh
 /// 编译期嵌入 shader 文件，运行时 XOR 解密（简单防随手提取）
 pub fn loadEmbeddedShader(comptime path: []const u8) [@embedFile(path).len]u8 {
     const embedded = @embedFile(path);
+    return embedAndXor(embedded);
+}
+
+/// 编译期嵌入并 XOR 加密任意字节数组（用于拼接多个 shader 文件后统一加密）
+pub fn embedAndXor(comptime data: []const u8) [data.len]u8 {
     // 编译期加密 → 二进制里存的是加密数据
-    const encrypted: [embedded.len]u8 = comptime blk: {
+    const encrypted: [data.len]u8 = comptime blk: {
         @setEvalBranchQuota(100_000);
-        var buf: [embedded.len]u8 = undefined;
-        for (&buf, embedded) |*d, s| d.* = s ^ 0x5A;
+        var buf: [data.len]u8 = undefined;
+        for (&buf, data) |*d, s| d.* = s ^ 0x5A;
         break :blk buf;
     };
     // 运行时解密还原明文

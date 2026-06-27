@@ -155,12 +155,10 @@ fn skinNormal(input_normal: vec3f, bone_offset: i32, joint_indices: vec4u, joint
 
 // --- 光照参数 ---
 const AMBIENT_STRENGTH = 0.3;
-const SPECULAR_STRENGTH = 0.5;
-const SPECULAR_SHININESS = 32.0;
 
-// 阴影采样：法线偏移 + 径向畸变
+// PCF 阴影采样：法线偏移 + 径向畸变（单 shadow map 模拟级联效果）
 // off_amt 随距离线性增长（无上限），远处 bias 大以补偿径向畸变导致的分辨率下降
-fn sampleShadow(world_pos: vec3f, normal: vec3f, light_dir: vec3f) -> f32 {
+fn sample_shadow(world_pos: vec3f, normal: vec3f, light_dir: vec3f) -> f32 {
     let n = normalize(normal);
     let n_dot_l = abs(dot(n, light_dir));
     let cam_dist = length(world_pos - scene_uniform.camera_pos);
@@ -207,14 +205,8 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
     let moon_diffuse = night * max(dot(n, moon_dir), 0.0) * moon_col * base_color.rgb;
     let diffuse = sun_diffuse + moon_diffuse;
 
-    // 高光（仅太阳）
-    let camera_pos = scene_uniform.camera_pos;
-    let view_dir = normalize(camera_pos - position);
-    let reflect_dir = reflect(-sun_dir, n);
-    let specular = day * pow(max(dot(view_dir, reflect_dir), 0.0), SPECULAR_SHININESS) * SPECULAR_STRENGTH * sun_col;
-
-    let shadow = sampleShadow(position, normal, sun_dir);
-    let final_color = ambient + (diffuse + specular) * (0.3 + shadow * 0.7);
+    let shadow = sample_shadow(position, normal, sun_dir);
+    let final_color = ambient + diffuse * (0.3 + shadow * 0.7);
     return vec4f(final_color, base_color.a);
 }
 

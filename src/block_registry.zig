@@ -25,6 +25,8 @@ pub const BlockProtoType = struct {
 };
 
 /// 方块注册表（每个方块手动指定掉落物）
+/// face_variants 0 到 5 个索引分别对应
+// 上、下、北、南、西、东 六个面的贴图，与direction.zig中的方向顺序一致
 pub const block_infos = [_]BlockProtoType{
     .{ // 第一个方块必须是空气方块，永远不要把其他方块定义在它的前面
         .name = "air",
@@ -53,6 +55,7 @@ pub const block_infos = [_]BlockProtoType{
     },
     .{ // 水
         .name = "water",
+        .is_directional = false,
         .occludes = false,
         .opacity = 0.5,
         .is_solid = false,

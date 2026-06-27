@@ -216,7 +216,7 @@ pub const Chunk = struct {
                     const cave_scale_a: f32 = 0.04; // A 噪声尺度（大→洞大）
                     const cave_scale_b: f32 = 0.06; // B 噪声尺度（与 A 略异，产生非对称交叉）
                     const cave_threshold: f32 = 0.7; // 越高洞穴越多/宽，越低越少/窄
-                    if (block_id != BlockId.fromName("air") and block_id != BlockId.fromName("water") and y_i32 < ground_position - 1) {
+                    if (block_id != BlockId.fromName("air") and block_id != BlockId.fromName("water") and y_i32 < ground_position - 3) {
                         const ridged_a = @abs(Noise.snoise3(
                             @as(f32, @floatFromInt(world_x)) * cave_scale_a + 1000.0,
                             @as(f32, @floatFromInt(y_i32)) * cave_scale_a,
@@ -302,6 +302,7 @@ const FLY_SPEED_MULTIPLIER: f32 = 2.3; // 飞行极速 = 走速 × 此值
 const LoadedChunk = struct {
     chunk: *Chunk,
     meshes: std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh),
+    water_mesh: ChunkMesh.ChunkMesh = undefined, // 水面顶点（单独管线渲染）
     build_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     dirty: bool = false, // 被修改过，需要写入存档
 };
@@ -524,6 +525,7 @@ pub const BlockWorld = struct {
                     }
                 }
                 loaded.meshes.deinit();
+                loaded.water_mesh.deinit(self.allocator);
                 loaded.chunk.deinit();
                 self.allocator.destroy(loaded.chunk);
             }
@@ -586,7 +588,7 @@ pub const BlockWorld = struct {
 
         for (self.completed.items) |*r| {
             if (self.chunks.getPtr(r.origin)) |loaded| {
-                applyMeshResult(&loaded.meshes, self.allocator, self.gctx, &self.material_registry, r) catch |err| {
+                applyMeshResult(&loaded.meshes, &loaded.water_mesh, self.allocator, self.gctx, &self.material_registry, r) catch |err| {
                     std.debug.print("applyMeshResult failed: {}\n", .{err});
                 };
             }
@@ -664,12 +666,14 @@ pub const BlockWorld = struct {
             _ = self.io_active_loads.remove(result.origin);
             var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
             try meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
+            const water_mesh = try ChunkMesh.ChunkMesh.init(self.gctx);
             {
                 self.chunk_mutex.lockUncancelable(io);
                 defer self.chunk_mutex.unlock(io);
                 try self.chunks.put(result.origin, .{
                     .chunk = result.chunk,
                     .meshes = meshes,
+                    .water_mesh = water_mesh,
                     .dirty = false,
                 });
             }
@@ -738,7 +742,7 @@ pub const BlockWorld = struct {
             if (nb_n) |n| n.chunk else null,
             if (nb_s) |n| n.chunk else null,
         ) catch return;
-        applyMeshResult(&loaded.meshes, self.allocator, self.gctx, &self.material_registry, &result) catch {};
+        applyMeshResult(&loaded.meshes, &loaded.water_mesh, self.allocator, self.gctx, &self.material_registry, &result) catch {};
         result.deinit();
     }
 
@@ -791,6 +795,8 @@ pub const BlockWorld = struct {
                 while (m_it.next()) |m| m.deinit(self.allocator);
             }
             loaded.meshes.deinit();
+            loaded.water_mesh.deinit(self.allocator);
+            loaded.water_mesh = try ChunkMesh.ChunkMesh.init(self.gctx);
             loaded.meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
             loaded.meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
             loaded.dirty = false;
@@ -822,8 +828,9 @@ pub const BlockWorld = struct {
 
         var meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
         meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
+        const water_mesh = try ChunkMesh.ChunkMesh.init(self.gctx);
 
-        try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .dirty = false });
+        try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .water_mesh = water_mesh, .dirty = false });
         self.chunk_mutex.unlock(io);
 
         self.enqueueMeshBuild(origin) catch {};
@@ -872,6 +879,7 @@ pub const BlockWorld = struct {
                 }
             }
             loaded.meshes.deinit();
+            loaded.water_mesh.deinit(self.allocator);
 
             const t3_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 

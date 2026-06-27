@@ -36,7 +36,7 @@ pub fn update(_: *@This(), game: *Game) void {
 
     ui.spacing(16);
     if (ui.button("开房间", 240, 56, 22)) {
-        game.network_mode = .host;
+        game.network.mode = .host;
         game.menu_state = .SaveSelect;
     }
 

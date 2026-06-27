@@ -69,7 +69,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         }
 
         // 渲染实体
-        if (game.network_mode == .client) {
+        if (game.network.mode == .client) {
             // 客机：ECS view 迭代安全（无服务端线程）
             var view = game.server.registry.view(.{ Comps.ModelName, Comps.Position, Comps.Collider }, .{});
             var iter = view.entityIterator();
@@ -86,7 +86,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             }
         } else {
             // 主机/单人：从渲染快照缓冲区迭代（避免 ECS view 迭代器和服务端线程竞态）
-            for (game.render_snapshots[0..game.render_snapshot_count]) |s| {
+            for (game.network.render_snapshots[0..game.network.render_snapshot_count]) |s| {
                 if (entity_idx >= 500) break;
                 // 跳过本地玩家
                 if (s.player_id != std.math.maxInt(u32) and s.player_id == game.server.player_id) continue;
@@ -199,18 +199,18 @@ fn drawFrame(game: *Game, comptime world: bool) void {
 
     // 实体/区块实例已在阴影 pass 前构建完成
 
-    // ========== 渲染通道 ==========
-    const color_attachment = Wgpu.WGPURenderPassColorAttachment{
-        .view = surface_texture_view,
+    // ========== Pass 1: 不透明物体 → 离屏颜色 + 深度 ==========
+    const opaque_color_attach = Wgpu.WGPURenderPassColorAttachment{
+        .view = game.ssr_color_view,
         .loadOp = Wgpu.WGPULoadOp_Clear,
         .storeOp = Wgpu.WGPUStoreOp_Store,
         .depthSlice = Wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
         .clearValue = Wgpu.WGPUColor{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 },
     };
 
-    const render_pass_desc = Wgpu.WGPURenderPassDescriptor{
+    const opaque_pass_desc = Wgpu.WGPURenderPassDescriptor{
         .colorAttachmentCount = 1,
-        .colorAttachments = &color_attachment,
+        .colorAttachments = &opaque_color_attach,
         .depthStencilAttachment = &Wgpu.WGPURenderPassDepthStencilAttachment{
             .view = game.gctx.depth_texture_view,
             .depthLoadOp = Wgpu.WGPULoadOp_Clear,
@@ -224,17 +224,17 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         },
     };
 
-    const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &render_pass_desc);
+    const opaque_pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &opaque_pass_desc);
 
     if (world) {
-        // 绘制天空（全屏三角，无 vertex/index buffer）
-        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.sky_pipeline.handle);
-        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.sky_pipeline.bind_group, 0, null);
-        Wgpu.wgpuRenderPassEncoderDraw(pass, 3, 1, 0, 0);
+        // 绘制天空
+        Wgpu.wgpuRenderPassEncoderSetPipeline(opaque_pass, game.sky_pipeline.handle);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(opaque_pass, 0, game.sky_pipeline.bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderDraw(opaque_pass, 3, 1, 0, 0);
 
-        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(opaque_pass, 0, game.render_pipeline.global_bind_group, 0, null);
         if (game.render_pipeline.shadow_bind_group) |sg| {
-            Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 2, sg, 0, null); // group 2 = 阴影贴图 + 比较采样器
+            Wgpu.wgpuRenderPassEncoderSetBindGroup(opaque_pass, 2, sg, 0, null);
         }
 
         // 绘制所有模型实体
@@ -242,17 +242,17 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             const pipe = switch (batch.vertex_format) {
                 .static_model => game.render_pipeline.pipeline_static,
                 .skinned_model => game.render_pipeline.pipeline_skinned,
-                .chunk => unreachable, // chunk 不走 draw batch
+                .chunk => unreachable,
             };
-            Wgpu.wgpuRenderPassEncoderSetPipeline(pass, pipe);
-            Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, batch.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(batch.vertex_buffer));
-            Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, batch.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(batch.index_buffer));
-            Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, batch.bind_group, 0, null);
-            Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, batch.index_count, 1, 0, 0, batch.instance_idx);
+            Wgpu.wgpuRenderPassEncoderSetPipeline(opaque_pass, pipe);
+            Wgpu.wgpuRenderPassEncoderSetVertexBuffer(opaque_pass, 0, batch.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(batch.vertex_buffer));
+            Wgpu.wgpuRenderPassEncoderSetIndexBuffer(opaque_pass, batch.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(batch.index_buffer));
+            Wgpu.wgpuRenderPassEncoderSetBindGroup(opaque_pass, 1, batch.bind_group, 0, null);
+            Wgpu.wgpuRenderPassEncoderDrawIndexed(opaque_pass, batch.index_count, 1, 0, 0, batch.instance_idx);
         }
 
-        // 绘制所有区块（使用 chunk pipeline，紧凑顶点格式）
-        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_chunk);
+        // 绘制所有区块
+        Wgpu.wgpuRenderPassEncoderSetPipeline(opaque_pass, game.render_pipeline.pipeline_chunk);
         {
             var chunk_ins_idx = chunk_instance_idx;
             for (chunk_origins[0..chunk_count]) |origin| {
@@ -272,10 +272,119 @@ fn drawFrame(game: *Game, comptime world: bool) void {
                     const mesh = mesh_entry.value_ptr;
                     if (mesh.vertex_count == 0) continue;
                     if (game.server.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
-                        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
-                        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, global_mat.material.bind_group, 0, null);
-                        Wgpu.wgpuRenderPassEncoderDraw(pass, mesh.vertex_count, 1, 0, chunk_ins_idx);
+                        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(opaque_pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
+                        Wgpu.wgpuRenderPassEncoderSetBindGroup(opaque_pass, 1, global_mat.material.bind_group, 0, null);
+                        Wgpu.wgpuRenderPassEncoderDraw(opaque_pass, mesh.vertex_count, 1, 0, chunk_ins_idx);
                     }
+                }
+                chunk_ins_idx += 1;
+            }
+        }
+    }
+    Wgpu.wgpuRenderPassEncoderEnd(opaque_pass);
+    Wgpu.wgpuRenderPassEncoderRelease(opaque_pass);
+
+    // 将离屏不透明颜色复制到屏幕（Pass 2 会在此基础上叠加水面和 UI）
+    const src_copy = Wgpu.WGPUTexelCopyTextureInfo{
+        .texture = game.ssr_color_texture,
+        .mipLevel = 0,
+        .origin = .{ .x = 0, .y = 0, .z = 0 },
+        .aspect = Wgpu.WGPUTextureAspect_All,
+    };
+    const dst_copy = Wgpu.WGPUTexelCopyTextureInfo{
+        .texture = surface_texture.texture,
+        .mipLevel = 0,
+        .origin = .{ .x = 0, .y = 0, .z = 0 },
+        .aspect = Wgpu.WGPUTextureAspect_All,
+    };
+    Wgpu.wgpuCommandEncoderCopyTextureToTexture(
+        encoder,
+        &src_copy,
+        &dst_copy,
+        &Wgpu.WGPUExtent3D{
+            .width = game.gctx.surface_config.width,
+            .height = game.gctx.surface_config.height,
+            .depthOrArrayLayers = 1,
+        },
+    );
+
+    // 拷贝深度缓冲 → depth_copy（水 Pass 写入深度时 SSR 仍能读到正确深度）
+    const depth_src = Wgpu.WGPUTexelCopyTextureInfo{
+        .texture = game.gctx.depth_texture,
+        .mipLevel = 0,
+        .origin = .{ .x = 0, .y = 0, .z = 0 },
+        .aspect = Wgpu.WGPUTextureAspect_DepthOnly,
+    };
+    const depth_dst = Wgpu.WGPUTexelCopyTextureInfo{
+        .texture = game.depth_copy_texture,
+        .mipLevel = 0,
+        .origin = .{ .x = 0, .y = 0, .z = 0 },
+        .aspect = Wgpu.WGPUTextureAspect_DepthOnly,
+    };
+    Wgpu.wgpuCommandEncoderCopyTextureToTexture(
+        encoder,
+        &depth_src,
+        &depth_dst,
+        &Wgpu.WGPUExtent3D{
+            .width = game.gctx.surface_config.width,
+            .height = game.gctx.surface_config.height,
+            .depthOrArrayLayers = 1,
+        },
+    );
+
+    // ========== Pass 2: 水面 + UI → 屏幕（读离屏颜色做反射） ==========
+    const water_color_attach = Wgpu.WGPURenderPassColorAttachment{
+        .view = surface_texture_view,
+        .loadOp = Wgpu.WGPULoadOp_Load, // 保留已复制的不透明画面
+        .storeOp = Wgpu.WGPUStoreOp_Store,
+        .depthSlice = Wgpu.WGPU_DEPTH_SLICE_UNDEFINED,
+        .clearValue = Wgpu.WGPUColor{ .r = 0.1, .g = 0.1, .b = 0.1, .a = 1.0 },
+    };
+
+    const water_pass_desc = Wgpu.WGPURenderPassDescriptor{
+        .colorAttachmentCount = 1,
+        .colorAttachments = &water_color_attach,
+        .depthStencilAttachment = &Wgpu.WGPURenderPassDepthStencilAttachment{
+            .view = game.gctx.depth_texture_view,
+            .depthLoadOp = Wgpu.WGPULoadOp_Load, // 保留不透明 Pass 的深度
+            .depthStoreOp = Wgpu.WGPUStoreOp_Store, // 写入水面深度
+            .depthClearValue = 0.0,
+            .depthReadOnly = 0,
+            .stencilLoadOp = Wgpu.WGPULoadOp_Undefined,
+            .stencilStoreOp = Wgpu.WGPUStoreOp_Undefined,
+            .stencilClearValue = 0,
+            .stencilReadOnly = 1,
+        },
+    };
+
+    const pass = Wgpu.wgpuCommandEncoderBeginRenderPass(encoder, &water_pass_desc);
+
+    // 绘制水面
+    if (world) {
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.water_pipeline.pipeline);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
+        if (game.render_pipeline.shadow_bind_group) |sg| {
+            Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, sg, 0, null);
+        }
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 2, game.ssr_bind_group, 0, null);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 3, game.sky_pipeline.bind_group, 0, null);
+        {
+            var chunk_ins_idx = chunk_instance_idx;
+            for (chunk_origins[0..chunk_count]) |origin| {
+                const loaded = game.server.block_world.chunks.getPtr(origin) orelse {
+                    chunk_ins_idx += 1;
+                    continue;
+                };
+                const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
+                const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));
+                if (!frustum.intersectsAABB(min, max)) {
+                    chunk_ins_idx += 1;
+                    continue;
+                }
+                if (loaded.water_mesh.vertex_count > 0) {
+                    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, loaded.water_mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(loaded.water_mesh.vertex_buffer));
+                    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, loaded.water_mesh.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(loaded.water_mesh.index_buffer));
+                    Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, loaded.water_mesh.index_count, 1, 0, 0, 0);
                 }
                 chunk_ins_idx += 1;
             }

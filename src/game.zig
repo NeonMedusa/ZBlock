@@ -13,6 +13,7 @@ const Window = @import("window.zig");
 const Render = @import("render.zig");
 const Camera3D = @import("camera3d.zig");
 const RenderPipeline = @import("render_pipeline.zig");
+const WaterPipeline = @import("water_pipeline.zig");
 const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
 const ECS = @import("zigecs");
@@ -25,6 +26,7 @@ const Vec3 = @import("algebra.zig").Vec3;
 const ResManager = @import("rend_ctx.zig").ResManager;
 const Model = @import("rend_ctx.zig").Model;
 const SceneUniform = @import("rend_ctx.zig").SceneUniform;
+const zigimg = @import("zigimg");
 
 allocator: std.mem.Allocator,
 window: Window,
@@ -35,6 +37,17 @@ ui_system: UiSystem,
 res_manager: ResManager,
 wireframe_pipeline: WireframePipeline,
 render_pipeline: RenderPipeline,
+water_pipeline: WaterPipeline,
+ssr_color_texture: Wgpu.WGPUTexture,
+ssr_color_view: Wgpu.WGPUTextureView,
+ssr_bgl: Wgpu.WGPUBindGroupLayout,
+ssr_sampler: Wgpu.WGPUSampler,
+ssr_bind_group: Wgpu.WGPUBindGroup,
+depth_copy_texture: Wgpu.WGPUTexture,
+depth_copy_view: Wgpu.WGPUTextureView,
+noise_texture: Wgpu.WGPUTexture,
+noise_texture_view: Wgpu.WGPUTextureView,
+noise_sampler: Wgpu.WGPUSampler,
 sky_pipeline: SkyPipeline,
 shadow_pipeline: ShadowPipeline,
 camera: Camera3D,
@@ -56,49 +69,9 @@ game_cleaned: bool = false, // returnToMenu 已清理 gameplay 资源，阻止 d
 menu_state: MenuState = .MainMenu,
 
 // 联机网络
-network_mode: NetworkMode = .single,
-listen_fd: winsock.socket_t = undefined,
-net_listening: bool = false, // listen_fd 是否有效
-
-clients: std.ArrayListUnmanaged(ClientInfo) = .empty,
-next_player_id: u32 = 1,
-
-client_fd: winsock.socket_t = undefined, // 客机端：主机 fd
-client_connected: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-remote_player: ?ECS.Entity = null, // 客机端：自身玩家实体
-snapshot_info: std.AutoHashMapUnmanaged(u64, struct { entity: ECS.Entity, player_id: u32, server_entity_raw: u32 }) = .{}, // 客机端：快照索引→(实体, player_id, 服务端实体标识)
-net_thread: ?std.Thread = null,
-net_running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true),
-net_mutex: std.Io.Mutex = .init, // 保护 net_cam_yaw/pitch
-net_saved_client_pos: Vec3 = Vec3.zero, // 客机断线时保存的位置（重连后恢复）
-server_wants_fly: bool = false, // 主循环检测到双击空格后设置，collectPlayerInput 消费
-fly_timer: f64 = 0, // 飞行双击计时器（用真实帧时间递减）
-break_once: bool = false, // 鼠标左键单击标志
-place_once: bool = false, // 鼠标右键单击标志
-net_cam_yaw: f32 = 0, // 主机相机的朝向（给网络线程读）
-net_cam_pitch: f32 = 0,
-last_snapshot_serial: u64 = std.math.maxInt(u64),
-
-/// 渲染用快照缓冲区（主线程独有，无竞态，主机/客机共用）
-render_snapshots: [64]Network.EntitySnapshot = undefined,
-render_snapshot_count: u32 = 0,
-host_snap_valid: bool = false,
-
-/// 上次快照到达时间（实体 time-alpha 用）
-last_snapshot_time_ns: i64 = 0,
-
-/// DEBUG: 客机统计
-chunk_count: u64 = 0,
-state_count: u64 = 0,
-noop_count: u64 = 0,
-state_serial_last: u32 = 0,
-state_serial_gaps: u64 = 0,
-latency_min_ns: i64 = 999_999_999,
-latency_max_ns: i64 = 0,
-latency_sum_ns: i64 = 0,
-latency_samples: u64 = 0,
-_tick_start_ns: i64 = 0,
-_last_latency_print: u64 = 0,
+network: Network.NetworkManager,
+break_once: bool = false, // mouse left click
+place_once: bool = false, // mouse right click
 
 // 开始游戏
 pub fn start(self: *Game) !void {
@@ -172,7 +145,7 @@ pub fn start(self: *Game) !void {
 
             if (self.accumulator >= TICK_DT) {
                 // 保存 prev=vec（客机相机 lerp 用）
-                if (self.network_mode == .client) {
+                if (self.network.mode == .client) {
                     var pv = self.server.registry.view(.{Comps.Position}, .{});
                     var pi = pv.entityIterator();
                     while (pi.next()) |e| {
@@ -186,8 +159,8 @@ pub fn start(self: *Game) !void {
 
             while (self.accumulator >= TICK_DT) {
                 self.accumulator -= TICK_DT;
-                if (self.menu_state != .Pause or self.network_mode != .single) {
-                    if (self.network_mode == .client) {
+                if (self.menu_state != .Pause or self.network.mode != .single) {
+                    if (self.network.mode == .client) {
                         try self.clientTick(); // 30Hz 发输入
                     } else {
                         try self.tick();
@@ -195,7 +168,7 @@ pub fn start(self: *Game) !void {
                 }
             }
             // 客机：每帧收包，不等 30Hz tick
-            if (self.network_mode == .client and self.save_initialized and self.client_connected.load(.acquire)) {
+            if (self.network.mode == .client and self.save_initialized and self.network.client_connected.load(.acquire)) {
                 self.clientReceivePackets();
             }
             // 如果 tick 内触发了 returnToMenu，跳过当前帧
@@ -219,10 +192,10 @@ pub fn start(self: *Game) !void {
                 }
             }
 
-            if (self.menu_state == .Gameplay or self.menu_state == .Inventory or (self.menu_state == .Pause and self.network_mode != .single)) {
+            if (self.menu_state == .Gameplay or self.menu_state == .Inventory or (self.menu_state == .Pause and self.network.mode != .single)) {
                 // 骨骼矩阵插值并上传到 GPU（多人模式下暂停时也不停止）
                 self.server.animation_system.upload(self.gctx.queue, self.accumulator / TICK_DT);
-                if (self.network_mode != .client) {
+                if (self.network.mode != .client) {
                     self.pollServerSnapshot();
                     syncCameraFromPlayer(self);
                 } else {
@@ -234,30 +207,30 @@ pub fn start(self: *Game) !void {
                 self.camera.updateFromMouse(self);
 
                 // DEBUG: 每 ~3 秒打印一次客机延迟统计（仅打印一次，防止重复）
-                if (self.network_mode == .client and self.state_count > 0 and self.state_count % 90 == 0 and self._last_latency_print != self.state_count) {
-                    self._last_latency_print = self.state_count;
-                    const avg_ns = if (self.latency_samples > 0) @divTrunc(self.latency_sum_ns, @as(i64, @intCast(self.latency_samples))) else 0;
+                if (self.network.mode == .client and self.network.state_count > 0 and self.network.state_count % 90 == 0 and self.network._last_latency_print != self.network.state_count) {
+                    self.network._last_latency_print = self.network.state_count;
+                    const avg_ns = if (self.network.latency_samples > 0) @divTrunc(self.network.latency_sum_ns, @as(i64, @intCast(self.network.latency_samples))) else 0;
                     Log.info("[LATENCY] states={d} chunks={d} gaps={d}  min={d}us avg={d}us max={d}us", .{
-                        self.state_count,
-                        self.chunk_count,
-                        self.state_serial_gaps,
-                        @divTrunc(self.latency_min_ns, 1000),
+                        self.network.state_count,
+                        self.network.chunk_count,
+                        self.network.state_serial_gaps,
+                        @divTrunc(self.network.latency_min_ns, 1000),
                         @divTrunc(avg_ns, 1000),
-                        @divTrunc(self.latency_max_ns, 1000),
+                        @divTrunc(self.network.latency_max_ns, 1000),
                     });
                 }
                 // 飞行切换（每帧检测，不依赖 tick）
                 if (self.input.isKeyJustPressed(.space)) {
-                    if (self.fly_timer > 0 and self.fly_timer < 0.4) {
-                        self.server_wants_fly = true;
-                        self.fly_timer = 0;
-                    } else if (self.fly_timer <= 0) {
-                        self.fly_timer = 0.3;
+                    if (self.network.fly_timer > 0 and self.network.fly_timer < 0.4) {
+                        self.network.server_wants_fly = true;
+                        self.network.fly_timer = 0;
+                    } else if (self.network.fly_timer <= 0) {
+                        self.network.fly_timer = 0.3;
                     }
                 }
-                if (self.fly_timer > 0) {
-                    self.fly_timer -= self.window.delta_time;
-                    if (self.fly_timer < 0) self.fly_timer = 0;
+                if (self.network.fly_timer > 0) {
+                    self.network.fly_timer -= self.window.delta_time;
+                    if (self.network.fly_timer < 0) self.network.fly_timer = 0;
                 }
 
                 if (self.keybinds.isJustPressed(&self.input, .sprint_toggle))
@@ -325,6 +298,51 @@ pub fn rebuildProjMatrix(self: *Game) void {
     const aspect = self.window.width / self.window.height;
     const far = @as(f32, @floatFromInt(self.server.chunk_radius)) * @as(f32, @floatFromInt(BlockWorld.CHUNK_WIDTH)) * 1.5 + BlockWorld.CHUNK_WIDTH * 4;
     self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.01, far);
+}
+
+/// 窗口缩放后重建 SSR 离屏纹理和 bind group
+pub fn resizeSSR(self: *Game) void {
+    // 释放旧资源
+    Wgpu.wgpuTextureRelease(self.ssr_color_texture);
+    Wgpu.wgpuTextureViewRelease(self.ssr_color_view);
+    Wgpu.wgpuTextureRelease(self.depth_copy_texture);
+    Wgpu.wgpuTextureViewRelease(self.depth_copy_view);
+    Wgpu.wgpuBindGroupRelease(self.ssr_bind_group);
+
+    // 重建 SSR 颜色纹理
+    self.ssr_color_texture = Wgpu.wgpuDeviceCreateTexture(self.gctx.device, &.{
+        .usage = Wgpu.WGPUTextureUsage_RenderAttachment | Wgpu.WGPUTextureUsage_TextureBinding | Wgpu.WGPUTextureUsage_CopySrc,
+        .dimension = Wgpu.WGPUTextureDimension_2D,
+        .size = .{ .width = self.gctx.surface_config.width, .height = self.gctx.surface_config.height, .depthOrArrayLayers = 1 },
+        .format = Wgpu.WGPUTextureFormat_BGRA8UnormSrgb,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+    });
+    self.ssr_color_view = Wgpu.wgpuTextureCreateView(self.ssr_color_texture, null);
+
+    // 重建深度拷贝纹理
+    self.depth_copy_texture = Wgpu.wgpuDeviceCreateTexture(self.gctx.device, &.{
+        .usage = Wgpu.WGPUTextureUsage_TextureBinding | Wgpu.WGPUTextureUsage_CopyDst,
+        .dimension = Wgpu.WGPUTextureDimension_2D,
+        .size = .{ .width = self.gctx.surface_config.width, .height = self.gctx.surface_config.height, .depthOrArrayLayers = 1 },
+        .format = Wgpu.WGPUTextureFormat_Depth24Plus,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+    });
+    self.depth_copy_view = Wgpu.wgpuTextureCreateView(self.depth_copy_texture, null);
+
+    // 重建 SSR bind group（含噪声纹理）
+    self.ssr_bind_group = Wgpu.wgpuDeviceCreateBindGroup(self.gctx.device, &Wgpu.WGPUBindGroupDescriptor{
+        .layout = self.ssr_bgl,
+        .entryCount = 5,
+        .entries = &[_]Wgpu.WGPUBindGroupEntry{
+            .{ .binding = 0, .textureView = self.ssr_color_view },
+            .{ .binding = 1, .sampler = self.ssr_sampler },
+            .{ .binding = 2, .textureView = self.depth_copy_view },
+            .{ .binding = 3, .textureView = self.noise_texture_view },
+            .{ .binding = 4, .sampler = self.noise_sampler },
+        },
+    });
 }
 
 /// 选存档后初始化游戏世界（玩家实体、区块、存档数据）
@@ -456,9 +474,9 @@ fn initGame(self: *Game) !void {
     try self.server.start(&self.res_manager);
 
     // 联机模式：启动网络线程
-    if (self.network_mode == .host) {
-        self.net_running.store(true, .release);
-        self.net_thread = try std.Thread.spawn(.{}, hostNetworkThread, .{self});
+    if (self.network.mode == .host) {
+        self.network.net_running.store(true, .release);
+        self.network.net_thread = try std.Thread.spawn(.{}, hostNetworkThread, .{self});
     }
 
     self.save_initialized = true;
@@ -469,21 +487,21 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     var self = try allocator.create(@This());
     self.allocator = allocator;
     self.server = Server.init(allocator);
-    self.net_mutex = .init;
-    self.network_mode = .single;
-    self.net_saved_client_pos = Vec3.zero;
-    self.net_thread = null;
-    self.clients = .empty;
-    self.next_player_id = 1;
-    self.remote_player = null;
-    self.snapshot_info = .{};
+    self.network.net_mutex = .init;
+    self.network.mode = .single;
+    self.network.net_saved_client_pos = Vec3.zero;
+    self.network.net_thread = null;
+    self.network.clients = .empty;
+    self.network.next_player_id = 1;
+    self.network.remote_player = null;
+    self.network.snapshot_info = .{};
     self.server.player_id = 0;
     self.server.flying = false;
 
-    self.last_snapshot_serial = std.math.maxInt(u64);
-    self.host_snap_valid = false;
-    self.render_snapshot_count = 0;
-    self.last_snapshot_time_ns = 0;
+    self.network.last_snapshot_serial = std.math.maxInt(u64);
+    self.network.host_snap_valid = false;
+    self.network.render_snapshot_count = 0;
+    self.network.last_snapshot_time_ns = 0;
     // 创建窗口
     const window = try Window.init(self, "ZBlock", 1280, 720);
     self.window = window;
@@ -526,8 +544,110 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     // 线框管线（调试用）
     self.wireframe_pipeline = try WireframePipeline.init(self, "shaders/wireframe_shader.wgsl");
 
-    // 程序化天空
+    // SSR 离屏纹理（不透明场景颜色，水面反射用）
+    const ssr_format = Wgpu.WGPUTextureFormat_BGRA8UnormSrgb;
+    self.ssr_color_texture = Wgpu.wgpuDeviceCreateTexture(self.gctx.device, &.{
+        .usage = Wgpu.WGPUTextureUsage_RenderAttachment | Wgpu.WGPUTextureUsage_TextureBinding | Wgpu.WGPUTextureUsage_CopySrc,
+        .dimension = Wgpu.WGPUTextureDimension_2D,
+        .size = .{ .width = self.gctx.surface_config.width, .height = self.gctx.surface_config.height, .depthOrArrayLayers = 1 },
+        .format = ssr_format,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+    });
+    self.ssr_color_view = Wgpu.wgpuTextureCreateView(self.ssr_color_texture, null);
+
+    // SSR bind group layout + 采样器（含离屏颜色 + 深度 + 噪声纹理，用于SSR+波法线）
+    self.ssr_bgl = Wgpu.wgpuDeviceCreateBindGroupLayout(self.gctx.device, &Wgpu.WGPUBindGroupLayoutDescriptor{
+        .entryCount = 5,
+        .entries = &[_]Wgpu.WGPUBindGroupLayoutEntry{
+            .{ .binding = 0, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Float, .viewDimension = Wgpu.WGPUTextureViewDimension_2D } },
+            .{ .binding = 1, .visibility = Wgpu.WGPUShaderStage_Fragment, .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Filtering } },
+            .{ .binding = 2, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Depth, .viewDimension = Wgpu.WGPUTextureViewDimension_2D } },
+            .{ .binding = 3, .visibility = Wgpu.WGPUShaderStage_Fragment, .texture = .{ .sampleType = Wgpu.WGPUTextureSampleType_Float, .viewDimension = Wgpu.WGPUTextureViewDimension_2D } },
+            .{ .binding = 4, .visibility = Wgpu.WGPUShaderStage_Fragment, .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Filtering } },
+        },
+    });
+    self.ssr_sampler = Wgpu.wgpuDeviceCreateSampler(self.gctx.device, &.{
+        .addressModeU = Wgpu.WGPUAddressMode_ClampToEdge,
+        .addressModeV = Wgpu.WGPUAddressMode_ClampToEdge,
+        .addressModeW = Wgpu.WGPUAddressMode_ClampToEdge,
+        .magFilter = Wgpu.WGPUFilterMode_Nearest,
+        .minFilter = Wgpu.WGPUFilterMode_Nearest,
+        .maxAnisotropy = 1,
+    });
+    // 深度拷贝纹理（水 Pass 写入深度时不与 SSR 冲突）
+    self.depth_copy_texture = Wgpu.wgpuDeviceCreateTexture(self.gctx.device, &.{
+        .usage = Wgpu.WGPUTextureUsage_TextureBinding | Wgpu.WGPUTextureUsage_CopyDst,
+        .dimension = Wgpu.WGPUTextureDimension_2D,
+        .size = .{ .width = self.gctx.surface_config.width, .height = self.gctx.surface_config.height, .depthOrArrayLayers = 1 },
+        .format = Wgpu.WGPUTextureFormat_Depth24Plus,
+        .mipLevelCount = 1,
+        .sampleCount = 1,
+    });
+    self.depth_copy_view = Wgpu.wgpuTextureCreateView(self.depth_copy_texture, null);
+
+    // 生成随机噪声纹理（256x256，R/G 独立随机）
+    {
+        const ns: u32 = 256;
+        const nw = ns;
+        const nh = ns;
+        const nbytes = try std.heap.page_allocator.alloc(u8, nw * nh * 4);
+        defer std.heap.page_allocator.free(nbytes);
+        var rng = std.Random.DefaultPrng.init(42);
+        for (0..nh) |iy| {
+            for (0..nw) |ix| {
+                const idx = (iy * nw + ix) * 4;
+                nbytes[idx + 0] = rng.random().int(u8); // R 通道随机
+                nbytes[idx + 1] = rng.random().int(u8); // G 通道随机
+                nbytes[idx + 2] = 0;
+                nbytes[idx + 3] = 255;
+            }
+        }
+        self.noise_texture = Wgpu.wgpuDeviceCreateTexture(self.gctx.device, &.{
+            .usage = Wgpu.WGPUTextureUsage_CopyDst | Wgpu.WGPUTextureUsage_TextureBinding,
+            .dimension = Wgpu.WGPUTextureDimension_2D,
+            .size = .{ .width = nw, .height = nh, .depthOrArrayLayers = 1 },
+            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
+            .mipLevelCount = 1,
+            .sampleCount = 1,
+        });
+        Wgpu.wgpuQueueWriteTexture(
+            self.gctx.queue,
+            &Wgpu.WGPUTexelCopyTextureInfo{ .texture = self.noise_texture, .mipLevel = 0, .origin = .{ .x = 0, .y = 0, .z = 0 } },
+            nbytes.ptr,
+            nbytes.len,
+            &Wgpu.WGPUTexelCopyBufferLayout{ .offset = 0, .bytesPerRow = nw * 4, .rowsPerImage = nh },
+            &Wgpu.WGPUExtent3D{ .width = nw, .height = nh, .depthOrArrayLayers = 1 },
+        );
+        self.noise_texture_view = Wgpu.wgpuTextureCreateView(self.noise_texture, null);
+    }
+    self.noise_sampler = Wgpu.wgpuDeviceCreateSampler(self.gctx.device, &.{
+        .addressModeU = Wgpu.WGPUAddressMode_Repeat,
+        .addressModeV = Wgpu.WGPUAddressMode_Repeat,
+        .addressModeW = Wgpu.WGPUAddressMode_Repeat,
+        .magFilter = Wgpu.WGPUFilterMode_Linear,
+        .minFilter = Wgpu.WGPUFilterMode_Linear,
+        .maxAnisotropy = 1,
+    });
+
+    // SSR bind group：含颜色 + 深度 + 噪声纹理
+    self.ssr_bind_group = Wgpu.wgpuDeviceCreateBindGroup(self.gctx.device, &Wgpu.WGPUBindGroupDescriptor{
+        .layout = self.ssr_bgl,
+        .entryCount = 5,
+        .entries = &[_]Wgpu.WGPUBindGroupEntry{
+            .{ .binding = 0, .textureView = self.ssr_color_view },
+            .{ .binding = 1, .sampler = self.ssr_sampler },
+            .{ .binding = 2, .textureView = self.depth_copy_view },
+            .{ .binding = 3, .textureView = self.noise_texture_view },
+            .{ .binding = 4, .sampler = self.noise_sampler },
+        },
+    });
+
+    // 程序化天空（必须先于水管初始化，水管需引用其 bind_group_layout）
     self.sky_pipeline = try SkyPipeline.init(&self.gctx, 42);
+
+    // 水面管线（共享场景 uniform、阴影 bind group、天空 uniform）
+    self.water_pipeline = try WaterPipeline.init(&self.gctx, self.render_pipeline.global_bgl, self.render_pipeline.shadow_bgl, self.ssr_bgl, self.sky_pipeline.bind_group_layout);
 
     // 初始化摄像头
     self.camera = Camera3D.init(self);
@@ -583,6 +703,16 @@ pub fn deinit(self: *@This()) void {
 
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
+    self.water_pipeline.deinit(&self.gctx);
+    Wgpu.wgpuTextureRelease(self.ssr_color_texture);
+    Wgpu.wgpuTextureViewRelease(self.ssr_color_view);
+    Wgpu.wgpuTextureRelease(self.depth_copy_texture);
+    Wgpu.wgpuTextureViewRelease(self.depth_copy_view);
+    Wgpu.wgpuTextureRelease(self.noise_texture);
+    Wgpu.wgpuTextureViewRelease(self.noise_texture_view);
+    Wgpu.wgpuSamplerRelease(self.noise_sampler);
+    Wgpu.wgpuSamplerRelease(self.ssr_sampler);
+    Wgpu.wgpuBindGroupRelease(self.ssr_bind_group);
     self.shadow_pipeline.deinit();
     self.sky_pipeline.deinit();
     self.wireframe_pipeline.deinit();
@@ -590,7 +720,7 @@ pub fn deinit(self: *@This()) void {
     if (self.player_name.len > 0) self.allocator.free(self.player_name);
     self.icon_atlas.deinit();
 
-    if (!self.game_cleaned and self.save_initialized and self.network_mode != .client) {
+    if (!self.game_cleaned and self.save_initialized and self.network.mode != .client) {
         self.save_manager.savePlayer(self.player_name, &self.hotbar, &self.inventory, &self.server.registry, self.server.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
         self.save_manager.saveAllEntities(&self.server.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
         self.save_manager.saveAllChunks(&self.server.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
@@ -612,7 +742,7 @@ pub fn deinit(self: *@This()) void {
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
     Log.info("startSave begin '{s}'", .{name});
-    self.server.chunk_radius = 16;
+    self.server.chunk_radius = 8;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，Server 已经被重建，只需要重建 BlockWorld
@@ -624,8 +754,8 @@ pub fn startSave(self: *Game, name: []const u8) !void {
     self.inventory = .{};
     self.game_cleaned = false;
 
-    self.last_snapshot_serial = std.math.maxInt(u64);
-    self.host_snap_valid = false;
+    self.network.last_snapshot_serial = std.math.maxInt(u64);
+    self.network.host_snap_valid = false;
     try self.initGame();
 }
 
@@ -633,23 +763,23 @@ pub fn startSave(self: *Game, name: []const u8) !void {
 pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     self.game_cleaned = false;
 
-    self.last_snapshot_serial = std.math.maxInt(u64);
-    self.host_snap_valid = false;
-    self.server.chunk_radius = 16;
-    self.network_mode = .client;
+    self.network.last_snapshot_serial = std.math.maxInt(u64);
+    self.network.host_snap_valid = false;
+    self.server.chunk_radius = 8;
+    self.network.mode = .client;
 
-    self.net_thread = null;
-    self.net_running.store(true, .release);
-    self.client_connected.store(false, .release);
-    self.client_fd = undefined;
+    self.network.net_thread = null;
+    self.network.net_running.store(true, .release);
+    self.network.client_connected.store(false, .release);
+    self.network.client_fd = undefined;
 
     const cfd = Network.connect(host_ip, Network.SERVER_PORT);
     if (cfd < 0) {
         Log.info("connect failed", .{});
         return;
     }
-    self.client_fd = cfd;
-    self.client_connected.store(true, .release);
+    self.network.client_fd = cfd;
+    self.network.client_connected.store(true, .release);
 
     // 接收 welcome 消息，获取分配的 player_id
     const assigned_id = Network.recvWelcome(cfd);
@@ -658,17 +788,17 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     Log.info("connected as player_id={}", .{assigned_id});
 
     // 清空快照实体映射
-    self.snapshot_info = .{};
+    self.network.snapshot_info = .{};
     // DEBUG: 重置计数器
-    self.state_count = 0;
-    self.chunk_count = 0;
-    self.noop_count = 0;
-    self.state_serial_last = 0;
-    self.state_serial_gaps = 0;
-    self.latency_min_ns = 999_999_999;
-    self.latency_max_ns = 0;
-    self.latency_sum_ns = 0;
-    self.latency_samples = 0;
+    self.network.state_count = 0;
+    self.network.chunk_count = 0;
+    self.network.noop_count = 0;
+    self.network.state_serial_last = 0;
+    self.network.state_serial_gaps = 0;
+    self.network.latency_min_ns = 999_999_999;
+    self.network.latency_max_ns = 0;
+    self.network.latency_sum_ns = 0;
+    self.network.latency_samples = 0;
 
     // 初始化空的 block_world（渲染需要）
     self.server.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.server.chunk_radius, "");
@@ -676,7 +806,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
     // 启动 mesh worker（区块通过动态加载到达）
     self.server.block_world.spawnWorker() catch {};
     // 设置非阻塞超时
-    Network.setRecvTimeout(@as(winsock.socket_t, @intCast(self.client_fd)));
+    Network.setRecvTimeout(@as(winsock.socket_t, @intCast(self.network.client_fd)));
 
     // 创建本地玩家实体（第一人称，不可见，用于接收主机发回的自身位置）
     {
@@ -691,7 +821,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
         self.server.registry.add(entity, Comps.OnGround{ .value = false });
         self.server.registry.add(entity, Comps.MoveIntent{});
         self.server.registry.add(entity, Comps.Facing{});
-        self.remote_player = entity;
+        self.network.remote_player = entity;
     }
 
     self.menu_state = .Gameplay;
@@ -701,8 +831,8 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
 /// 返回主菜单（由暂停菜单调用）
 pub fn returnToMenu(self: *Game) void {
-    Log.info("returnToMenu CALLED, mode={any}, save_initialized={}, menu_state={}", .{ self.network_mode, self.save_initialized, @intFromEnum(self.menu_state) });
-    if (self.network_mode != .client) {
+    Log.info("returnToMenu CALLED, mode={any}, save_initialized={}, menu_state={}", .{ self.network.mode, self.save_initialized, @intFromEnum(self.menu_state) });
+    if (self.network.mode != .client) {
         self.save_manager.savePlayer(self.player_name, &self.hotbar, &self.inventory, &self.server.registry, self.server.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
         self.save_manager.saveAllEntities(&self.server.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
         self.save_manager.saveAllChunks(&self.server.block_world) catch |err| std.debug.print("saveChunks error: {}\n", .{err});
@@ -710,42 +840,42 @@ pub fn returnToMenu(self: *Game) void {
     self.hotbar = .{};
     self.inventory = .{};
     // 停止网络线程
-    if (self.net_thread) |t| {
-        self.net_running.store(false, .release);
-        if (self.net_listening) {
-            self.net_listening = false;
-            _ = winsock.closesocket(self.listen_fd);
+    if (self.network.net_thread) |t| {
+        self.network.net_running.store(false, .release);
+        if (self.network.listening) {
+            self.network.listening = false;
+            _ = winsock.closesocket(self.network.listen_fd);
         }
         t.join();
-        self.net_thread = null;
+        self.network.net_thread = null;
     }
     // 关闭所有客户端连接
-    for (self.clients.items) |c| _ = winsock.closesocket(c.fd);
-    self.clients.deinit(self.allocator);
-    self.clients = .empty;
-    self.next_player_id = 1;
-    self.render_snapshot_count = 0;
-    self.last_snapshot_time_ns = 0;
-    self.host_snap_valid = false;
+    for (self.network.clients.items) |c| _ = winsock.closesocket(c.fd);
+    self.network.clients.deinit(self.allocator);
+    self.network.clients = .empty;
+    self.network.next_player_id = 1;
+    self.network.render_snapshot_count = 0;
+    self.network.last_snapshot_time_ns = 0;
+    self.network.host_snap_valid = false;
     self.server.animation_system.next_bone_offset = 0;
     self.server.animation_system.max_bone_slot = 0;
-    const was_client = self.network_mode == .client;
-    self.network_mode = .single;
-    self.client_connected.store(false, .release);
+    const was_client = self.network.mode == .client;
+    self.network.mode = .single;
+    self.network.client_connected.store(false, .release);
 
     // 客机：关闭 socket + 清理快照映射（主机由网络线程的 defer close 处理）
     if (was_client) {
-        _ = winsock.closesocket(self.client_fd);
-        self.snapshot_info.deinit(self.allocator);
-        self.snapshot_info = .{};
+        _ = winsock.closesocket(self.network.client_fd);
+        self.network.snapshot_info.deinit(self.allocator);
+        self.network.snapshot_info = .{};
     }
-    self.client_fd = undefined;
+    self.network.client_fd = undefined;
 
     // 停止服务端线程
     self.server.stop();
 
     // 清理 AI 实体的寻路状态和路径内存（非客户端模式，此时 server 线程已停）
-    if (self.network_mode != .client) {
+    if (self.network.mode != .client) {
         var view = self.server.registry.view(.{Comps.AIAgent}, .{});
         var iter = view.entityIterator();
         while (iter.next()) |entity| {
@@ -786,18 +916,18 @@ fn tick(self: *Game) !void {
     try self.server.pushInput(input);
 
     // ── 联机：主机更新共享数据（供网络线程读取）──
-    if (self.network_mode == .host) {
+    if (self.network.mode == .host) {
         // 客机断线清理（网络线程已标记 disconnect，tick 中清理 ECS）
         var ci: usize = 0;
-        while (ci < self.clients.items.len) {
-            if (self.clients.items[ci].disconnect) {
-                const c = &self.clients.items[ci];
+        while (ci < self.network.clients.items.len) {
+            if (self.network.clients.items[ci].disconnect) {
+                const c = &self.network.clients.items[ci];
                 if (self.server.registry.tryGet(Comps.Position, c.entity)) |pos| {
-                    self.net_saved_client_pos = pos.vec;
+                    self.network.net_saved_client_pos = pos.vec;
                 }
                 self.server.block_world.cleanupEntity(&self.server.registry, c.entity);
                 if (self.server.registry.valid(c.entity)) self.server.registry.destroy(c.entity);
-                _ = self.clients.swapRemove(ci);
+                _ = self.network.clients.swapRemove(ci);
                 Log.info("client id={} cleaned up", .{c.player_id});
             } else {
                 ci += 1;
@@ -805,32 +935,32 @@ fn tick(self: *Game) !void {
         }
 
         // 主机相机朝向（网络线程需读取，用于主机玩家快照）
-        self.net_mutex.lockUncancelable(io);
-        defer self.net_mutex.unlock(io);
-        self.net_cam_yaw = self.camera.yaw;
-        self.net_cam_pitch = self.camera.pitch;
+        self.network.net_mutex.lockUncancelable(io);
+        defer self.network.net_mutex.unlock(io);
+        self.network.net_cam_yaw = self.camera.yaw;
+        self.network.net_cam_pitch = self.camera.pitch;
     }
 }
 
 /// 联机：主机网络线程（接受客户端 + 循环收发）
 fn hostNetworkThread(self: *Game) void {
-    self.listen_fd = Network.listen(Network.SERVER_PORT);
-    if (self.listen_fd < 0) {
+    self.network.listen_fd = Network.listen(Network.SERVER_PORT);
+    if (self.network.listen_fd < 0) {
         Log.err("network: listen failed", .{});
         return;
     }
-    self.net_listening = true;
+    self.network.listening = true;
     defer {
-        if (self.net_listening) {
-            self.net_listening = false;
-            _ = winsock.closesocket(self.listen_fd);
+        if (self.network.listening) {
+            self.network.listening = false;
+            _ = winsock.closesocket(self.network.listen_fd);
         }
     }
 
     var print_timer: u32 = 0;
-    while (self.net_running.load(.acquire)) {
+    while (self.network.net_running.load(.acquire)) {
         if (print_timer == 0) {
-            Log.info("network: {} client(s) connected", .{self.clients.items.len});
+            Log.info("network: {} client(s) connected", .{self.network.clients.items.len});
             print_timer = 200; // 每 ~6 秒打印一次（select 通常 ~33ms 返回一次）
         }
         print_timer -= 1;
@@ -840,33 +970,33 @@ fn hostNetworkThread(self: *Game) void {
             .fd_count = 0,
             .fd_array = [_]usize{0} ** winsock.FD_SETSIZE,
         };
-        var max_fd: winsock.socket_t = self.listen_fd;
-        winsock.FD_SET(self.listen_fd, &readfds);
-        for (self.clients.items) |c| {
+        var max_fd: winsock.socket_t = self.network.listen_fd;
+        winsock.FD_SET(self.network.listen_fd, &readfds);
+        for (self.network.clients.items) |c| {
             winsock.FD_SET(c.fd, &readfds);
             if (c.fd > max_fd) max_fd = c.fd;
         }
         var tv = winsock.timeval{ .sec = 0, .usec = 100000 };
         const sel_rc = winsock.select(max_fd + 1, &readfds, null, null, &tv);
         if (sel_rc < 0) {
-            if (self.net_running.load(.acquire)) Log.err("network: select error", .{});
+            if (self.network.net_running.load(.acquire)) Log.err("network: select error", .{});
             return;
         }
 
         // ── 处理新连接 ──
-        if (winsock.FD_ISSET(self.listen_fd, &readfds)) {
-            const cfd = winsock.accept(self.listen_fd, null, null);
-            if (cfd >= 0 and self.net_running.load(.acquire)) {
-                const pid = self.next_player_id;
-                self.next_player_id += 1;
+        if (winsock.FD_ISSET(self.network.listen_fd, &readfds)) {
+            const cfd = winsock.accept(self.network.listen_fd, null, null);
+            if (cfd >= 0 and self.network.net_running.load(.acquire)) {
+                const pid = self.network.next_player_id;
+                self.network.next_player_id += 1;
 
                 // 创建远程玩家实体
                 const pinfo = EntityTypeId.fromName("player").info();
                 const entity = self.server.registry.create();
                 self.server.registry.add(entity, Comps.Player{ .id = pid, .mode = .survival });
                 self.server.registry.add(entity, Comps.ModelName{ .id = pinfo.model_id });
-                const spawn_pos = if (self.net_saved_client_pos.x != 0 or self.net_saved_client_pos.y != 0 or self.net_saved_client_pos.z != 0)
-                    self.net_saved_client_pos
+                const spawn_pos = if (self.network.net_saved_client_pos.x != 0 or self.network.net_saved_client_pos.y != 0 or self.network.net_saved_client_pos.z != 0)
+                    self.network.net_saved_client_pos
                 else blk: {
                     var pv = self.server.registry.view(.{ Comps.Player, Comps.Position }, .{});
                     var pi = pv.entityIterator();
@@ -891,7 +1021,7 @@ fn hostNetworkThread(self: *Game) void {
                         .bone_offset = bone_offset,
                     });
                 }
-                self.clients.append(self.server.allocator, .{
+                self.network.clients.append(self.server.allocator, .{
                     .fd = cfd,
                     .entity = entity,
                     .player_id = pid,
@@ -906,7 +1036,7 @@ fn hostNetworkThread(self: *Game) void {
         }
 
         // ── 处理客户端输入 ──
-        for (self.clients.items) |*c| {
+        for (self.network.clients.items) |*c| {
             if (!winsock.FD_ISSET(c.fd, &readfds)) continue;
             var input: Network.ClientInput = undefined;
             const got = Network.recvInput(c.fd, &input);
@@ -931,14 +1061,14 @@ fn hostNetworkThread(self: *Game) void {
         }
 
         // ── 读取共享数据（一次拷贝，遍历发送） ──
-        self.net_mutex.lockUncancelable(io);
-        const cam_yaw = self.net_cam_yaw;
-        const cam_pitch = self.net_cam_pitch;
+        self.network.net_mutex.lockUncancelable(io);
+        const cam_yaw = self.network.net_cam_yaw;
+        const cam_pitch = self.network.net_cam_pitch;
         self.server.pending_chunks_mutex.lockUncancelable(io);
         var chunks_to_send = self.server.pending_chunks;
         self.server.pending_chunks = .empty;
         self.server.pending_chunks_mutex.unlock(io);
-        self.net_mutex.unlock(io);
+        self.network.net_mutex.unlock(io);
 
         var snapshots: [64]Network.EntitySnapshot = undefined;
         var count: usize = 0;
@@ -971,8 +1101,8 @@ fn hostNetworkThread(self: *Game) void {
 
         // ── 遍历所有客户端，各自发送 ──
         var ci: usize = 0;
-        while (ci < self.clients.items.len) {
-            const c = &self.clients.items[ci];
+        while (ci < self.network.clients.items.len) {
+            const c = &self.network.clients.items[ci];
             if (c.disconnect) {
                 // 断线清理
                 _ = winsock.closesocket(c.fd);
@@ -983,7 +1113,7 @@ fn hostNetworkThread(self: *Game) void {
                 // 从 player_chunks 中移除
                 _ = self.server.player_chunks.remove(c.player_id);
                 Log.info("client id={} disconnected", .{c.player_id});
-                _ = self.clients.swapRemove(ci);
+                _ = self.network.clients.swapRemove(ci);
                 continue;
             }
 
@@ -1005,14 +1135,14 @@ fn hostNetworkThread(self: *Game) void {
                 }
             }
 
-            c.saved_pos = self.net_saved_client_pos;
+            c.saved_pos = self.network.net_saved_client_pos;
             ci += 1;
         }
         chunks_to_send.deinit(self.server.allocator);
 
         // ── 发送 state 给所有在线客户端 ──
         const now_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-        for (self.clients.items) |*c| {
+        for (self.network.clients.items) |*c| {
             const state_serial = self.server.tick_count;
             // 过滤掉 origin=自己的 block_update（已由本地预测处理）
             var filtered_bu: std.ArrayListUnmanaged(Network.BlockUpdate) = .empty;
@@ -1139,7 +1269,7 @@ fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8, attack_targe
                 const is_self = if (self.server.registry.tryGet(Comps.Player, e)) |p| p.id == self.server.player_id else false;
                 if (!is_self) {
                     // 主机模式：本地应用伤害
-                    if (self.network_mode != .client) {
+                    if (self.network.mode != .client) {
                         if (self.server.registry.tryGet(Comps.Health, e)) |health| {
                             health.current -= 10;
                             if (health.current <= 0) {
@@ -1153,8 +1283,8 @@ fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8, attack_targe
                         }
                     }
                     // 输出服务端实体标识
-                    if (self.network_mode == .client) {
-                        var iter = self.snapshot_info.iterator();
+                    if (self.network.mode == .client) {
+                        var iter = self.network.snapshot_info.iterator();
                         while (iter.next()) |entry| {
                             if (std.meta.eql(entry.value_ptr.*.entity, e)) {
                                 attack_target_raw.* = entry.value_ptr.*.server_entity_raw;
@@ -1214,7 +1344,7 @@ fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8, attack_targe
                         }
                     }
                 }
-                if (!can_place) return; // ← 注释这行关闭实体重叠检查
+                // if (!can_place) return; // ← 注释这行关闭实体重叠检查
                 target.* = place_pos;
                 place_face.* = @intFromEnum(facing);
                 self.server.block_world.setBlock(place_pos, BlockState{ .block_id = BlockId.fromInt(sel.item_id), .facing = facing }) catch {};
@@ -1225,8 +1355,8 @@ fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8, attack_targe
 
 /// 采集主机玩家的动作（break/place/fly/camera），通过服务端队列处理
 fn collectHostActions(self: *Game) PlayerInput {
-    const wants_fly = self.server_wants_fly;
-    self.server_wants_fly = false;
+    const wants_fly = self.network.server_wants_fly;
+    self.network.server_wants_fly = false;
     defer {
         self.break_once = false;
         self.place_once = false;
@@ -1258,7 +1388,7 @@ fn collectHostActions(self: *Game) PlayerInput {
 /// 客户端 tick：不跑物理，只发输入 + 收状态
 /// 客机：发输入（30Hz，跟随物理 tick）
 fn clientTick(self: *Game) !void {
-    self._tick_start_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+    self.network._tick_start_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
 
     var intent: Network.ClientInput = undefined;
     intent.serial = @truncate(self.server.tick_count);
@@ -1270,9 +1400,9 @@ fn clientTick(self: *Game) !void {
     // 键盘 → MoveIntent（与主机/单人游戏一致的逻辑）
     produceMoveIntent(self);
     // 飞行切换（双击空格）
-    if (self.server_wants_fly) {
-        self.server_wants_fly = false;
-        const rp = self.remote_player.?;
+    if (self.network.server_wants_fly) {
+        self.network.server_wants_fly = false;
+        const rp = self.network.remote_player.?;
         if (self.server.registry.has(Comps.Flying, rp)) {
             _ = self.server.registry.remove(Comps.Flying, rp);
         } else {
@@ -1282,9 +1412,9 @@ fn clientTick(self: *Game) !void {
     // 跑本地物理（碰撞、重力）——客机：只推自己 ID 匹配的玩家实体
     self.server.block_world.updatePhysics(&self.server.registry, TICK_DT, true, self.server.player_id);
     // 推入环缓冲（相机插值用，与主机逻辑统一）
-    if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos2| pushEntityPos(pos2, pos2.vec);
+    if (self.server.registry.tryGet(Comps.Position, self.network.remote_player.?)) |pos2| pushEntityPos(pos2, pos2.vec);
     // 读取物理运算后的位置，提交给服务器
-    if (self.server.registry.tryGet(Comps.Position, self.remote_player.?)) |pos| {
+    if (self.server.registry.tryGet(Comps.Position, self.network.remote_player.?)) |pos| {
         intent.pos = pos.vec;
     }
     intent.cam_yaw = self.camera.yaw;
@@ -1303,7 +1433,7 @@ fn clientTick(self: *Game) !void {
         intent.attack_target_raw = attack_raw;
     }
 
-    Network.sendInput(@as(winsock.socket_t, @intCast(self.client_fd)), &intent);
+    Network.sendInput(@as(winsock.socket_t, @intCast(self.network.client_fd)), &intent);
 }
 
 /// 客机：每帧收包，更新实体位置（独立于 30Hz clientTick）
@@ -1315,21 +1445,21 @@ fn clientReceivePackets(self: *Game) void {
     while (true) {
         var readfds = winsock.fd_set{
             .fd_count = 1,
-            .fd_array = [_]usize{@as(usize, @intCast(self.client_fd))} ** winsock.FD_SETSIZE,
+            .fd_array = [_]usize{@as(usize, @intCast(self.network.client_fd))} ** winsock.FD_SETSIZE,
         };
         var tv = winsock.timeval{ .sec = 0, .usec = 0 };
         const sel_rc = winsock.select(0, &readfds, null, null, &tv);
         if (sel_rc < 0) break;
         if (sel_rc == 0) break; // 无数据，下帧再试
-        const tag = Network.peekTag(self.client_fd);
+        const tag = Network.peekTag(self.network.client_fd);
         if (tag == 0) {
             // select 说有数据但 peekTag 返回 0 → 连接已关闭
             self.disconnectClient();
             return;
         }
         if (tag == 2) {
-            self.chunk_count += 1;
-            const result = Network.recvChunk(self.client_fd, self.allocator);
+            self.network.chunk_count += 1;
+            const result = Network.recvChunk(self.network.client_fd, self.allocator);
             if (result == null) {
                 self.disconnectClient();
                 return;
@@ -1348,7 +1478,7 @@ fn clientReceivePackets(self: *Game) void {
                 if (state.drops.len > 0) self.allocator.free(state.drops);
             }
 
-            const got = Network.recvState(self.client_fd, self.allocator, &state);
+            const got = Network.recvState(self.network.client_fd, self.allocator, &state);
             if (!got) {
                 self.disconnectClient();
                 return;
@@ -1379,7 +1509,7 @@ fn clientReceivePackets(self: *Game) void {
                 state.drops = &.{};
             }
         } else if (tag == 3) {
-            const unload = Network.recvChunkUnload(self.client_fd);
+            const unload = Network.recvChunkUnload(self.network.client_fd);
             if (unload) |u| {
                 self.server.block_world.unloadChunk(Vec3i.new(u.x, 0, u.z));
             }
@@ -1393,31 +1523,31 @@ fn clientReceivePackets(self: *Game) void {
     }
 
     // 复制到渲染快照缓冲区
-    self.render_snapshot_count = @as(u32, @intCast(state.entities.len));
-    @memcpy(std.mem.sliceAsBytes(self.render_snapshots[0..self.render_snapshot_count]), std.mem.sliceAsBytes(state.entities));
+    self.network.render_snapshot_count = @as(u32, @intCast(state.entities.len));
+    @memcpy(std.mem.sliceAsBytes(self.network.render_snapshots[0..self.network.render_snapshot_count]), std.mem.sliceAsBytes(state.entities));
 
     // 记录插值时间基准
-    self.last_snapshot_time_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-    const now_ns = self.last_snapshot_time_ns;
+    self.network.last_snapshot_time_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+    const now_ns = self.network.last_snapshot_time_ns;
     const latency_ns = now_ns - state.host_time;
     if (latency_ns >= 0) {
-        self.latency_min_ns = @min(self.latency_min_ns, latency_ns);
-        self.latency_max_ns = @max(self.latency_max_ns, latency_ns);
-        self.latency_sum_ns += latency_ns;
-        self.latency_samples += 1;
+        self.network.latency_min_ns = @min(self.network.latency_min_ns, latency_ns);
+        self.network.latency_max_ns = @max(self.network.latency_max_ns, latency_ns);
+        self.network.latency_sum_ns += latency_ns;
+        self.network.latency_samples += 1;
     }
 
     for (state.entities, 0..) |snap, i| {
         if (snap.player_id == self.server.player_id) {
             // 不覆盖 pos.vec（本地物理已算好），也不推环缓冲（clientTick 已推）
-            if (self.server.registry.tryGet(Comps.Facing, self.remote_player.?)) |facing| {
+            if (self.server.registry.tryGet(Comps.Facing, self.network.remote_player.?)) |facing| {
                 facing.yaw = snap.facing_yaw;
                 facing.pitch = snap.facing_pitch;
             }
             continue;
         }
         const key = @as(u64, @intCast(i));
-        const gop = self.snapshot_info.getOrPut(self.allocator, key) catch continue;
+        const gop = self.network.snapshot_info.getOrPut(self.allocator, key) catch continue;
         if (!gop.found_existing) {
             const is_player = snap.player_id != std.math.maxInt(u32);
             const einfo = if (is_player) EntityTypeId.fromName("player").info() else EntityTypeId.fromName("zombie").info();
@@ -1446,21 +1576,21 @@ fn clientReceivePackets(self: *Game) void {
     {
         var keys_to_remove: std.ArrayListUnmanaged(u64) = .empty;
         defer keys_to_remove.deinit(self.allocator);
-        var iter = self.snapshot_info.keyIterator();
+        var iter = self.network.snapshot_info.keyIterator();
         while (iter.next()) |k| {
             if (k.* >= state.entities.len) {
                 keys_to_remove.append(self.allocator, k.*) catch {};
-            } else if (self.snapshot_info.getPtr(k.*)) |info| {
+            } else if (self.network.snapshot_info.getPtr(k.*)) |info| {
                 if (state.entities[k.*].player_id != info.player_id) {
                     keys_to_remove.append(self.allocator, k.*) catch {};
                 }
             }
         }
         for (keys_to_remove.items) |k| {
-            if (self.snapshot_info.getPtr(k)) |e| {
+            if (self.network.snapshot_info.getPtr(k)) |e| {
                 self.server.registry.destroy(e.*.entity);
             }
-            _ = self.snapshot_info.remove(k);
+            _ = self.network.snapshot_info.remove(k);
         }
     }
 
@@ -1485,20 +1615,20 @@ fn clientReceivePackets(self: *Game) void {
 /// 客户端断开连接，回到主菜单
 pub fn disconnectClient(self: *Game) void {
     Log.info("client disconnected", .{});
-    self.snapshot_info.deinit(self.allocator);
-    self.snapshot_info = .{};
-    if (self.client_connected.load(.acquire)) {
-        _ = winsock.closesocket(self.client_fd);
-        self.client_fd = undefined;
-        self.client_connected.store(false, .release);
+    self.network.snapshot_info.deinit(self.allocator);
+    self.network.snapshot_info = .{};
+    if (self.network.client_connected.load(.acquire)) {
+        _ = winsock.closesocket(self.network.client_fd);
+        self.network.client_fd = undefined;
+        self.network.client_connected.store(false, .release);
     }
     self.server.block_world.deinit();
     self.server.registry.deinit();
     self.server.registry = ECS.Registry.init(self.allocator);
-    self.net_running.store(false, .release);
+    self.network.net_running.store(false, .release);
     self.save_initialized = false;
     self.menu_state = .MainMenu;
-    self.snapshot_info = .{}; // 已在上方 deinit，重置标记
+    self.network.snapshot_info = .{}; // 已在上方 deinit，重置标记
     Log.info("returned to menu\n", .{});
 }
 
@@ -1552,24 +1682,24 @@ fn handleHotbarInput(self: *Game) void {
 
 fn pollServerSnapshot(self: *Game) void {
     const serial = self.server.snapshot_serial;
-    if (serial == self.last_snapshot_serial) return;
-    self.last_snapshot_serial = serial;
+    if (serial == self.network.last_snapshot_serial) return;
+    self.network.last_snapshot_serial = serial;
 
     self.server.snapshot_mutex.lockUncancelable(io);
     defer self.server.snapshot_mutex.unlock(io);
     const snapshots = self.server.snapshots[0..self.server.snapshot_count];
 
     // 复制到渲染快照缓冲区（供 render.zig 使用，避免 ECS view 迭代竞态）
-    self.render_snapshot_count = @as(u32, @intCast(snapshots.len));
-    @memcpy(std.mem.sliceAsBytes(self.render_snapshots[0..self.render_snapshot_count]), std.mem.sliceAsBytes(snapshots));
+    self.network.render_snapshot_count = @as(u32, @intCast(snapshots.len));
+    @memcpy(std.mem.sliceAsBytes(self.network.render_snapshots[0..self.network.render_snapshot_count]), std.mem.sliceAsBytes(snapshots));
 
     // 主机：推入实体 3 槽环形缓冲区
-    if (self.network_mode != .client) {
+    if (self.network.mode != .client) {
         for (snapshots) |s| {
             const entity = s.entity;
             if (!self.server.registry.valid(entity)) continue;
             if (self.server.registry.tryGet(Comps.Position, entity)) |pos| {
-                if (!self.host_snap_valid) {
+                if (!self.network.host_snap_valid) {
                     // 第一次快照：推入三次确保缓冲区填满
                     pushEntityPos(pos, s.pos);
                     pushEntityPos(pos, s.pos);
@@ -1583,12 +1713,12 @@ fn pollServerSnapshot(self: *Game) void {
                 facing.pitch = s.facing_pitch;
             }
         }
-        self.last_snapshot_time_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
-        self.host_snap_valid = true;
+        self.network.last_snapshot_time_ns = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
+        self.network.host_snap_valid = true;
     }
 
     // 主机/单人：动画更新（主线程，与服务端分离）
-    if (self.network_mode != .client) {
+    if (self.network.mode != .client) {
         // ── AnimationState 修复 ──
         // zig-ecs 非线程安全。服务端线程每 tick 写 Position/Velocity 等组件时，
         // 内部数据结构可能踩到 AnimationState 的存储区域，使 bone_offset 变为
@@ -1719,12 +1849,6 @@ pub const MenuState = enum {
     Inventory,
 };
 
-pub const NetworkMode = enum {
-    single,
-    host,
-    client,
-};
-
 pub const SlotSource = enum { hotbar, inventory };
 
 pub const SelectedItem = struct {
@@ -1766,11 +1890,3 @@ const Server = @import("server.zig").Server;
 const PlayerInput = @import("server.zig").PlayerInput;
 const Network = @import("network.zig");
 const Log = @import("log.zig");
-
-pub const ClientInfo = struct {
-    fd: winsock.socket_t,
-    entity: ECS.Entity,
-    player_id: u32,
-    disconnect: bool,
-    saved_pos: Vec3,
-};
