@@ -8,9 +8,12 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    Log.info("ZBlock starting...", .{});
+    Log.init("");
+    Log.setModule(.frame, false); // 关掉每帧 poll/render 刷屏
+    defer Log.deinit();
+
     var game = try Game.init(allocator);
     defer game.deinit();
+
     try game.start();
-    Log.info("ZBlock exited normally", .{});
 }

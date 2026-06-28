@@ -502,3 +502,8 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
   epsilon 将这些值推到远离零的稳定区域，保证每个面的顶点落在正确整数位置。
   注：`ZBlock_内存调色板` 分支也需要此修复，届时手动改 `chunk_mesh.zig` 三行即可。
 
+- 2026-06-27：ReleaseFast 下 `resolveClip` 遍历 `model.animations` 读 `clip.name` 偶发崩溃。
+  根因疑似编译器优化导致 `clip.name` 的内存读取被跳过。
+  修复：用 `@memcpy` 将 `clip.name` 拷贝到局部变量再访问，强制编译器做真实内存读取。
+  简单测试无法复现，需要完整项目环境（多线程 ECS + 复杂调用链）才能触发。
+

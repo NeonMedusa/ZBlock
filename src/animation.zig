@@ -111,16 +111,17 @@ pub const AnimationSystem = struct {
 };
 
 fn resolveClip(model: *const rend_ctx.Model, name: []const u8) ?*AnimClip {
-    for (model.animations) |*clip| {
-        if (std.mem.eql(u8, clip.name, name)) return clip;
+    const LR = @import("log.zig");
+    LR.info(.frame, "resolveClip: enter", .{});
+    const anims = model.animations;
+    for (anims) |*clip| {
+        // ReleaseFast 下直接读 `clip.name` 可能因编译器优化崩溃，
+        // `@memcpy` 到局部变量强制编译器做真实内存读取。
+        var cn: []const u8 = undefined;
+        @memcpy(std.mem.asBytes(&cn), std.mem.asBytes(&clip.name));
+        if (cn.len > 0 and cn.len < 64 and std.mem.eql(u8, cn, name)) return clip;
     }
-    if (model.anim_mapping_loaded) {
-        const mapped = model.anim_mapping.get(name) orelse return null;
-        for (model.animations) |*clip| {
-            if (std.mem.eql(u8, clip.name, mapped)) return clip;
-        }
-    }
-    if (model.animations.len > 0) return &model.animations[0];
+    if (anims.len > 0) return &anims[0];
     return null;
 }
 

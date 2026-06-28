@@ -356,3 +356,26 @@ packed_pos (32 bits):
 **修复：**
 1. 移除 `unloadChunk` 中的 `pending.contains` 检查（改用 `build_lock` + `chunk_mutex` 保证安全），不再碰 `mesh_mutex`
 2. `processCompletedLoads` 将每帧几十次的逐个 `enqueueMeshBuild` 改为一次 `enqueueMeshBuildBatch` 批量入队，减少锁操作次数
+
+---
+
+## 日志系统
+
+按模块 + 级别分类，运行时可按模块开关：
+
+| 模块 | 内容 | 默认 |
+|------|------|------|
+| `startup` | 启动流程 | 开 |
+| `network` | 网络事件 | 开 |
+| `model` | 模型加载 | 开 |
+| `game` | 通用游戏逻辑 | 开 |
+| `latency` | 延迟统计 | 开 |
+| `frame` | 每帧调试信息 | 关 |
+
+用法：
+```zig
+Log.info(.network, "player joined", .{});
+Log.setModule(.frame, true);
+```
+
+日志文件 `logs/<timestamp>.txt`，线程安全（`std.Io.Mutex`），`reentrant` 标志防止重入死锁。

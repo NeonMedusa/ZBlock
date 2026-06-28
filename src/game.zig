@@ -210,7 +210,7 @@ pub fn start(self: *Game) !void {
                 if (self.network.mode == .client and self.network.state_count > 0 and self.network.state_count % 90 == 0 and self.network._last_latency_print != self.network.state_count) {
                     self.network._last_latency_print = self.network.state_count;
                     const avg_ns = if (self.network.latency_samples > 0) @divTrunc(self.network.latency_sum_ns, @as(i64, @intCast(self.network.latency_samples))) else 0;
-                    Log.info("[LATENCY] states={d} chunks={d} gaps={d}  min={d}us avg={d}us max={d}us", .{
+                    Log.info(.latency, "[LATENCY] states={d} chunks={d} gaps={d}  min={d}us avg={d}us max={d}us", .{
                         self.network.state_count,
                         self.network.chunk_count,
                         self.network.state_serial_gaps,
@@ -741,7 +741,7 @@ pub fn deinit(self: *@This()) void {
 
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
-    Log.info("startSave begin '{s}'", .{name});
+    Log.info(.startup, "startSave begin '{s}'", .{name});
     self.server.chunk_radius = 8;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
@@ -775,7 +775,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
     const cfd = Network.connect(host_ip, Network.SERVER_PORT);
     if (cfd < 0) {
-        Log.info("connect failed", .{});
+        Log.info(.startup, "connect failed", .{});
         return;
     }
     self.network.client_fd = cfd;
@@ -783,9 +783,9 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
     // 接收 welcome 消息，获取分配的 player_id
     const assigned_id = Network.recvWelcome(cfd);
-    Log.info("recvWelcome raw={}\n", .{assigned_id});
+    Log.info(.game, "recvWelcome raw={}\n", .{assigned_id});
     self.server.player_id = assigned_id;
-    Log.info("connected as player_id={}", .{assigned_id});
+    Log.info(.startup, "connected as player_id={}", .{assigned_id});
 
     // 清空快照实体映射
     self.network.snapshot_info = .{};
@@ -831,7 +831,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
 /// 返回主菜单（由暂停菜单调用）
 pub fn returnToMenu(self: *Game) void {
-    Log.info("returnToMenu CALLED, mode={any}, save_initialized={}, menu_state={}", .{ self.network.mode, self.save_initialized, @intFromEnum(self.menu_state) });
+    Log.info(.game, "returnToMenu CALLED, mode={any}, save_initialized={}, menu_state={}", .{ self.network.mode, self.save_initialized, @intFromEnum(self.menu_state) });
     if (self.network.mode != .client) {
         self.save_manager.savePlayer(self.player_name, &self.hotbar, &self.inventory, &self.server.registry, self.server.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
         self.save_manager.saveAllEntities(&self.server.registry) catch |err| std.debug.print("saveEntities error: {}\n", .{err});
@@ -928,7 +928,7 @@ fn tick(self: *Game) !void {
                 self.server.block_world.cleanupEntity(&self.server.registry, c.entity);
                 if (self.server.registry.valid(c.entity)) self.server.registry.destroy(c.entity);
                 _ = self.network.clients.swapRemove(ci);
-                Log.info("client id={} cleaned up", .{c.player_id});
+                Log.info(.network, "client id={} cleaned up", .{c.player_id});
             } else {
                 ci += 1;
             }
@@ -946,7 +946,7 @@ fn tick(self: *Game) !void {
 fn hostNetworkThread(self: *Game) void {
     self.network.listen_fd = Network.listen(Network.SERVER_PORT);
     if (self.network.listen_fd < 0) {
-        Log.err("network: listen failed", .{});
+        Log.err(.network, "network: listen failed", .{});
         return;
     }
     self.network.listening = true;
@@ -960,7 +960,7 @@ fn hostNetworkThread(self: *Game) void {
     var print_timer: u32 = 0;
     while (self.network.net_running.load(.acquire)) {
         if (print_timer == 0) {
-            Log.info("network: {} client(s) connected", .{self.network.clients.items.len});
+            Log.info(.network, "network: {} client(s) connected", .{self.network.clients.items.len});
             print_timer = 200; // 每 ~6 秒打印一次（select 通常 ~33ms 返回一次）
         }
         print_timer -= 1;
@@ -979,7 +979,7 @@ fn hostNetworkThread(self: *Game) void {
         var tv = winsock.timeval{ .sec = 0, .usec = 100000 };
         const sel_rc = winsock.select(max_fd + 1, &readfds, null, null, &tv);
         if (sel_rc < 0) {
-            if (self.network.net_running.load(.acquire)) Log.err("network: select error", .{});
+            if (self.network.net_running.load(.acquire)) Log.err(.network, "network: select error", .{});
             return;
         }
 
@@ -1029,7 +1029,7 @@ fn hostNetworkThread(self: *Game) void {
                     .saved_pos = spawn_pos,
                 }) catch {};
                 Network.sendWelcome(cfd, pid);
-                Log.info("network: player joined as id={}, fd={}", .{ pid, cfd });
+                Log.info(.network, "network: player joined as id={}, fd={}", .{ pid, cfd });
             } else if (cfd >= 0) {
                 _ = winsock.closesocket(cfd);
             }
@@ -1112,7 +1112,7 @@ fn hostNetworkThread(self: *Game) void {
                 }
                 // 从 player_chunks 中移除
                 _ = self.server.player_chunks.remove(c.player_id);
-                Log.info("client id={} disconnected", .{c.player_id});
+                Log.info(.network, "client id={} disconnected", .{c.player_id});
                 _ = self.network.clients.swapRemove(ci);
                 continue;
             }
@@ -1614,7 +1614,7 @@ fn clientReceivePackets(self: *Game) void {
 
 /// 客户端断开连接，回到主菜单
 pub fn disconnectClient(self: *Game) void {
-    Log.info("client disconnected", .{});
+    Log.info(.network, "client disconnected", .{});
     self.network.snapshot_info.deinit(self.allocator);
     self.network.snapshot_info = .{};
     if (self.network.client_connected.load(.acquire)) {
@@ -1629,7 +1629,7 @@ pub fn disconnectClient(self: *Game) void {
     self.save_initialized = false;
     self.menu_state = .MainMenu;
     self.network.snapshot_info = .{}; // 已在上方 deinit，重置标记
-    Log.info("returned to menu\n", .{});
+    Log.info(.startup, "returned to menu\n", .{});
 }
 
 /// 物品栏输入处理：数字键切换到、滚轮切换、中键拾取方块
