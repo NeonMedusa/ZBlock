@@ -256,6 +256,8 @@ const model_infos = [_]ModelInfo{
     .{ .name = "Buggy", .path = "resources/models/Buggy.glb" },
     .{ .name = "BarramundiFish", .path = "resources/models/BarramundiFish.glb" },
     .{ .name = "Avocado", .path = "resources/models/Avocado.glb" },
+    .{ .name = "Deer", .path = "resources/models/Deer.glb" },
+    .{ .name = "Fox", .path = "resources/models/Fox.glb" },
 };
 
 pub const MAX_MODELS = model_infos.len;
@@ -308,6 +310,10 @@ pub const Model = struct {
         try gltf.parse(@as([]align(4) const u8, @alignCast(model_file_buf)));
 
         var model: Model = undefined;
+        model.skeleton = null;
+        model.animations = &.{};
+        model.anim_mapping = .{};
+        model.anim_mapping_loaded = false;
 
         // 复制node结构
         model.nodes = try allocator.alloc(Node, gltf.data.nodes.len);
@@ -679,6 +685,12 @@ fn calWorldMatrix(node_idx: usize, gltf: *Gltf) Mat4 {
         const node = gltf.data.nodes[current_idx];
         if (node.matrix) |matrix| {
             world_matrix = Mat4.fromSlice(&matrix).mul(world_matrix);
+        } else { // 分离 TRS：translation × rotation × scale
+            const q = Quat.init(node.rotation[0], node.rotation[1], node.rotation[2], node.rotation[3]);
+            const t = Mat4.fromTranslate(Vec3.new(node.translation[0], node.translation[1], node.translation[2]));
+            const r = q.toMat4();
+            const s = Mat4.fromScale(Vec3.new(node.scale[0], node.scale[1], node.scale[2]));
+            world_matrix = Mat4.mul(t, Mat4.mul(r, s)).mul(world_matrix);
         }
         current_idx = node.parent orelse break;
     }

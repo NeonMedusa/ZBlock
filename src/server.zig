@@ -320,7 +320,7 @@ pub const Server = struct {
     }
 
     fn spawnEnemies(self: *Server) void {
-        const MAX_ENEMIES: usize = 1;
+        const MAX_ENEMIES: usize = 5;
         var count: usize = 0;
         {
             var view = self.registry.view(.{Comps.AIAgent}, .{});
