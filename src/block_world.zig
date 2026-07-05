@@ -1356,11 +1356,17 @@ pub const BlockWorld = struct {
                         const final_wp = path.items[path.items.len - 1];
                         const fdx = agent.target.x - final_wp.x;
                         const fdz = agent.target.z - final_wp.z;
-                        if (@sqrt(fdx * fdx + fdz * fdz) > repath_dist) {
+                        // 闲逛时不到达目标也没关系，不强求重算
+                        if (agent.state != .wandering and @sqrt(fdx * fdx + fdz * fdz) > repath_dist) {
                             need_repath = true;
                         }
                     }
                 } else {
+                    if (agent.state == .wandering) {
+                        agent.target = pos.vec;
+                        agent.wander_timer = agent.type_id.info().wander_interval;
+                        agent.state = .idle;
+                    }
                     path.deinit(self.allocator);
                     agent.path = null;
                 }
@@ -1410,8 +1416,8 @@ pub const BlockWorld = struct {
                             }
                         }
                     }
-                } else if (agent.path == null and dist_3d < 10.0) {
-                    // 贪心桥接：A* 冷却中，直走方向临时填补
+                } else if (agent.path == null and dist_3d < 10.0 and agent.state == .chasing) {
+                    // 贪心桥接：仅追杀时直走填补 A* 冷却
                     const d = @sqrt(dx * dx + dz * dz);
                     if (d > 0.01) {
                         intent.direction = Vec3.new(dx / d, 0, dz / d);

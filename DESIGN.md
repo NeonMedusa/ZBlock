@@ -321,11 +321,13 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 
 | 字段 | 类型 | 频率 | 说明 |
 |------|------|------|------|
+| `entity_type_id` | u32 (4B) | 30 Hz | 实体类型索引（客机据此选模型/collider） |
+| `clip_name_id` | u8 (1B) | 30 Hz | 动画剪辑索引（0=idle 1=walk 2=run ...） |
 | `position` | Vec3 (12B) | 30 Hz | 实体位置 |
 | `yaw` | f32 (4B) | 30 Hz | 水平朝向 |
 | `pitch` | f32 (4B) | 30 Hz | 垂直朝向 |
 
-每实体 ≈ 20 字节，50 实体 = 1KB/tick = **30KB/s**。
+每实体 ≈ 29 字节，50 实体 = 1.4KB/tick = **43KB/s**。
 
 #### 第二层：运动状态（按需添加）
 
@@ -339,7 +341,7 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 
 | 字段 | 类型 | 频率 | 说明 |
 |------|------|------|------|
-| `clip_name` | u8 (1B) | 切换时 | 动画剪辑索引（idle/walk/run/jump/attack） |
+| `clip_name_id` | u8 (1B) | 30 Hz | ✅ 已实现，每 tick 嵌入 `EntitySnapshot` |
 | `time` | f32 (4B) | 定期校对 | 动画时间戳，避免漂移 |
 | `speed` | f32 (4B) | 切换时 | 播放倍率 |
 

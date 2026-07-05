@@ -187,7 +187,8 @@ pub fn start(self: *Game) !void {
                     const facing = fv.get(Comps.Facing, entity);
                     const h_speed = @sqrt(vel.vec.x * vel.vec.x + vel.vec.z * vel.vec.z);
                     if (h_speed > 0.01) {
-                        facing.yaw = std.math.atan2(vel.vec.x, vel.vec.z); // atan2 返回弧度
+                        const target = std.math.atan2(vel.vec.x, vel.vec.z);
+                        facing.yaw = facing.yaw + 0.3 * (target - facing.yaw);
                     }
                 }
             }
@@ -1272,6 +1273,13 @@ fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8, attack_targe
                     if (self.network.mode != .client) {
                         if (self.server.registry.tryGet(Comps.Health, e)) |health| {
                             health.current -= 10;
+                            // 受击逃跑
+                            if (self.server.registry.tryGet(Comps.AIAgent, e)) |agent| {
+                                if (agent.type_id.info().flee_on_attack) {
+                                    agent.state = .fleeing;
+                                    agent.flee_timer = 5.0;
+                                }
+                            }
                             if (health.current <= 0) {
                                 if (self.server.registry.tryGet(Comps.AIAgent, e)) |agent| {
                                     const rolls = Drops.rollEntityDrops(@as(usize, agent.type_id.id));
@@ -1484,6 +1492,7 @@ fn clientReceivePackets(self: *Game) void {
                 return;
             }
             state_initialized = true;
+            self.server.tick_count = state.tick_count;
 
             // 立即应用 block_updates（不等到循环结束，避免被后续 state 覆盖）
             for (state.block_updates) |upd| {
@@ -1537,28 +1546,40 @@ fn clientReceivePackets(self: *Game) void {
         self.network.latency_samples += 1;
     }
 
-    for (state.entities, 0..) |snap, i| {
+    var server_raw_set: [64]u32 = undefined;
+    var server_raw_count: usize = 0;
+    for (state.entities) |snap| {
+        const server_raw = @as(u32, @bitCast(snap.entity));
+        if (server_raw_count < 64) {
+            server_raw_set[server_raw_count] = server_raw;
+            server_raw_count += 1;
+        }
         if (snap.player_id == self.server.player_id) {
-            // 不覆盖 pos.vec（本地物理已算好），也不推环缓冲（clientTick 已推）
             if (self.server.registry.tryGet(Comps.Facing, self.network.remote_player.?)) |facing| {
                 facing.yaw = snap.facing_yaw;
                 facing.pitch = snap.facing_pitch;
             }
             continue;
         }
-        const key = @as(u64, @intCast(i));
+        const key = @as(u64, server_raw);
         const gop = self.network.snapshot_info.getOrPut(self.allocator, key) catch continue;
         if (!gop.found_existing) {
-            const is_player = snap.player_id != std.math.maxInt(u32);
-            const einfo = if (is_player) EntityTypeId.fromName("player").info() else EntityTypeId.fromName("zombie").info();
+            const etype = EntityTypeId.fromInt(snap.entity_type_id);
+            const einfo = etype.info();
             const entity = self.server.registry.create();
             self.server.registry.add(entity, Comps.ModelName{ .id = einfo.model_id });
             self.server.registry.add(entity, Comps.Position{ .vec = snap.pos, .prev = snap.pos });
             if (self.server.registry.tryGet(Comps.Position, entity)) |pp| pushEntityPos(pp, snap.pos);
             self.server.registry.add(entity, Comps.Collider{ .width = einfo.collider_width, .height = einfo.collider_height });
-            self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero }); // 进入 BVH 供实体碰撞检测
+            self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
             self.server.registry.add(entity, Comps.Facing{});
-            gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id, .server_entity_raw = @as(u32, @bitCast(snap.entity)) };
+            if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                self.server.registry.add(entity, Comps.AnimationState{
+                    .clip_name = clipNameFromId(snap.clip_name_id),
+                    .bone_offset = bone_offset,
+                });
+            }
+            gop.value_ptr.* = .{ .entity = entity, .player_id = snap.player_id, .server_entity_raw = server_raw };
         } else {
             if (self.server.registry.tryGet(Comps.Position, gop.value_ptr.*.entity)) |pos| {
                 pushEntityPos(pos, snap.pos);
@@ -1569,6 +1590,10 @@ fn clientReceivePackets(self: *Game) void {
                 facing.yaw = snap.facing_yaw;
                 facing.pitch = snap.facing_pitch;
             }
+            // 同步 clip_name
+            if (self.server.registry.tryGet(Comps.AnimationState, gop.value_ptr.*.entity)) |anim| {
+                anim.clip_name = clipNameFromId(snap.clip_name_id);
+            }
         }
     }
 
@@ -1578,12 +1603,13 @@ fn clientReceivePackets(self: *Game) void {
         defer keys_to_remove.deinit(self.allocator);
         var iter = self.network.snapshot_info.keyIterator();
         while (iter.next()) |k| {
-            if (k.* >= state.entities.len) {
+            // 如果服务端句柄不在当前快照中，则销毁
+            var found = false;
+            for (server_raw_set[0..server_raw_count]) |raw| {
+                if (raw == k.*) { found = true; break; }
+            }
+            if (!found) {
                 keys_to_remove.append(self.allocator, k.*) catch {};
-            } else if (self.network.snapshot_info.getPtr(k.*)) |info| {
-                if (state.entities[k.*].player_id != info.player_id) {
-                    keys_to_remove.append(self.allocator, k.*) catch {};
-                }
             }
         }
         for (keys_to_remove.items) |k| {
@@ -1848,6 +1874,17 @@ pub const MenuState = enum {
     Pause,
     Inventory,
 };
+
+fn clipNameFromId(id: u8) []const u8 {
+    return switch (id) {
+        0 => "idle",
+        1 => "walk",
+        2 => "run",
+        3 => "death",
+        4 => "attack",
+        else => "idle",
+    };
+}
 
 pub const SlotSource = enum { hotbar, inventory };
 

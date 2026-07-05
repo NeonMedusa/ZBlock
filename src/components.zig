@@ -14,12 +14,16 @@ pub const Components = struct {
     pub const Flying = struct {}; // 标签组件：存在表示实体处于飞行状态
     pub const ModelName = struct { id: ModelId }; // 渲染用模型
     pub const AIAgent = struct {
-        type_id: EntityTypeId,                          // 实体类型（僵尸/狼等）
-        target: Vec3 = Vec3.zero,                       // 当前追逐目标（玩家脚底位置）
-        path: ?std.ArrayListUnmanaged(Vec3) = null,     // 当前路径 waypoint 列表（世界坐标）
-        path_index: u32 = 0,                            // 当前正在走向的 waypoint 索引
-        stuck_timer: f32 = 0,                           // waypoint 超时计时器，正计时，到达时归零
-        astar_cooldown: f32 = 0,                        // A* 完成后的冷却计时，限制重算频率（1 秒）
+        type_id: EntityTypeId,
+        state: enum { idle, wandering, chasing, fleeing } = .idle,
+        target: Vec3 = Vec3.zero,              // 追逐/逃跑目标
+        wander_target: Vec3 = Vec3.zero,       // 当前闲逛目的地
+        wander_timer: f32 = 0,                 // 闲逛切换倒计时
+        flee_timer: f32 = 0,                   // 逃跑持续时间
+        path: ?std.ArrayListUnmanaged(Vec3) = null,
+        path_index: u32 = 0,
+        stuck_timer: f32 = 0,
+        astar_cooldown: f32 = 0,
     };
 
     // ---- 物理状态 ----

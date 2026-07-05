@@ -231,45 +231,17 @@ pub const Server = struct {
             if (input.attack_entity) self.handleActionAttack(input.player_id, input.attack_target_raw);
         }
 
-        // 物理（只跑一次，与输入数量无关）——仅对主机玩家和 AI 有效
-        self.block_world.updatePhysics(&self.registry, TICK_DT, false, 0); // 服务端：推 AI + 主机玩家（ID=0），不推远程客机
+        self.block_world.updatePhysics(&self.registry, TICK_DT, false, 0);
 
-        // AI 追踪玩家：每个 AI 追踪最近的玩家
-        {
-            var aview = self.registry.view(.{ Comps.AIAgent, Comps.Position }, .{});
-            var aiter = aview.entityIterator();
-            while (aiter.next()) |enemy| {
-                var agent = aview.get(Comps.AIAgent, enemy);
-                const epos = aview.get(Comps.Position, enemy);
-                var nearest_dist: f32 = std.math.floatMax(f32);
-                var nearest_pos = epos.vec;
-                {
-                    var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
-                    var piter = pview.entityIterator();
-                    while (piter.next()) |player_entity| {
-                        const ppos = pview.get(Comps.Position, player_entity).vec;
-                        const dx = ppos.x - epos.vec.x;
-                        const dz = ppos.z - epos.vec.z;
-                        const d = dx * dx + dz * dz;
-                        if (d < nearest_dist) {
-                            nearest_dist = d;
-                            nearest_pos = ppos;
-                        }
-                    }
-                }
-                const info = agent.type_id.info();
-                if (@sqrt(nearest_dist) < info.detect_range) {
-                    agent.target = nearest_pos;
-                }
-            }
-        }
+        self.updateAIState();
         self.block_world.updateAI(&self.registry, TICK_DT);
 
         self.updateEntities() catch {};
         self.updateChunks() catch {};
 
-        // 每 5 秒尝试生成敌对实体（每玩家附近最多 3 个）
         if (self.tick_count % 150 == 0) self.spawnEnemies();
+
+        self.updateAnimation();
 
         self.publishSnapshot();
     }
@@ -289,9 +261,13 @@ pub const Server = struct {
                 const p = view.get(Comps.Player, e);
                 const pos = view.get(Comps.Position, e);
                 const facing = view.get(Comps.Facing, e);
+                const etype = @as(u32, @intCast(@import("entity_registry.zig").EntityTypeId.fromName("player").id));
+                const clip_id = clipNameToId(if (self.registry.tryGet(Comps.AnimationState, e)) |a| a.clip_name else "idle");
                 self.snapshots[self.snapshot_count] = .{
                     .player_id = p.id,
                     .entity = e,
+                    .entity_type_id = etype,
+                    .clip_name_id = clip_id,
                     .pos = pos.vec,
                     .facing_yaw = facing.yaw,
                     .facing_pitch = facing.pitch,
@@ -307,9 +283,16 @@ pub const Server = struct {
                 if (self.registry.tryGet(Comps.Player, e)) |_| continue;
                 const pos = view.get(Comps.Position, e);
                 const facing = view.get(Comps.Facing, e);
+                const etype = if (self.registry.tryGet(Comps.AIAgent, e)) |agent|
+                    agent.type_id.id
+                else
+                    0;
+                const clip_id = clipNameToId(if (self.registry.tryGet(Comps.AnimationState, e)) |a| a.clip_name else "idle");
                 self.snapshots[self.snapshot_count] = .{
                     .player_id = std.math.maxInt(u32),
                     .entity = e,
+                    .entity_type_id = etype,
+                    .clip_name_id = clip_id,
                     .pos = pos.vec,
                     .facing_yaw = facing.yaw,
                     .facing_pitch = facing.pitch,
@@ -320,7 +303,7 @@ pub const Server = struct {
     }
 
     fn spawnEnemies(self: *Server) void {
-        const MAX_ENEMIES: usize = 5;
+        const MAX_ENEMIES: usize = 10;
         var count: usize = 0;
         {
             var view = self.registry.view(.{Comps.AIAgent}, .{});
@@ -337,15 +320,15 @@ pub const Server = struct {
             io.random(&seed_buf);
             var prng = std.Random.DefaultPrng.init(std.mem.readInt(u64, &seed_buf, .little));
             const rng = prng.random();
-            if (rng.float(f32) > 0.4) continue; // 60% 概率跳过
+            if (rng.float(f32) > 0.4) continue;
             const angle = rng.float(f32) * std.math.pi * 2;
             const r: f32 = 16 + @as(f32, @floatFromInt(rng.int(u32) % 16));
             const sx: f32 = ppos.vec.x + @cos(angle) * r;
             const sz: f32 = ppos.vec.z + @sin(angle) * r;
-            // 简单地表检测
             const surface_y = self.block_world.getSurfaceY(@intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
             if (surface_y) |y| {
-                self.spawnEnemy("zombie", Vec3.new(sx, @as(f32, @floatFromInt(y)), sz));
+                const pos = Vec3.new(sx, @as(f32, @floatFromInt(y)), sz);
+                if (rng.float(f32) < 0.5) { self.spawnEnemy("fox", pos); } else { self.spawnEnemy("deer", pos); }
                 count += 1;
                 if (count >= MAX_ENEMIES) break;
             }
@@ -359,7 +342,11 @@ pub const Server = struct {
         // MoveIntent 和 AttackCooldown 必须最先添加，避免 ECS 库的稀疏集 cleanup bug
         self.registry.add(entity, Comps.MoveIntent{});
         self.registry.add(entity, Comps.AttackCooldown{});
-        self.registry.add(entity, Comps.AIAgent{ .type_id = eid, .target = pos });
+        self.registry.add(entity, Comps.AIAgent{
+            .type_id = eid,
+            .target = pos,
+            .wander_timer = info.wander_interval,
+        });
         self.registry.add(entity, Comps.Position{ .vec = pos, .prev = pos });
         if (self.registry.tryGet(Comps.Position, entity)) |p| {
             const h = p.render_buf_head;
@@ -409,6 +396,13 @@ pub const Server = struct {
     fn handleActionAttack(self: *Server, origin_player: u32, target_raw: u32) void {
         const target_entity: ECS.Entity = @bitCast(target_raw);
         if (!self.registry.valid(target_entity)) return;
+        // 受击逃跑
+        if (self.registry.tryGet(Comps.AIAgent, target_entity)) |agent| {
+            if (agent.type_id.info().flee_on_attack) {
+                agent.state = .fleeing;
+                agent.flee_timer = 5.0;
+            }
+        }
         if (self.registry.tryGet(Comps.Health, target_entity)) |health| {
             health.current -= 10;
             if (health.current <= 0) {
@@ -657,4 +651,137 @@ pub const Server = struct {
             }
         }
     }
+
+    /// AI 状态机：检测最近的玩家，切换 idle/wandering/chasing/fleeing
+    fn updateAIState(self: *Server) void {
+        var aview = self.registry.view(.{ Comps.AIAgent, Comps.Position }, .{});
+        var aiter = aview.entityIterator();
+        while (aiter.next()) |enemy| {
+            var agent = aview.get(Comps.AIAgent, enemy);
+            const epos = aview.get(Comps.Position, enemy);
+            const info = agent.type_id.info();
+
+            var nearest_dist: f32 = std.math.floatMax(f32);
+            var nearest_pos = epos.vec;
+            {
+                var pview = self.registry.view(.{ Comps.Player, Comps.Position }, .{});
+                var piter = pview.entityIterator();
+                while (piter.next()) |player_entity| {
+                    const ppos = pview.get(Comps.Position, player_entity).vec;
+                    const dx = ppos.x - epos.vec.x;
+                    const dz = ppos.z - epos.vec.z;
+                    const d = dx * dx + dz * dz;
+                    if (d < nearest_dist) {
+                        nearest_dist = d;
+                        nearest_pos = ppos;
+                    }
+                }
+            }
+
+            const dist = @sqrt(nearest_dist);
+
+            switch (agent.state) {
+                .idle => {
+                    agent.target = epos.vec;
+                    agent.wander_timer -= TICK_DT;
+                    if (agent.wander_timer <= 0) {
+                        const angle = @as(f32, @floatFromInt(@mod(self.tick_count, 360))) * 0.0174533;
+                        const r = info.wander_radius * 0.5;
+                        agent.wander_target = Vec3.new(
+                            epos.vec.x + @cos(angle) * r,
+                            epos.vec.y,
+                            epos.vec.z + @sin(angle) * r,
+                        );
+                        agent.target = agent.wander_target;
+                        agent.state = .wandering;
+                    }
+                    if (info.behavior == .hostile and dist < info.detect_range) {
+                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        agent.target = nearest_pos;
+                        agent.state = .chasing;
+                    } else if (info.flee_on_detect and dist < info.detect_range) {
+                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        agent.target = nearest_pos;
+                        agent.flee_timer = 4.0;
+                        agent.state = .fleeing;
+                    }
+                },
+                .wandering => {
+                    if (info.behavior == .hostile and dist < info.detect_range) {
+                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        agent.target = nearest_pos;
+                        agent.state = .chasing;
+                    } else if (info.flee_on_detect and dist < info.detect_range) {
+                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        agent.target = nearest_pos;
+                        agent.flee_timer = 4.0;
+                        agent.state = .fleeing;
+                    }
+                },
+                .chasing => {
+                    const lose_range = info.detect_range * 1.5;
+                    if (dist > lose_range) {
+                        agent.wander_timer = info.wander_interval;
+                        agent.target = epos.vec;
+                        agent.state = .idle;
+                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                    } else {
+                        agent.target = nearest_pos;
+                    }
+                },
+                .fleeing => {
+                    agent.flee_timer -= TICK_DT;
+                    if (agent.flee_timer <= 0) {
+                        agent.wander_timer = info.wander_interval;
+                        agent.target = epos.vec;
+                        agent.state = .idle;
+                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                    } else {
+                        const flee_dir = Vec3.new(
+                            epos.vec.x - nearest_pos.x,
+                            0,
+                            epos.vec.z - nearest_pos.z,
+                        ).norm();
+                        agent.target = Vec3.new(
+                            epos.vec.x + flee_dir.x * 24,
+                            epos.vec.y,
+                            epos.vec.z + flee_dir.z * 24,
+                        );
+                    }
+                },
+            }
+        }
+    }
+
+    /// 根据 AI 状态设置动画 clip 和移速
+    fn updateAnimation(self: *Server) void {
+        var av = self.registry.view(.{ Comps.AIAgent, Comps.AnimationState, Comps.MoveSpeed }, .{});
+        var ai = av.entityIterator();
+        while (ai.next()) |e| {
+            const agent = av.get(Comps.AIAgent, e);
+            const anim = av.get(Comps.AnimationState, e);
+            const speed = av.get(Comps.MoveSpeed, e);
+            const info2 = agent.type_id.info();
+            const CN = @import("rend_ctx.zig").ClipName;
+            switch (agent.state) {
+                .idle, .wandering => {
+                    anim.clip_name = if (agent.state == .idle) CN.idle else CN.walk;
+                    speed.value = info2.move_speed;
+                },
+                .chasing, .fleeing => {
+                    anim.clip_name = CN.run;
+                    speed.value = info2.run_speed;
+                },
+            }
+        }
+    }
 };
+
+fn clipNameToId(name: []const u8) u8 {
+    if (std.mem.eql(u8, name, "idle")) return 0;
+    if (std.mem.eql(u8, name, "walk")) return 1;
+    if (std.mem.eql(u8, name, "run")) return 2;
+    if (std.mem.eql(u8, name, "death")) return 3;
+    if (std.mem.eql(u8, name, "attack")) return 4;
+    return 0;
+}

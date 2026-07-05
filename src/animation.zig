@@ -110,17 +110,30 @@ pub const AnimationSystem = struct {
     }
 };
 
-fn resolveClip(model: *const rend_ctx.Model, name: []const u8) ?*AnimClip {
-    const LR = @import("log.zig");
-    LR.info(.frame, "resolveClip: enter", .{});
-    const anims = model.animations;
+/// 在 glTF animations[] 中按名字查找 clip。
+/// ReleaseFast 下 `@memcpy` 到局部变量绕过编译器优化 bug（直接读 clip.name 可能崩溃）。
+fn findClipByName(anims: []rend_ctx.AnimClip, name: []const u8) ?*rend_ctx.AnimClip {
     for (anims) |*clip| {
-        // ReleaseFast 下直接读 `clip.name` 可能因编译器优化崩溃，
-        // `@memcpy` 到局部变量强制编译器做真实内存读取。
         var cn: []const u8 = undefined;
         @memcpy(std.mem.asBytes(&cn), std.mem.asBytes(&clip.name));
         if (cn.len > 0 and cn.len < 64 and std.mem.eql(u8, cn, name)) return clip;
     }
+    return null;
+}
+
+/// 按逻辑动画名查找 glTF Animation Clip。
+/// 查找顺序：① `findClipByName` 直接匹配 ② 查 `.anim.json` 映射表 ③ 回退播 animations[0]
+fn resolveClip(model: *const rend_ctx.Model, name: []const u8) ?*rend_ctx.AnimClip {
+    const anims = model.animations;
+
+    if (findClipByName(anims, name)) |clip| return clip;
+
+    if (model.anim_mapping_loaded) {
+        if (model.anim_mapping.get(name)) |gltf_name| {
+            if (findClipByName(anims, gltf_name)) |clip| return clip;
+        }
+    }
+
     if (anims.len > 0) return &anims[0];
     return null;
 }

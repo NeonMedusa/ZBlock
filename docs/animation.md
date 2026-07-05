@@ -187,10 +187,20 @@ pub const ClipName = struct {
 
 没有映射文件的模型直接按字符串名匹配 glTF 动画名。自己搓的模型取名 `idle`/`walk` 即可零配置运行。
 
-**查找优先级**：
-1. 直接匹配 `model.animations[i].name == clip_name`
-2. 查 `model.anim_mapping` 映射到 glTF 动画名再匹配
-3. 找不到则静默 fallback（保持上一帧姿势）
+**查找优先级**（`resolveClip` → `findClipByName`）：
+1. `findClipByName` 直接匹配 `clip_name` 与 glTF 动画名
+2. 查 `model.anim_mapping`（`.anim.json`）映射到 glTF 名再匹配
+3. 回退播 `animations[0]`；若无任何动画则返回 `null`（该实体不播动画）
+
+```zig
+fn findClipByName(anims: []AnimClip, name: []const u8) ?*AnimClip {
+    for (anims) |*clip| {
+        // 注意：ReleaseFast 下用 @memcpy 绕过编译器优化 bug
+        if (std.mem.eql(u8, cn, name)) return clip;
+    }
+    return null;
+}
+```
 
 ---
 

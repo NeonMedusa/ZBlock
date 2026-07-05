@@ -1,3 +1,4 @@
+const std = @import("std");
 const io = @import("imports.zig").io;
 const Mesh = struct {
     primitives: []Primitive,
@@ -921,7 +922,6 @@ pub const InstanceData = struct {
     _padding: [2]i32 = undefined,
 };
 
-const std = @import("std");
 const Gctx = @import("gctx.zig");
 const Algebra = @import("algebra.zig");
 const Window = @import("window.zig");

@@ -300,7 +300,12 @@ packed_pos (32 bits):
   Sleep 到下一个 tick 截止时间
   处理输入队列 → 朝向/动作
   updatePhysics（主机玩家+AI）
-  publishSnapshot()
+  updateAIState()       ← AI 状态机（idle/wandering/chasing/fleeing）
+  updateAI()            ← 寻路 + 路径跟随（block_world）
+  updateEntities()
+  updateChunks()
+  updateAnimation()     ← 按 AI 状态设 clip_name + move_speed
+  publishSnapshot()     ← 含 entity_type_id + clip_name_id
 
 客机:
   clientTick() 30Hz:

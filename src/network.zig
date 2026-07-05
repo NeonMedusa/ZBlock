@@ -28,7 +28,9 @@ pub const ClientInput = struct {
 /// 服务端 → 客户端：实体状态快照
 pub const EntitySnapshot = struct {
     player_id: u32,
-    entity: ECS.Entity, // 完整 ECS 实体（index+version），精确匹配
+    entity: ECS.Entity,
+    entity_type_id: u32,
+    clip_name_id: u8, // 0=idle 1=walk 2=run 3=death 4=attack
     pos: Vec3,
     facing_yaw: f32,
     facing_pitch: f32,
