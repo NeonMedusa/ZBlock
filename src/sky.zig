@@ -93,30 +93,28 @@ pub const SkyState = struct {
     edge_lit_strength: f32,
     cloud_color_mtime: f32,
 
-    pub fn generate(seed: u64) SkyState {
-        var prng = std.Random.DefaultPrng.init(seed);
-        const r = prng.random();
+    pub fn init() SkyState {
         return .{
-            .sun_direction = Vec3.norm(Vec3.new(-0.3 + r.float(f32) * 0.6, 0.3 + r.float(f32) * 0.5, -0.5 + r.float(f32) * 0.6)),
+            .sun_direction = Vec3.norm(Vec3.new(0.3, 0.5, -0.2)),
             .sun_color = Vec3.new(1.0, 0.95, 0.90),
-            .sun_intensity = 0.6 + r.float(f32) * 0.6,
-            .moon_phase = r.float(f32),
-            .moon_brightness = 0.3 + r.float(f32) * 0.6,
-            .moon_color = Vec3.new(0.5, 0.55, 0.8),
+            .sun_intensity = 1.5,
+            .moon_phase = 0.5,
+            .moon_brightness = 1.0,
+            .moon_color = Vec3.new(0.3, 0.4, 0.9),
             .horizon_color = Vec3.new(0.6, 0.7, 1.0),
             .mid_color = Vec3.new(0.3, 0.5, 0.9),
             .zenith_color = Vec3.new(0.05, 0.1, 0.5),
             .ambient_ground = Vec3.new(1.0, 1.0, 1.0),
-            .star_density = 0.03 + r.float(f32) * 0.07,
-            .star_twinkle_speed = 1.0 + r.float(f32) * 1.0,
-            .star_color_strength = r.float(f32) * r.float(f32) * 0.6,
+            .star_density = 0.05,
+            .star_twinkle_speed = 1.5,
+            .star_color_strength = 0.15,
             .seasonal_tilt = 0,
             .cloud_coverage = 1.2,
             .cloud_squish = 1.5,
             .cloud_altitude = 0.5,
             .cloud_speed = 2.0,
             .cloud_size = 1.0,
-            .wind_dir = Vec2.new(-0.3 + r.float(f32) * 0.6, -0.3 + r.float(f32) * 0.6),
+            .wind_dir = Vec2.new(0.1, 0.1),
             .offset_distance = 0.1,
             .cloud_color0 = Vec3.new(0.2, 0.2, 0.2),
             .cloud_color1 = Vec3.new(0.65, 0.65, 0.65),
@@ -225,7 +223,7 @@ const sky_color_keyframes = [_]SkyColorKeyframe{
         .mid = Vec3.new(0.35, 0.5, 0.85),
         .zenith = Vec3.new(0.35, 0.5, 0.85),
         .ambient = Vec3.new(1.0, 1.0, 1.0),
-        .sun_color = Vec3.new(1.0, 0.97, 0.92),
+        .sun_color = Vec3.new(1.0, 1.0, 1.0),
         .cloud0 = Vec3.new(0.2, 0.2, 0.2),
         .cloud1 = Vec3.new(0.65, 0.65, 0.65),
         .cloud2 = Vec3.new(1.0, 1.0, 1.0),
@@ -280,7 +278,7 @@ pub const SkyPipeline = struct {
     moon_texture_view: Wgpu.WGPUTextureView,
     moon_sampler: Wgpu.WGPUSampler,
 
-    pub fn init(gctx: *Gctx, seed: u64) !SkyPipeline {
+    pub fn init(gctx: *Gctx) !SkyPipeline {
         const shader_src = Gctx.loadEmbeddedShader("shaders/sky_shader.wgsl");
         const shader_module = gctx.createShaderModuleFromSource(&shader_src);
 
@@ -429,7 +427,7 @@ pub const SkyPipeline = struct {
             .usage = Wgpu.WGPUBufferUsage_Uniform | Wgpu.WGPUBufferUsage_CopyDst,
         });
 
-        const state = SkyState.generate(seed);
+        const state = SkyState.init();
         var sky_uniform: SkyUniform = undefined;
         sky_uniform = SkyUniform.pack(Mat4.identity, state, 0.0);
         Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &sky_uniform, @sizeOf(SkyUniform));

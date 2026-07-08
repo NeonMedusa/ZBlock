@@ -12,6 +12,7 @@
 @group(1) @binding(0) var<uniform> material_uniform: MaterialConstants;
 @group(1) @binding(1) var color_texture: texture_2d<f32>;
 @group(1) @binding(2) var normal_texture: texture_2d<f32>;
+@group(1) @binding(3) var color_sampler: sampler;
 
 struct SceneUniform {
     proj_matrix: mat4x4f,
@@ -23,7 +24,7 @@ struct SceneUniform {
     sun_color: vec3f,
     moon_brightness: f32,
     ambient_ground: vec3f,
-    _pad: f32,
+    ambient_strength: f32,
     shadow_vp: mat4x4f,
     moon_color: vec3f,
 };
@@ -31,6 +32,8 @@ struct SceneUniform {
 struct MaterialConstants {
     has_base_color: u32,
     has_normal: u32,
+    // WGSL 自动对齐到 16 字节边界
+    base_color_factor: vec4f,
 };
 
 struct EntitiesData {
@@ -47,21 +50,23 @@ struct InstanceData {
 };
 
 // --- 顶点格式 ---
-// StaticVertex: chunk + 无骨骼模型，32 字节 (pos 12 + normal 12 + texcoord 8)
+// StaticVertex: 无骨骼模型，48 字节 (pos 12 + normal 12 + texcoord 8 + color 16)
 struct StaticVertex {
     @location(0) position: vec3f,
     @location(1) normal: vec3f,
     @location(2) texcoord: vec2f,
+    @location(3) color: vec4f,
 };
 
-// SkinnedVertex: 蒙皮模型用，64 字节；
-// 前三个字段与 StaticVertex 一致，static pipeline 读前 32 字节也能正确工作。
+// SkinnedVertex: 蒙皮模型用，80 字节；
+// 前 48 字节与 StaticVertex 一致，static pipeline 读前 48 字节也能正确工作。
 struct SkinnedVertex {
     @location(0) position: vec3f,
     @location(1) normal: vec3f,
     @location(2) texcoord: vec2f,
-    @location(3) joint_indices: vec4u,
-    @location(4) joint_weights: vec4f,
+    @location(3) color: vec4f,
+    @location(4) joint_indices: vec4u,
+    @location(5) joint_weights: vec4f,
 };
 
 struct VertexOutput {
@@ -154,7 +159,6 @@ fn skinNormal(input_normal: vec3f, bone_offset: i32, joint_indices: vec4u, joint
 @group(2) @binding(1) var shadow_sampler: sampler_comparison;
 
 // --- 光照参数 ---
-const AMBIENT_STRENGTH = 0.3;
 
 // PCF 阴影采样：法线偏移 + 径向畸变（单 shadow map 模拟级联效果）
 // off_amt 随距离线性增长（无上限），远处 bias 大以补偿径向畸变导致的分辨率下降
@@ -198,7 +202,7 @@ fn calculateLighting(normal: vec3f, position: vec3f, base_color: vec4f) -> vec4f
 
     // 环境光：白天用 ambient_ground，夜晚深空
     let ambient_color = scene_uniform.ambient_ground;
-    let ambient = ambient_color * AMBIENT_STRENGTH * base_color.rgb;
+    let ambient = ambient_color * scene_uniform.ambient_strength * base_color.rgb;
 
     // 漫反射
     let sun_diffuse = day * max(dot(n, sun_dir), 0.0) * sun_col * base_color.rgb;
@@ -225,7 +229,7 @@ fn vs_static(in: StaticVertex, @builtin(instance_index) ins_idx: u32) -> VertexO
     out.texcoord = in.texcoord;
     out.world_normal = world_normal;
     out.world_position = world_pos.xyz;
-    out.color = vec4f(1.0, 1.0, 1.0, 1.0);
+    out.color = in.color;
     return out;
 }
 
@@ -246,7 +250,7 @@ fn vs_skinned(in: SkinnedVertex, @builtin(instance_index) ins_idx: u32) -> Verte
     out.texcoord = in.texcoord;
     out.world_normal = world_normal;
     out.world_position = world_pos.xyz;
-    out.color = vec4f(1.0, 1.0, 1.0, 1.0);
+    out.color = in.color;
     return out;
 }
 
@@ -281,16 +285,13 @@ fn vs_chunk(in: ChunkVertex, @builtin(instance_index) ins_idx: u32) -> VertexOut
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     var base_color: vec4f;
     if material_uniform.has_base_color != 0u {
-        let texture_dims = textureDimensions(color_texture);
-        let texel_coords = vec2i(
-            i32(in.texcoord.x * f32(texture_dims.x)),
-            i32(in.texcoord.y * f32(texture_dims.y))
-        );
-        base_color = textureLoad(color_texture, texel_coords, 0);
+        // textureSample 在 sRGB 格式纹理上自动做 sRGB→linear 转换
+        base_color = textureSample(color_texture, color_sampler, in.texcoord);
     } else {
-        base_color = vec4f(1.0, 1.0, 1.0, 1.0);
+        base_color = material_uniform.base_color_factor;
     }
+    base_color = base_color * in.color;
     let normal = normalize(in.world_normal);
     let lit_color = calculateLighting(normal, in.world_position, base_color);
-    return pow(lit_color, vec4f(2.2));
+    return lit_color;
 }

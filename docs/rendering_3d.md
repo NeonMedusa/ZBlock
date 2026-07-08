@@ -1,8 +1,18 @@
 # 3D 渲染
 
-## 着色器颜色校正
+## 色彩管线
 
-SRGB 硬件自动做 pow(1/2.2)，shader 做 pow(2.2) 抵消，线性颜色正确显示。
+```
+贴图(sRGB) → textureSample 在 UnormSrgb 纹理上硬件自动转 linear →
+光照/混合(linear) → sRGB 帧缓冲自动编码 → 显示器
+
+baseColorFactor / vertex_color / 天空颜色(linear) → 同上 → 显示器
+
+UI(sRGB) → shader 内 pow(2.2) 转 linear → sRGB 帧缓冲 → 显示器
+```
+
+所有计算在 linear 空间进行，sRGB 帧缓冲（`BGRA8UnormSrgb`）自动做最终伽马编码。
+UI 的 `pow(2.2)` 是必要的——UI 颜色值在代码中以 sRGB 写出，需要解码后再由帧缓冲编码。
 
 ---
 

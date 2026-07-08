@@ -14,7 +14,9 @@ pub const Primitive = struct {
 pub const MaterialConstants = struct {
     has_base_color: u32 = 0,
     has_normal: u32 = 0,
-    _padding: [2]f32 = undefined,
+    // WGSL 中 vec4f 需要 16 字节对齐
+    _pad8: [2]u32 = .{ 0, 0 },
+    base_color_factor: [4]f32 = .{ 1, 1, 1, 1 },
 };
 
 pub const TextureRes = struct {
@@ -36,7 +38,7 @@ pub const TextureRes = struct {
                 .height = height,
                 .depthOrArrayLayers = 1,
             },
-            .format = Wgpu.WGPUTextureFormat_RGBA8Unorm,
+            .format = Wgpu.WGPUTextureFormat_RGBA8UnormSrgb,
             .mipLevelCount = 1,
             .sampleCount = 1,
         };
@@ -110,6 +112,7 @@ pub const TextureRes = struct {
 pub const Material = struct {
     color_texture: TextureRes,
     normal_texture: TextureRes,
+    sampler: Wgpu.WGPUSampler,
     uniform_buffer: Wgpu.WGPUBuffer,
     bind_group: Wgpu.WGPUBindGroup,
     constants: MaterialConstants,
@@ -120,11 +123,17 @@ pub const Material = struct {
         const default_normal = try TextureRes.createDefault(gctx);
         errdefer default_normal.deinit();
 
-        const constants = MaterialConstants{
-            .has_base_color = 0,
-            .has_normal = 0,
-            ._padding = undefined,
-        };
+        const constants = MaterialConstants{ .has_base_color = 0, .has_normal = 0 };
+
+        const sampler = Wgpu.wgpuDeviceCreateSampler(gctx.device, &.{
+            .addressModeU = Wgpu.WGPUAddressMode_Repeat,
+            .addressModeV = Wgpu.WGPUAddressMode_Repeat,
+            .addressModeW = Wgpu.WGPUAddressMode_Repeat,
+            .magFilter = Wgpu.WGPUFilterMode_Nearest,
+            .minFilter = Wgpu.WGPUFilterMode_Nearest,
+            .mipmapFilter = Wgpu.WGPUMipmapFilterMode_Nearest,
+            .maxAnisotropy = 1,
+        });
 
         const uniform_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
             .size = @sizeOf(MaterialConstants),
@@ -136,11 +145,12 @@ pub const Material = struct {
 
         const bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
             .layout = pipeline.material_bgl,
-            .entryCount = 3,
+            .entryCount = 4,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = uniform_buffer, .size = Wgpu.wgpuBufferGetSize(uniform_buffer) },
                 .{ .binding = 1, .textureView = default_color.view },
                 .{ .binding = 2, .textureView = default_normal.view },
+                .{ .binding = 3, .sampler = sampler },
             },
         });
         errdefer Wgpu.wgpuBindGroupRelease(bind_group);
@@ -148,6 +158,7 @@ pub const Material = struct {
         return .{
             .color_texture = default_color,
             .normal_texture = default_normal,
+            .sampler = sampler,
             .uniform_buffer = uniform_buffer,
             .bind_group = bind_group,
             .constants = constants,
@@ -157,6 +168,7 @@ pub const Material = struct {
     pub fn deinit(self: *Material) void {
         self.color_texture.deinit();
         self.normal_texture.deinit();
+        Wgpu.wgpuSamplerRelease(self.sampler);
         Wgpu.wgpuBufferRelease(self.uniform_buffer);
         Wgpu.wgpuBindGroupRelease(self.bind_group);
         self.* = undefined;
@@ -192,11 +204,12 @@ pub const Material = struct {
         if (self.bind_group) |old| Wgpu.wgpuBindGroupRelease(old);
         self.bind_group = Wgpu.wgpuDeviceCreateBindGroup(gctx.device, &.{
             .layout = pipeline.material_bgl,
-            .entryCount = 3,
+            .entryCount = 4,
             .entries = &[_]Wgpu.WGPUBindGroupEntry{
                 .{ .binding = 0, .buffer = self.uniform_buffer, .size = Wgpu.wgpuBufferGetSize(self.uniform_buffer) },
                 .{ .binding = 1, .textureView = self.color_texture.view },
                 .{ .binding = 2, .textureView = self.normal_texture.view },
+                .{ .binding = 3, .sampler = self.sampler },
             },
         });
     }
@@ -483,9 +496,11 @@ pub const Model = struct {
             var mat = try Material.initDefault(gctx, pipeline);
             errdefer mat.deinit();
             // 处理颜色纹理
+            // baseColorFactor（PBR 基础色，无贴图时用）
+            mat.constants.base_color_factor = gltf_material.metallic_roughness.base_color_factor;
+            mat.syncUniformBuffer(gctx);
             if (gltf_material.metallic_roughness.base_color_texture) |color_tex_info| {
                 const tex = model.textures_res[color_tex_info.index];
-                // 注意：这里需要将 tex 的所有权转移给材质，材质会释放自己的默认纹理
                 mat.setColorTexture(gctx, pipeline, tex);
             }
             // 处理法线纹理
@@ -607,6 +622,25 @@ pub const Model = struct {
                                 vertex_data.items[i].joint_weights = .{ w[0] / sum, w[1] / sum, w[2] / sum, w[3] / sum };
                             }
                         }
+                    }
+                },
+                .color => |idx| {
+                    const accessor = gltf.data.accessors[idx];
+                    if (accessor.component_type == .float) {
+                        var it = accessor.iterator(f32, gltf, gltf.glb_binary.?);
+                        var i: usize = 0;
+                        while (it.next()) |c| : (i += 1)
+                            vertex_data.items[i].color = .new(c[0], c[1], c[2], if (c.len > 3) c[3] else 1.0);
+                    } else if (accessor.component_type == .unsigned_byte) {
+                        var it = accessor.iterator(u8, gltf, gltf.glb_binary.?);
+                        var i: usize = 0;
+                        while (it.next()) |c| : (i += 1)
+                            vertex_data.items[i].color = .new(
+                                @as(f32, @floatFromInt(c[0])) / 255.0,
+                                @as(f32, @floatFromInt(c[1])) / 255.0,
+                                @as(f32, @floatFromInt(c[2])) / 255.0,
+                                if (c.len > 3) @as(f32, @floatFromInt(c[3])) / 255.0 else 1.0,
+                            );
                     }
                 },
                 else => {},
@@ -840,7 +874,7 @@ pub const SceneUniform = struct {
     sun_color: Vec3 = undefined, // 太阳颜色
     moon_brightness: f32 = undefined, // 月亮强度
     ambient_ground: Vec3 = undefined, // 白天环境光色，独立于 horizon_color
-    _pad: f32 = undefined,
+    ambient_strength: f32 = undefined, // 环境光强度，控制阴影亮度
     shadow_vp: Mat4 = undefined, // 太阳视角 VP 矩阵（阴影贴图）
     moon_color: Vec3 = undefined, // 月亮颜色
     _pad2: f32 = undefined,
@@ -859,11 +893,11 @@ pub const SceneUniform = struct {
             .camera_pos = Vec3.zero,
             .time = window.time,
             .sun_direction = Vec3.new(0, 1, 0),
-            .sun_intensity = 1.0,
+            .sun_intensity = 1.0, // 每帧从天空系统的SkyState中同步，不要在这里调
             .sun_color = Vec3.new(1, 1, 1),
-            .moon_brightness = 0.3,
-            .ambient_ground = Vec3.new(1, 1, 1), // 环境光
-            ._pad = undefined,
+            .moon_brightness = 0.3, // 每帧从天空系统的SkyState中同步，不要在这里调
+            .ambient_ground = Vec3.new(1, 1, 1),
+            .ambient_strength = 0.15,
             .shadow_vp = Mat4.identity,
             .moon_color = Vec3.new(0.5, 0.55, 0.8),
         };
@@ -872,12 +906,13 @@ pub const SceneUniform = struct {
 
 pub const VertexFormat = enum { static_model, skinned_model, chunk };
 
-// 静态顶点：32 字节，用于无骨骼 glTF 模型。
-// 没有关节信息，只能用 pipeline_static 渲染。
+// 静态顶点：48 字节，用于无骨骼 glTF 模型。
+// color 默认白色，兼容无顶点颜色的模型。
 pub const StaticVertex = struct {
-    position: Vec3 = Vec3.zero,
-    normal: Vec3 = Vec3.new(0, 1, 0),
-    texcoord: Vec2 = Vec2.zero,
+    position: Vec3 = .zero,
+    normal: Vec3 = .new(0, 1, 0),
+    texcoord: Vec2 = .zero,
+    color: Vec4 = .new(1, 1, 1, 1),
 };
 
 // 紧凑区块顶点：4 字节（packed struct，GPU 侧以 u32 读取）。
@@ -902,9 +937,10 @@ pub const ChunkVertex = packed struct {
 // 前三个字段与 StaticVertex 完全一致，所以共用同一个 vertex buffer 时
 // static pipeline 能正确读取前 32 字节（忽略后 32 字节）。
 pub const SkinnedVertex = struct {
-    position: Vec3 = Vec3.zero,
-    normal: Vec3 = Vec3.new(0, 1, 0),
-    texcoord: Vec2 = Vec2.zero,
+    position: Vec3 = .zero,
+    normal: Vec3 = .new(0, 1, 0),
+    texcoord: Vec2 = .zero,
+    color: Vec4 = .new(1, 1, 1, 1),
     joint_indices: [4]u32 = .{ 0, 0, 0, 0 },
     joint_weights: [4]f32 = .{ 1, 0, 0, 0 },
 };

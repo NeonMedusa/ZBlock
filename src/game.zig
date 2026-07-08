@@ -645,7 +645,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
     });
 
     // 程序化天空（必须先于水管初始化，水管需引用其 bind_group_layout）
-    self.sky_pipeline = try SkyPipeline.init(&self.gctx, 42);
+    self.sky_pipeline = try SkyPipeline.init(&self.gctx);
 
     // 水面管线（共享场景 uniform、阴影 bind group、天空 uniform）
     self.water_pipeline = try WaterPipeline.init(&self.gctx, self.render_pipeline.global_bgl, self.render_pipeline.shadow_bgl, self.ssr_bgl, self.sky_pipeline.bind_group_layout);

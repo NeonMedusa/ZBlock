@@ -115,6 +115,11 @@ pub fn init(game: *Game, comptime shader_path: []const u8) !@This() {
                 .viewDimension = Wgpu.WGPUTextureViewDimension_2D,
             },
         },
+        .{ // color_sampler
+            .binding = 3,
+            .visibility = Wgpu.WGPUShaderStage_Fragment,
+            .sampler = .{ .type = Wgpu.WGPUSamplerBindingType_Filtering },
+        },
     };
     const material_bgl = Wgpu.wgpuDeviceCreateBindGroupLayout(
         game.gctx.device,

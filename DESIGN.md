@@ -509,3 +509,25 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
   修复：用 `@memcpy` 将 `clip.name` 拷贝到局部变量再访问，强制编译器做真实内存读取。
   简单测试无法复现，需要完整项目环境（多线程 ECS + 复杂调用链）才能触发。
 
+### 武器系统方案
+
+**目标**：第一人称持枪（手部动画、换弹、切枪），Mod 支持自定义武器。
+
+**方案**（2026-07-07）：
+- 手部模型 + 骨骼 + 网格在 ``hands.glb`` 中定义，所有武器共用同一套骨架
+- 每把武器独立 glTF（仅枪械网格 + 动画 clip），不包含骨骼
+- 加载武器动画时：``node name -> hand skeleton joint index`` 重映射
+  - zgltf 提供了 ``node.name`` 和 ``channel.target.node``（node index）
+  - 加载时根据武器 node 名查 hand skeleton 的 name->index 表
+- 饰品（手套/戒指）直接在 ``hands.glb`` 中加 mesh，蒙皮到同一骨骼
+- Mod：丢一个 ``pistol_foo.glb`` 进去，动画名用约定（``idle``/``reload``/``fire``）
+
+**所需改动**：
+- ``rend_ctx.zig``：``Skeleton`` 加 ``joint_names: [][]const u8``
+- ``rend_ctx.zig``：``Model.load()`` 加可选 ``parent_skeleton``，武器加载时重映射
+
+---
+
+## 待办事项
+
+
