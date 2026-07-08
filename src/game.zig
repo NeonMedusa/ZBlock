@@ -18,6 +18,7 @@ const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
 const ECS = @import("zigecs");
 const RendCTX = @import("rend_ctx.zig");
+const ClipName = RendCTX.ClipName;
 const Comps = @import("components.zig").Components;
 const Wgpu = @import("imports.zig").Wgpu;
 const Glfw = @import("imports.zig").Glfw;
@@ -196,12 +197,8 @@ pub fn start(self: *Game) !void {
             if (self.menu_state == .Gameplay or self.menu_state == .Inventory or (self.menu_state == .Pause and self.network.mode != .single)) {
                 // 骨骼矩阵插值并上传到 GPU（多人模式下暂停时也不停止）
                 self.server.animation_system.upload(self.gctx.queue, self.accumulator / TICK_DT);
-                if (self.network.mode != .client) {
-                    self.pollServerSnapshot();
-                    syncCameraFromPlayer(self);
-                } else {
-                    syncCameraFromPlayer(self);
-                }
+                if (self.network.mode != .client) self.pollServerSnapshot();
+                syncCameraFromPlayer(self);
             }
 
             if (self.menu_state == .Gameplay) {
@@ -463,7 +460,7 @@ fn initGame(self: *Game) !void {
             if (!self.server.registry.has(Comps.AnimationState, ent)) {
                 if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
                     self.server.registry.add(ent, Comps.AnimationState{
-                        .clip_name = @import("rend_ctx.zig").ClipName.walk,
+                        .clip_name = ClipName.walk.toString(),
                         .bone_offset = bone_offset,
                     });
                 }
@@ -1018,7 +1015,7 @@ fn hostNetworkThread(self: *Game) void {
                 // 不加 MoveIntent/MoveSpeed/JumpVelocity/OnGround，服务端不对远程客机玩家跑物理解算
                 if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
                     self.server.registry.add(entity, Comps.AnimationState{
-                        .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                        .clip_name = ClipName.idle.toString(),
                         .bone_offset = bone_offset,
                     });
                 }
@@ -1575,7 +1572,7 @@ fn clientReceivePackets(self: *Game) void {
             self.server.registry.add(entity, Comps.Facing{});
             if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
                 self.server.registry.add(entity, Comps.AnimationState{
-                    .clip_name = clipNameFromId(snap.clip_name_id),
+                    .clip_name = ClipName.fromId(snap.clip_name_id).toString(),
                     .bone_offset = bone_offset,
                 });
             }
@@ -1592,7 +1589,7 @@ fn clientReceivePackets(self: *Game) void {
             }
             // 同步 clip_name
             if (self.server.registry.tryGet(Comps.AnimationState, gop.value_ptr.*.entity)) |anim| {
-                anim.clip_name = clipNameFromId(snap.clip_name_id);
+                anim.clip_name = ClipName.fromId(snap.clip_name_id).toString();
             }
         }
     }
@@ -1628,7 +1625,7 @@ fn clientReceivePackets(self: *Game) void {
             if (!self.server.registry.has(Comps.AnimationState, ent)) {
                 if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
                     self.server.registry.add(ent, Comps.AnimationState{
-                        .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                        .clip_name = ClipName.idle.toString(),
                         .bone_offset = bone_offset,
                     });
                 }
@@ -1874,17 +1871,6 @@ pub const MenuState = enum {
     Pause,
     Inventory,
 };
-
-fn clipNameFromId(id: u8) []const u8 {
-    return switch (id) {
-        0 => "idle",
-        1 => "walk",
-        2 => "run",
-        3 => "death",
-        4 => "attack",
-        else => "idle",
-    };
-}
 
 pub const SlotSource = enum { hotbar, inventory };
 

@@ -30,9 +30,6 @@ struct SceneUniform {
 };
 
 struct MaterialConstants {
-    has_base_color: u32,
-    has_normal: u32,
-    // WGSL 自动对齐到 16 字节边界
     base_color_factor: vec4f,
 };
 
@@ -283,13 +280,11 @@ fn vs_chunk(in: ChunkVertex, @builtin(instance_index) ins_idx: u32) -> VertexOut
 // --- 片段着色器 (static/skinned 共用) ---
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    var base_color: vec4f;
-    if material_uniform.has_base_color != 0u {
-        // textureSample 在 sRGB 格式纹理上自动做 sRGB→linear 转换
-        base_color = textureSample(color_texture, color_sampler, in.texcoord);
-    } else {
-        base_color = material_uniform.base_color_factor;
-    }
+    // textureSample 在 sRGB 格式纹理上自动做 sRGB→linear 转换；
+    // 无贴图时默认白色纹理返回 (1,1,1,1)
+    // 标准 glTF 公式：tex(sRGB→linear 硬件转换) × baseColorFactor × vertex_color
+    var base_color = textureSample(color_texture, color_sampler, in.texcoord);
+    base_color = base_color * material_uniform.base_color_factor;
     base_color = base_color * in.color;
     let normal = normalize(in.world_normal);
     let lit_color = calculateLighting(normal, in.world_position, base_color);

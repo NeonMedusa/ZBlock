@@ -49,9 +49,6 @@ src/
 │
 ├── inventory.zig          — 物品栏数据结构
 ├── components.zig         — ECS 组件定义
-├── systems.zig            — ECS 系统注册
-├── systems/
-│   └── health_system.zig  — 实体伤害/回复系统
 │
 ├── aabb.zig               — 轴对齐包围盒
 ├── bvh.zig                — 动态 AABB 树（BVH 宽相位碰撞检测，含测试）

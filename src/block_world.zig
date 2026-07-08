@@ -517,12 +517,10 @@ pub const BlockWorld = struct {
         {
             var it = self.chunks.valueIterator();
             while (it.next()) |loaded| {
-                {
-                    var mesh_it = loaded.meshes.iterator();
-                    while (mesh_it.next()) |entry| {
-                        entry.value_ptr.deinit(self.allocator);
-                        self.material_registry.releaseById(entry.key_ptr.*);
-                    }
+                var mesh_it = loaded.meshes.iterator();
+                while (mesh_it.next()) |entry| {
+                    entry.value_ptr.deinit(self.allocator);
+                    self.material_registry.releaseById(entry.key_ptr.*);
                 }
                 loaded.meshes.deinit();
                 loaded.water_mesh.deinit(self.allocator);
@@ -535,13 +533,8 @@ pub const BlockWorld = struct {
         self.material_registry.deinit();
         self.collision_list.deinit(self.allocator);
 
-        {
-            self.astar_active.deinit();
-        }
-
-        {
-            self.stale_targets.deinit();
-        }
+        self.astar_active.deinit();
+        self.stale_targets.deinit();
         self.last_exact_targets.deinit();
         self.bvh.deinit();
 
@@ -724,26 +717,6 @@ pub const BlockWorld = struct {
 
     pub fn loadChunk(self: *BlockWorld, origin: Vec3i) !void {
         try self.enqueueLoadTask(origin);
-    }
-
-    /// 同步构建指定 chunk 的网格（用于客户端模式，没有 worker 线程）
-    pub fn buildMeshSync(self: *BlockWorld, origin: Vec3i) void {
-        const loaded = self.chunks.getPtr(origin) orelse return;
-        const nb_w = self.chunks.getPtr(Vec3i.new(origin.x - CHUNK_WIDTH_I32, 0, origin.z));
-        const nb_e = self.chunks.getPtr(Vec3i.new(origin.x + CHUNK_WIDTH_I32, 0, origin.z));
-        const nb_n = self.chunks.getPtr(Vec3i.new(origin.x, 0, origin.z - CHUNK_WIDTH_I32));
-        const nb_s = self.chunks.getPtr(Vec3i.new(origin.x, 0, origin.z + CHUNK_WIDTH_I32));
-        var result = buildChunkMeshCPU(
-            self.allocator,
-            origin,
-            loaded.chunk,
-            if (nb_w) |n| n.chunk else null,
-            if (nb_e) |n| n.chunk else null,
-            if (nb_n) |n| n.chunk else null,
-            if (nb_s) |n| n.chunk else null,
-        ) catch return;
-        applyMeshResult(&loaded.meshes, &loaded.water_mesh, self.allocator, self.gctx, &self.material_registry, &result) catch {};
-        result.deinit();
     }
 
     /// 从网络接收的 palette JSON + index_data 更新或创建 chunk
@@ -1174,27 +1147,6 @@ pub const BlockWorld = struct {
                 }
             };
             self.bvh.queryPairs(Ctx{ .registry = registry, .repel = REPEL_FORCE, .push_players = push_players, .local_player_id = local_player_id }, Ctx.callback);
-        }
-    }
-
-    /// 每帧更新 AI 目标选择。
-    /// 玩家在探测范围内 → 目标设为玩家位置（脚底）。
-    /// player_pos 来自 ECS 的 Player.Position（脚底），不是摄像机（眼高）。
-    pub fn updateAIAgent(registry: *ECS.Registry, player_pos: Vec3) void {
-        var view = registry.view(.{ Comps.AIAgent, Comps.Position }, .{});
-        var iter = view.entityIterator();
-        while (iter.next()) |entity| {
-            var agent = view.get(Comps.AIAgent, entity);
-            const pos = view.get(Comps.Position, entity);
-            const info = agent.type_id.info();
-
-            const dx = player_pos.x - pos.vec.x;
-            const dz = player_pos.z - pos.vec.z;
-            const dist = @sqrt(dx * dx + dz * dz);
-
-            if (dist < info.detect_range) {
-                agent.target = player_pos;
-            }
         }
     }
 

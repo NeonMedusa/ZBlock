@@ -48,14 +48,8 @@ pub const ShadowPipeline = struct {
         });
 
         const light_vp = Mat4.identity;
-        var m: [16]f32 = undefined;
-        for (0..4) |col| {
-            for (0..4) |row| {
-                m[col * 4 + row] = light_vp.m[col][row];
-            }
-        }
-        var u: LightUniform = .{ .light_vp = m };
-        Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &u, @sizeOf(LightUniform));
+        // Mat4.m 是 [4][4]f32，内存布局与 [16]f32 相同，直接写入无需转换
+        Wgpu.wgpuQueueWriteBuffer(gctx.queue, uniform_buffer, 0, &light_vp.m, @sizeOf([4][4]f32));
 
         // ins_data 用占位 buffer（后续通过 setInsDataBuffer 设置正式 buffer）
         const dummy_buffer = Wgpu.wgpuDeviceCreateBuffer(gctx.device, &.{
@@ -221,14 +215,8 @@ pub const ShadowPipeline = struct {
     }
 
     pub fn updateUniform(self: *ShadowPipeline, gctx: *Gctx) void {
-        var m: [16]f32 = undefined;
-        for (0..4) |col| {
-            for (0..4) |row| {
-                m[col * 4 + row] = self.light_vp.m[col][row];
-            }
-        }
-        const u: LightUniform = .{ .light_vp = m };
-        Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.uniform_buffer, 0, &u, @sizeOf(LightUniform));
+        // Mat4.m 是 [4][4]f32，内存布局与 [16]f32 相同，直接写入无需转换
+        Wgpu.wgpuQueueWriteBuffer(gctx.queue, self.uniform_buffer, 0, &self.light_vp.m, @sizeOf([4][4]f32));
     }
 
     /// 设置实例数据 buffer（每帧更新，供 vs_chunk 读取 chunk origin）

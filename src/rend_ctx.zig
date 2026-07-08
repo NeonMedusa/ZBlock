@@ -12,10 +12,6 @@ pub const Primitive = struct {
 };
 
 pub const MaterialConstants = struct {
-    has_base_color: u32 = 0,
-    has_normal: u32 = 0,
-    // WGSL 中 vec4f 需要 16 字节对齐
-    _pad8: [2]u32 = .{ 0, 0 },
     base_color_factor: [4]f32 = .{ 1, 1, 1, 1 },
 };
 
@@ -123,7 +119,7 @@ pub const Material = struct {
         const default_normal = try TextureRes.createDefault(gctx);
         errdefer default_normal.deinit();
 
-        const constants = MaterialConstants{ .has_base_color = 0, .has_normal = 0 };
+        const constants = MaterialConstants{};
 
         const sampler = Wgpu.wgpuDeviceCreateSampler(gctx.device, &.{
             .addressModeU = Wgpu.WGPUAddressMode_Repeat,
@@ -177,16 +173,12 @@ pub const Material = struct {
     pub fn setColorTexture(self: *Material, gctx: *Gctx, pipeline: *RenderPipeline, new_tex: TextureRes) void {
         self.color_texture.deinit();
         self.color_texture = new_tex;
-        self.constants.has_base_color = 1;
-        self.syncUniformBuffer(gctx);
         self.rebuildBindGroup(gctx, pipeline);
     }
     /// 替换法线纹理（旧纹理会自动释放）
     pub fn setNormalTexture(self: *Material, gctx: *Gctx, pipeline: *RenderPipeline, new_tex: TextureRes) void {
         self.normal_texture.deinit();
         self.normal_texture = new_tex;
-        self.constants.has_normal = 1;
-        self.syncUniformBuffer(gctx);
         self.rebuildBindGroup(gctx, pipeline);
     }
     /// 更新材质常量缓冲区
@@ -240,12 +232,30 @@ pub const AnimClip = struct {
     channels: []AnimChannel,
 };
 
-pub const ClipName = struct {
-    pub const idle = "idle";
-    pub const walk = "walk";
-    pub const run = "run";
-    pub const death = "death";
-    pub const attack = "attack";
+/// 动画 clip 逻辑名枚举。u8 背衬便于网络序列化。
+/// 增删动画只需改此处，字符串序列化自动适配。
+pub const ClipName = enum(u16) {
+    idle,
+    walk,
+    run,
+    death,
+    attack,
+    /// 从字符串解析，未知名称回退到 idle
+    pub fn fromName(name: []const u8) ClipName {
+        return std.meta.stringToEnum(ClipName, name) orelse .idle;
+    }
+    /// 转为字符串
+    pub fn toString(self: ClipName) []const u8 {
+        return @tagName(self);
+    }
+    /// 编码为 u16（网络序列化）
+    pub fn toId(self: ClipName) u16 {
+        return @intFromEnum(self);
+    }
+    /// 从 u16 解码（网络反序列化）
+    pub fn fromId(id: u16) ClipName {
+        return @enumFromInt(id);
+    }
 };
 
 pub const Skeleton = struct {

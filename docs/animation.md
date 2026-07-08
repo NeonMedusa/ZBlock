@@ -100,14 +100,23 @@ pub const AnimChannel = struct {
 
 pub const TargetProperty = enum { translation, rotation, scale };
 
-pub const ClipName = struct {
-    pub const idle  = "idle";
-    pub const walk  = "walk";
-    pub const run   = "run";
-    pub const death = "death";
-    pub const attack = "attack";
+pub const ClipName = enum(u16) {
+    idle,
+    walk,
+    run,
+    death,
+    attack,
+
+    pub fn fromName(name: []const u8) ClipName { ... }
+    pub fn toString(self: ClipName) []const u8 { ... }
+    pub fn toId(self: ClipName) u16 { ... }
+    pub fn fromId(id: u16) ClipName { ... }
 };
 ```
+
+用法：`state.clip_name = ClipName.walk.toString();`
+
+序列化：`ClipName.fromId(snap.clip_name_id).toString()` / `ClipName.fromName(name).toId()`
 
 ### bone_pool 布局
 
@@ -156,24 +165,22 @@ pub const Model = struct {
 
 ### 动画命名方案
 
-**决策**：使用字符串名标识动画，不给常用动画名定义枚举。
-
-**理由**：
-- 主流游戏引擎的动画状态机均使用字符串名作为 API
-- 新增状态（如 `crouch_walk`）不需要改任何定义，直接写字符串即可
-- 下载的模型动画命名不统一，需要字符串映射；使用字符串可以统一处理
-- 为了代码提示和防写错，为常用动画定义常量别名：
+`ClipName` 定义为 `enum(u16)`，内建 `toString()` / `fromName()` / `toId()` / `fromId()` 方法。
 
 ```zig
-pub const ClipName = struct {
-    pub const idle  = "idle";
-    pub const walk  = "walk";
-    pub const run   = "run";
-    pub const death = "death";
+pub const ClipName = enum(u16) {
+    idle,
+    walk,
+    run,
+    death,
+    attack,
+    ...
 };
 ```
 
-用法：`state.clip_name = ClipName.walk;` ——有提示、不会写错。
+- 设动画：`state.clip_name = ClipName.walk.toString();`
+- 网络序列化：`@intFromEnum(clip)` → u16；反序列化：`@enumFromInt(u16)` → `ClipName`
+- 增删动画只需改枚举定义，序列化自动适配
 
 **映射文件**：每个模型可选 `resources/models/{Name}.anim.json`：
 

@@ -30,7 +30,7 @@ pub const EntitySnapshot = struct {
     player_id: u32,
     entity: ECS.Entity,
     entity_type_id: u32,
-    clip_name_id: u8, // 0=idle 1=walk 2=run 3=death 4=attack
+    clip_name_id: u16,
     pos: Vec3,
     facing_yaw: f32,
     facing_pitch: f32,

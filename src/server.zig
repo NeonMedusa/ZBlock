@@ -12,7 +12,9 @@ const CHUNK_WIDTH_I32 = @import("block_world.zig").CHUNK_WIDTH_I32;
 const Comps = @import("components.zig").Components;
 const ECS = @import("imports.zig").ECS;
 const AnimationSystem = @import("animation.zig").AnimationSystem;
-const ResManager = @import("rend_ctx.zig").ResManager;
+const RendCTX = @import("rend_ctx.zig");
+const ResManager = RendCTX.ResManager;
+const ClipName = RendCTX.ClipName;
 const Raycast = @import("raycast.zig");
 const BlockRegistry = @import("block_registry.zig");
 const BlockState = BlockRegistry.BlockState;
@@ -262,7 +264,8 @@ pub const Server = struct {
                 const pos = view.get(Comps.Position, e);
                 const facing = view.get(Comps.Facing, e);
                 const etype = @as(u32, @intCast(@import("entity_registry.zig").EntityTypeId.fromName("player").id));
-                const clip_id = clipNameToId(if (self.registry.tryGet(Comps.AnimationState, e)) |a| a.clip_name else "idle");
+                const clip_name = if (self.registry.tryGet(Comps.AnimationState, e)) |a| a.clip_name else "idle";
+                const clip_id = ClipName.fromName(clip_name).toId();
                 self.snapshots[self.snapshot_count] = .{
                     .player_id = p.id,
                     .entity = e,
@@ -287,7 +290,8 @@ pub const Server = struct {
                     agent.type_id.id
                 else
                     0;
-                const clip_id = clipNameToId(if (self.registry.tryGet(Comps.AnimationState, e)) |a| a.clip_name else "idle");
+                const clip_name2 = if (self.registry.tryGet(Comps.AnimationState, e)) |a| a.clip_name else "idle";
+                const clip_id = ClipName.fromName(clip_name2).toId();
                 self.snapshots[self.snapshot_count] = .{
                     .player_id = std.math.maxInt(u32),
                     .entity = e,
@@ -365,7 +369,7 @@ pub const Server = struct {
         self.registry.add(entity, Comps.ModelName{ .id = info.model_id });
         if (self.animation_system.allocBoneSlot()) |bone_offset| {
             self.registry.add(entity, Comps.AnimationState{
-                .clip_name = @import("rend_ctx.zig").ClipName.idle,
+                .clip_name = ClipName.idle.toString(),
                 .bone_offset = bone_offset,
             });
         }
@@ -762,14 +766,13 @@ pub const Server = struct {
             const anim = av.get(Comps.AnimationState, e);
             const speed = av.get(Comps.MoveSpeed, e);
             const info2 = agent.type_id.info();
-            const CN = @import("rend_ctx.zig").ClipName;
             switch (agent.state) {
                 .idle, .wandering => {
-                    anim.clip_name = if (agent.state == .idle) CN.idle else CN.walk;
+                    anim.clip_name = if (agent.state == .idle) ClipName.idle.toString() else ClipName.walk.toString();
                     speed.value = info2.move_speed;
                 },
                 .chasing, .fleeing => {
-                    anim.clip_name = CN.run;
+                    anim.clip_name = ClipName.run.toString();
                     speed.value = info2.run_speed;
                 },
             }
@@ -777,11 +780,4 @@ pub const Server = struct {
     }
 };
 
-fn clipNameToId(name: []const u8) u8 {
-    if (std.mem.eql(u8, name, "idle")) return 0;
-    if (std.mem.eql(u8, name, "walk")) return 1;
-    if (std.mem.eql(u8, name, "run")) return 2;
-    if (std.mem.eql(u8, name, "death")) return 3;
-    if (std.mem.eql(u8, name, "attack")) return 4;
-    return 0;
-}
+
