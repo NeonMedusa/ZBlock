@@ -2,6 +2,7 @@
 const std = @import("std");
 const Game = @import("../game.zig");
 const UiSystem = @import("../ui_system.zig");
+const tr = @import("../i18n.zig").tr;
 const SaveManager = @import("../save_manager.zig").SaveManager;
 const SaveEntry = @import("../save_manager.zig").SaveEntry;
 
@@ -45,7 +46,7 @@ pub fn update(self: *@This(), game: *Game) void {
     if (prev and self.scroll > 0) self.scroll -= 1;
     if (next and self.scroll + rows_shown < self.entries.len) self.scroll += 1;
 
-    game.ui_system.drawText(&game.gctx, col_x, 30, "选择存档", 30, .{ 1, 1, 1, 1 });
+    game.ui_system.drawText(&game.gctx, col_x, 30, tr("ui.select_save"), 30, .{ 1, 1, 1, 1 });
 
     for (0..rows_shown) |r| {
         const idx = self.scroll + r;
@@ -61,7 +62,7 @@ pub fn update(self: *@This(), game: *Game) void {
             game.ui_system.drawText(&game.gctx, col_x + 14, y + 34, entry.last_played, 15, .{ 0.7, 0.7, 0.7, 1 });
         }
 
-        if (game.ui_system.textButton(col_x + col_w - 80, y + 12, 70, row_h - 24, "删除", 18)) {
+        if (game.ui_system.textButton(col_x + col_w - 80, y + 12, 70, row_h - 24, tr("ui.delete"), 18)) {
             SaveManager.deleteSave(entry.name) catch {};
             self.refresh(game.allocator);
             return;
@@ -76,12 +77,12 @@ pub fn update(self: *@This(), game: *Game) void {
 
     game.ui_system.cursor_col_x = col_x + 10;
     game.ui_system.cursor_y = win_h - 80;
-    if (game.ui_system.button("← 返回", 180, 44, 18)) {
+    if (game.ui_system.button(tr("ui.back"), 180, 44, 18)) {
         game.menu_state = .MainMenu;
         return;
     }
     game.ui_system.sameLine(20);
-    if (game.ui_system.button("新游戏", 180, 44, 18)) {
+    if (game.ui_system.button(tr("ui.new_game"), 180, 44, 18)) {
         const name = SaveManager.autoName(game.allocator) catch return;
         defer game.allocator.free(name);
         game.startSave(name) catch {};
@@ -90,6 +91,6 @@ pub fn update(self: *@This(), game: *Game) void {
 
     // 左下角显示当前用户
     var name_buf: [128]u8 = undefined;
-    const name_str = std.fmt.bufPrint(&name_buf, "当前用户：{s}", .{game.player_name}) catch "当前用户：?";
+    const name_str = std.fmt.bufPrint(&name_buf, "{s}{s}", .{ tr("ui.current_user_prefix"), game.player_name }) catch tr("ui.current_user_prefix");
     game.ui_system.drawText(&game.gctx, 8, win_h - 24, name_str, 18, .{ 1, 1, 1, 1 });
 }

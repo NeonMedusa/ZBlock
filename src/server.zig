@@ -42,6 +42,8 @@ pub const PlayerInput = struct {
     attack_target_raw: u32 = 0,
 };
 
+/// 服务端状态。独立线程运行，通过输入队列与主线程通信。
+/// 管理 ECS registry、AI 状态机、寻路/物理、快照发布。
 pub const Server = struct {
     allocator: std.mem.Allocator,
     registry: ECS.Registry,
@@ -98,11 +100,13 @@ pub const Server = struct {
         self.registry.deinit();
     }
 
+    /// 启动服务端线程
     pub fn start(self: *Server, res_manager: *ResManager) !void {
         self.running = true;
         self.server_thread = try std.Thread.spawn(.{}, serverThreadFn, .{ self, res_manager });
     }
 
+    /// 停止服务端线程
     pub fn stop(self: *Server) void {
         self.running = false;
         if (self.server_thread) |t| {
@@ -112,6 +116,7 @@ pub const Server = struct {
         self.input_queue.clearAndFree(self.allocator);
     }
 
+    /// 将玩家输入投递到服务端线程队列
     pub fn pushInput(self: *Server, input: PlayerInput) !void {
         self.queue_mutex.lockUncancelable(io);
         defer self.queue_mutex.unlock(io);
@@ -172,7 +177,7 @@ pub const Server = struct {
         self.pending_chunks.append(self.allocator, .{ .origin = origin, .player_id = player_id }) catch {};
     }
 
-    /// 投递区块卸载（服务端线程调用，网络线程消费）
+    /// 标记区块需要从客户端卸载（服务端线程调用，网络线程消费）
     pub fn enqueueChunkUnload(self: *Server, origin: Vec3i) void {
         self.pending_unloads_mutex.lockUncancelable(io);
         defer self.pending_unloads_mutex.unlock(io);
@@ -332,7 +337,11 @@ pub const Server = struct {
             const surface_y = self.block_world.getSurfaceY(@intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
             if (surface_y) |y| {
                 const pos = Vec3.new(sx, @as(f32, @floatFromInt(y)), sz);
-                if (rng.float(f32) < 0.5) { self.spawnEnemy("fox", pos); } else { self.spawnEnemy("deer", pos); }
+                if (rng.float(f32) < 0.5) {
+                    self.spawnEnemy("fox", pos);
+                } else {
+                    self.spawnEnemy("deer", pos);
+                }
                 count += 1;
                 if (count >= MAX_ENEMIES) break;
             }
@@ -700,11 +709,17 @@ pub const Server = struct {
                         agent.state = .wandering;
                     }
                     if (info.behavior == .hostile and dist < info.detect_range) {
-                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        if (agent.path) |*p| {
+                            p.deinit(self.allocator);
+                            agent.path = null;
+                        }
                         agent.target = nearest_pos;
                         agent.state = .chasing;
                     } else if (info.flee_on_detect and dist < info.detect_range) {
-                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        if (agent.path) |*p| {
+                            p.deinit(self.allocator);
+                            agent.path = null;
+                        }
                         agent.target = nearest_pos;
                         agent.flee_timer = 4.0;
                         agent.state = .fleeing;
@@ -712,11 +727,17 @@ pub const Server = struct {
                 },
                 .wandering => {
                     if (info.behavior == .hostile and dist < info.detect_range) {
-                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        if (agent.path) |*p| {
+                            p.deinit(self.allocator);
+                            agent.path = null;
+                        }
                         agent.target = nearest_pos;
                         agent.state = .chasing;
                     } else if (info.flee_on_detect and dist < info.detect_range) {
-                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        if (agent.path) |*p| {
+                            p.deinit(self.allocator);
+                            agent.path = null;
+                        }
                         agent.target = nearest_pos;
                         agent.flee_timer = 4.0;
                         agent.state = .fleeing;
@@ -728,7 +749,10 @@ pub const Server = struct {
                         agent.wander_timer = info.wander_interval;
                         agent.target = epos.vec;
                         agent.state = .idle;
-                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        if (agent.path) |*p| {
+                            p.deinit(self.allocator);
+                            agent.path = null;
+                        }
                     } else {
                         agent.target = nearest_pos;
                     }
@@ -739,7 +763,10 @@ pub const Server = struct {
                         agent.wander_timer = info.wander_interval;
                         agent.target = epos.vec;
                         agent.state = .idle;
-                        if (agent.path) |*p| { p.deinit(self.allocator); agent.path = null; }
+                        if (agent.path) |*p| {
+                            p.deinit(self.allocator);
+                            agent.path = null;
+                        }
                     } else {
                         const flee_dir = Vec3.new(
                             epos.vec.x - nearest_pos.x,
@@ -779,5 +806,3 @@ pub const Server = struct {
         }
     }
 };
-
-

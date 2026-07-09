@@ -53,6 +53,7 @@ pub const DropUpdate = struct {
     target_player_id: u32,
 };
 
+/// 服务端 → 客户端：全量状态快照（一次 read = 一帧的完整数据）
 pub const ServerState = struct {
     serial: u32,
     tick_count: u64, // 服务端 tick 序号（插值时间线用）
@@ -324,6 +325,7 @@ fn recvAll(fd: winsock.socket_t, buf: []u8) usize {
 
 const Log = @import("log.zig");
 
+/// 网络连接生命周期管理。single/host/client 三种模式共用同一结构体。
 pub const NetworkManager = struct {
     mode: enum { single, host, client } = .single,
     listen_fd: winsock.socket_t = undefined, // 主机监听 socket

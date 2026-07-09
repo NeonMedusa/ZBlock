@@ -8,6 +8,7 @@
 //! - pendingIOCount = 0 → "正在生成世界..."（新世界生成 mesh）
 
 const Game = @import("../game.zig");
+const tr = @import("../i18n.zig").tr;
 
 /// 在加载循环中每帧调用，绘制黑底 + 加载提示
 pub fn draw(game: *Game) void {
@@ -17,9 +18,9 @@ pub fn draw(game: *Game) void {
     ui.drawRect(0, 0, w, h, .{ 0, 0, 0, 1 });
 
     const text: []const u8 = if (game.server.block_world.pendingIOCount() > 0)
-        "正在加载世界..."
+        tr("ui.loading_world")
     else
-        "正在生成世界...";
+        tr("ui.generating_world");
 
     const text_w = ui.measureText(&game.gctx, text, 24);
     ui.drawText(&game.gctx, (w - text_w) / 2, h / 2 - 12, text, 24, .{ 1, 1, 1, 1 });

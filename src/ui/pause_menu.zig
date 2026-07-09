@@ -1,5 +1,6 @@
 // pause_menu.zig — 游戏内暂停菜单
 const Game = @import("../game.zig");
+const tr = @import("../i18n.zig").tr;
 
 pub fn update(_: *@This(), game: *Game) void {
     if (game.keybinds.isJustPressed(&game.input, .pause_menu)) {
@@ -17,12 +18,12 @@ pub fn update(_: *@This(), game: *Game) void {
     ui.cursor_col_x = ui.centerX(win_w, 240);
     ui.cursor_y = win_h / 2 - 56 - 10;
 
-    if (ui.button("继续游戏", 240, 56, 22)) {
+    if (ui.button(tr("ui.resume"), 240, 56, 22)) {
         game.menu_state = .Gameplay;
     }
 
     ui.spacing(20);
-    if (ui.button("返回主菜单", 240, 56, 22)) {
+    if (ui.button(tr("ui.back_menu"), 240, 56, 22)) {
         if (game.network.mode == .client) {
             game.disconnectClient();
         } else {

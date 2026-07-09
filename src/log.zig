@@ -84,3 +84,34 @@ pub inline fn warn(comptime mod: Module, comptime fmt: []const u8, args: anytype
 pub inline fn err(comptime mod: Module, comptime fmt: []const u8, args: anytype) void {
     log(mod, .err, fmt, args);
 }
+
+/// 性能计时器：记录代码段耗时，超出阈值自动 Log.warn。
+///
+///     const _t = PerfTimer.start("my_func", 100_000);  // 阈值微秒
+///     defer _t.end();
+///
+/// threshold_us = 0 表示不记录（手动调试用）。
+pub const PerfTimer = struct {
+    name: []const u8,
+    threshold_us: u64,
+    start_ns: i96,
+
+    pub fn start(name: []const u8, threshold_us: u64) PerfTimer {
+        return .{
+            .name = name,
+            .threshold_us = threshold_us,
+            .start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds,
+        };
+    }
+
+    pub fn end(self: *const PerfTimer) void {
+        if (self.threshold_us == 0) return;
+        const now = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        const elapsed_ns = now - self.start_ns;
+        if (elapsed_ns <= 0) return;
+        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), @as(i64, @intCast(elapsed_ns))))) / 1000;
+        if (elapsed_us > self.threshold_us) {
+            warn(.frame, "[PERF] {s}: {d}us (threshold {d}us)", .{ self.name, elapsed_us, self.threshold_us });
+        }
+    }
+};

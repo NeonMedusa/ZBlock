@@ -1,0 +1,16 @@
+{
+    "ui.play": "Single Player",
+    "ui.host": "Host Game",
+    "ui.join": "Join Game",
+    "ui.quit": "Quit",
+    "ui.current_user_prefix": "User: ",
+    "ui.resume": "Resume",
+    "ui.back_menu": "Back to Menu",
+    "ui.select_save": "Select Save",
+    "ui.delete": "Delete",
+    "ui.back": "← Back",
+    "ui.new_game": "New Game",
+    "ui.inventory": "Inventory",
+    "ui.loading_world": "Loading world...",
+    "ui.generating_world": "Generating world..."
+}

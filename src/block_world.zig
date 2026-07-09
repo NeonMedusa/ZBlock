@@ -22,6 +22,7 @@ const readBits = bitstream.readBits;
 const writeBits = bitstream.writeBits;
 const fr = @import("fridge");
 const registries = @import("registries.zig");
+const PerfTimer = @import("log.zig").PerfTimer;
 
 pub const CHUNK_WIDTH: u32 = 16;
 pub const CHUNK_HEIGHT: u32 = 255;
@@ -332,6 +333,8 @@ const LoadResult = struct {
     chunk: *Chunk, // io worker 完全初始化的 Chunk，主线程直接接管
 };
 
+/// 方块世界：区块存储、mesh 生成、物理/寻路/IO 的异步 worker。
+/// 线程安全设计：chunks 用 RwLock，各 worker 有独立队列和 mutex。
 pub const BlockWorld = struct {
     allocator: std.mem.Allocator,
     gctx: *Gctx,
@@ -575,7 +578,8 @@ pub const BlockWorld = struct {
     }
 
     pub fn processCompletedBuilds(self: *BlockWorld) !void {
-        const start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        const _timer = PerfTimer.start("processCompletedBuilds", 100_000);
+        defer _timer.end();
         self.completed_mutex.lockUncancelable(io);
         defer self.completed_mutex.unlock(io);
 
@@ -588,13 +592,12 @@ pub const BlockWorld = struct {
             r.deinit();
         }
         self.completed.clearRetainingCapacity();
-        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - start_ns))) / 1000;
-        if (elapsed_us > 100000) std.debug.print("[TIMER] processCompletedBuilds: {d}us\n", .{elapsed_us});
     }
 
     /// 将脏区块数据拷贝入队，io worker 异步写入 SQLite
     pub fn enqueueSaveTask(self: *BlockWorld, origin: Vec3i, chunk: *const Chunk) !void {
-        const start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        const _timer = PerfTimer.start("enqueueSaveTask", 100_000);
+        defer _timer.end();
         const pal = chunk.palette.items;
         // 序列化 palette 为 JSON（同 saveChunk 格式）
         var json: std.ArrayListUnmanaged(u8) = try .initCapacity(self.allocator, pal.len * 16);
@@ -627,8 +630,6 @@ pub const BlockWorld = struct {
         });
         _ = self.pending_io_count.fetchAdd(1, .release);
         self.io_cond.signal(io);
-        const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - start_ns))) / 1000;
-        if (elapsed_us > 100000) std.debug.print("[TIMER] enqueueSaveTask({d},{d}): {d}us\n", .{ origin.x, origin.z, elapsed_us });
     }
 
     /// 入队异步区块加载请求
@@ -814,11 +815,11 @@ pub const BlockWorld = struct {
     }
 
     pub fn unloadChunk(self: *BlockWorld, origin: Vec3i) void {
-        const start_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
+        const _timer = PerfTimer.start("unloadChunk", 100_000);
+        defer _timer.end();
 
         self.chunk_mutex.lockUncancelable(io);
         defer self.chunk_mutex.unlock(io);
-        const c_mutex_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
         if (self.chunks.getPtr(origin)) |loaded| {
             if (loaded.build_lock.load(.acquire)) return;
@@ -834,14 +835,10 @@ pub const BlockWorld = struct {
                 }
             }
 
-            const t1_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
-
             // 脏数据入队异步保存（不阻塞主线程）
             if (loaded.dirty) {
                 self.enqueueSaveTask(origin, loaded.chunk) catch {};
             }
-
-            const t2_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
 
             // 释放所有 mesh
             {
@@ -854,32 +851,17 @@ pub const BlockWorld = struct {
             loaded.meshes.deinit();
             loaded.water_mesh.deinit(self.allocator);
 
-            const t3_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
-
             loaded.chunk.deinit();
             self.allocator.destroy(loaded.chunk);
             _ = self.chunks.remove(origin);
 
-            const t4_ns = std.Io.Timestamp.now(io, .awake).nanoseconds;
-
             self.material_registry.cleanupUnused();
-
-            const elapsed_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - start_ns))) / 1000;
-            if (elapsed_us > 100000) {
-                const cmtx_us = @as(u64, @intCast(@max(@as(i64, 0), c_mutex_ns - start_ns))) / 1000;
-                const lookup_us = @as(u64, @intCast(@max(@as(i64, 0), t1_ns - c_mutex_ns))) / 1000;
-                const save_us = @as(u64, @intCast(@max(@as(i64, 0), t2_ns - t1_ns))) / 1000;
-                const mesh_us = @as(u64, @intCast(@max(@as(i64, 0), t3_ns - t2_ns))) / 1000;
-                const chunk_us = @as(u64, @intCast(@max(@as(i64, 0), t4_ns - t3_ns))) / 1000;
-                const reg_us = @as(u64, @intCast(@max(@as(i64, 0), std.Io.Timestamp.now(io, .awake).nanoseconds - t4_ns))) / 1000;
-                std.debug.print("[TIMER] unloadChunk({d},{d}): total={d}us cmtx={d}us look={d}us save={d}us mesh={d}us chunk={d}us reg={d}us\n", .{ origin.x, origin.z, elapsed_us, cmtx_us, lookup_us, save_us, mesh_us, chunk_us, reg_us });
-            }
         } else {
-            // chunk 不存在，只执行 cleanupUnused
             self.material_registry.cleanupUnused();
         }
     }
 
+    /// 世界坐标设置方块，自动标记区块 dirty
     pub fn setBlock(self: *BlockWorld, world_pos: Vec3i, block_state: BlockState) !void {
         const origin = chunkOrigin(world_pos.x, world_pos.z);
         if (self.chunks.getPtr(origin)) |loaded| {
@@ -1605,6 +1587,7 @@ pub const BlockWorld = struct {
     }
 
     /// 世界坐标 → 地表 Y（从上往下扫描第一个非空气方块）
+    /// 获取地表高度（从上往下扫描第一个非空气方块的 y+1）
     pub fn getSurfaceY(self: *BlockWorld, x: i32, z: i32) ?i32 {
         const origin = BlockWorld.chunkOrigin(x, z);
         {

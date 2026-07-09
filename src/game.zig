@@ -665,6 +665,18 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 按键绑定（加载配置文件，不存在则使用默认值）
     self.keybinds = try Keybinds.load(allocator, "config/keybinds.json");
+
+    // 加载游戏设置（含语言、玩家名）
+    {
+        const lang = loadSettingsLang(allocator);
+        defer allocator.free(lang);
+        // 加载语言文件，失败时逐级回退：指定语言 → en → key 本身
+        if (i18n.init(allocator, lang)) {} else |_| {
+            if (i18n.init(allocator, "en")) {} else |_| {}
+        }
+        self.player_name = loadSettingsName(allocator);
+    }
+
     self.menu_state = .MainMenu;
 
     // 注册表哈希表（运行时名称查找用）
@@ -678,17 +690,7 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 图标缓存 + 图标管线（传入 uniform 缓冲）
     self.icon_atlas = try IconAtlas.init(allocator, &self.gctx, self.ui_system.uniform_buffer);
-    // 存档系统、BlockWorld、worker 线程在用户选择存档后才初始化（initGame/startSave）
 
-    // 生成随机用户名（每次启动不同，避免联机重名）
-    {
-        var rand_buf: [4]u8 = undefined;
-        io.random(&rand_buf);
-        const suffix = std.mem.readInt(u32, &rand_buf, .little) % 10000;
-        self.player_name = try std.fmt.allocPrint(allocator, "user_{d}", .{suffix});
-    }
-
-    // 返回实例
     return self;
 }
 
@@ -715,6 +717,7 @@ pub fn deinit(self: *@This()) void {
     self.sky_pipeline.deinit();
     self.wireframe_pipeline.deinit();
     self.ui_system.deinit();
+    i18n.deinit();
     if (self.player_name.len > 0) self.allocator.free(self.player_name);
     self.icon_atlas.deinit();
 
@@ -1839,7 +1842,7 @@ fn tryItemToInventory(self: *Game, item_id: u32, count: u32) void {
     }
 
     if (remaining > 0) {
-        std.debug.print("背包已满，丢失 {d}x item_id={d}\n", .{ remaining, item_id });
+        std.debug.print("Inventory full, lost {d}x item_id={d}\n", .{ remaining, item_id });
     }
 }
 
@@ -1913,3 +1916,43 @@ const Server = @import("server.zig").Server;
 const PlayerInput = @import("server.zig").PlayerInput;
 const Network = @import("network.zig");
 const Log = @import("log.zig");
+const i18n = @import("i18n.zig");
+
+/// 从 settings.json 读取语言设置，失败时返回 "zh"（堆分配，调用方需 free）
+fn loadSettingsLang(allocator: std.mem.Allocator) []const u8 {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, "config/settings.json", allocator, .limited(4096)) catch {
+        return allocator.dupe(u8, "zh") catch "zh";
+    };
+    defer allocator.free(data);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
+        return allocator.dupe(u8, "zh") catch "zh";
+    };
+    defer parsed.deinit();
+    if (parsed.value.object.get("language")) |v| {
+        return allocator.dupe(u8, v.string) catch "zh";
+    }
+    return allocator.dupe(u8, "zh") catch "zh";
+}
+
+/// 从 settings.json 读取玩家名，失败时返回随机名
+fn loadSettingsName(allocator: std.mem.Allocator) []const u8 {
+    const data = std.Io.Dir.cwd().readFileAlloc(io, "config/settings.json", allocator, .limited(4096)) catch {
+        return randomPlayerName(allocator);
+    };
+    defer allocator.free(data);
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
+        return randomPlayerName(allocator);
+    };
+    defer parsed.deinit();
+    if (parsed.value.object.get("player_name")) |v| {
+        return allocator.dupe(u8, v.string) catch randomPlayerName(allocator);
+    }
+    return randomPlayerName(allocator);
+}
+
+fn randomPlayerName(allocator: std.mem.Allocator) []const u8 {
+    var buf: [4]u8 = undefined;
+    io.random(&buf);
+    const suffix = std.mem.readInt(u32, &buf, .little) % 10000;
+    return std.fmt.allocPrint(allocator, "user_{d}", .{suffix}) catch "user_0";
+}

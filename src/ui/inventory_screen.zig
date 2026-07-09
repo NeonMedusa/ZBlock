@@ -2,6 +2,7 @@
 const std = @import("std");
 const Game = @import("../game.zig");
 const IconAtlas = @import("../icon_atlas.zig").IconAtlas;
+const tr = @import("../i18n.zig").tr;
 const ItemStack = @import("../inventory.zig").ItemStack;
 const item_infos = @import("../item_registry.zig").item_infos;
 
@@ -34,7 +35,7 @@ pub fn drawBg(game: *Game) void {
     _ = _w; _ = _h;
 
     ui.drawOverlay(0.4);
-    ui.drawText(&game.gctx, start_x, start_y - 40, "背包", 24, .{ 1, 1, 1, 1 });
+    ui.drawText(&game.gctx, start_x, start_y - 40, tr("ui.inventory"), 24, .{ 1, 1, 1, 1 });
 
     const mouse = game.input.getCursorPos();
     for (0..rows) |r| {

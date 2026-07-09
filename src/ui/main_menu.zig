@@ -4,6 +4,7 @@
 // 只需要设定一个"初始位置"，按钮会自动排列下去。
 const std = @import("std");
 const Game = @import("../game.zig");
+const tr = @import("../i18n.zig").tr;
 
 pub fn update(_: *@This(), game: *Game) void {
     // ── 1. 拿到 UiSystem 的引用 ──
@@ -31,28 +32,28 @@ pub fn update(_: *@This(), game: *Game) void {
     //
     // 因为是同一个"自然行"里的第一个按钮（没有 sameLine），
     // button 会把 cursor_x 重置到 cursor_col_x 对齐。
-    if (ui.button("单人游戏", 240, 56, 22))
+    if (ui.button(tr("ui.play"), 240, 56, 22))
         game.menu_state = .SaveSelect;
 
     ui.spacing(16);
-    if (ui.button("开房间", 240, 56, 22)) {
+    if (ui.button(tr("ui.host"), 240, 56, 22)) {
         game.network.mode = .host;
         game.menu_state = .SaveSelect;
     }
 
     ui.spacing(16);
-    if (ui.button("加入游戏", 240, 56, 22)) {
+    if (ui.button(tr("ui.join"), 240, 56, 22)) {
         game.startClient(.{ 127, 0, 0, 1 }) catch |err| {
             std.debug.print("client: start failed: {}\n", .{err});
         };
     }
 
     ui.spacing(40);
-    if (ui.button("退出", 240, 56, 22))
+    if (ui.button(tr("ui.quit"), 240, 56, 22))
         game.window.setWindowShouldClose();
 
     // ── 左下角显示当前用户 ──
     var name_buf: [128]u8 = undefined;
-    const name_str = std.fmt.bufPrint(&name_buf, "当前用户：{s}", .{game.player_name}) catch "当前用户：?";
+    const name_str = std.fmt.bufPrint(&name_buf, "{s}{s}", .{ tr("ui.current_user_prefix"), game.player_name }) catch tr("ui.current_user_prefix");
     ui.drawText(&game.gctx, 8, game.window.height - 24, name_str, 18, .{ 1, 1, 1, 1 });
 }

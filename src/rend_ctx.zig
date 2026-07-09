@@ -105,6 +105,7 @@ pub const TextureRes = struct {
     }
 };
 
+/// 材质：颜色纹理 + 法线纹理 + uniform buffer + 采样器 + 绑定组
 pub const Material = struct {
     color_texture: TextureRes,
     normal_texture: TextureRes,
@@ -305,6 +306,7 @@ pub const ModelId = packed struct(u32) {
     }
 };
 
+/// glTF 模型：网格、材质、纹理、骨骼、动画
 pub const Model = struct {
     meshes: []Mesh, // 对应gltf.data.meshes
     textures_res: []TextureRes, //对应gltf.data.textures
@@ -776,6 +778,7 @@ pub const DrawBatch = struct {
     vertex_format: VertexFormat,
 };
 
+/// 资源管理器：模型/材质加载与缓存
 pub const ResManager = struct {
     const MAX_ENTITIES = 501; // 500 实体 + 1 区块占位
     const MAX_INSTANCES = 3 * MAX_ENTITIES + 5000; // 实体 + 区块（~4225）

@@ -380,4 +380,37 @@ Log.info(.network, "player joined", .{});
 Log.setModule(.frame, true);
 ```
 
+---
+
+## 国际化（i18n）
+
+基于 JSON 文件的运行时翻译系统。加载英文为底图，叠上目标语言。
+
+### 文件结构
+
+```
+resources/lang/
+  en.json   ← 英文底图（必须完整）
+  zh.json   ← 中文翻译（缺失的 key 自动回退到英文）
+config/settings.json  ← 含 "language": "zh" 字段
+```
+
+### 查找链
+
+```
+tr("ui.play") → zh.json 有吗？ → 有则显示
+                   没有 → en.json 有吗？ → 有则显示
+                         没有 → 返回 "ui.play"（key 本身）
+```
+
+### 用法
+
+```zig
+const tr = @import("i18n.zig").tr;
+ui.button(tr("ui.play"), 240, 56, 22);
+```
+
+新增字符串只需在 `lang/*.json` 加一条 key，代码里调 `tr("new.key")`。
+翻译者只改 JSON，不碰代码。
+
 日志文件 `logs/<timestamp>.txt`，线程安全（`std.Io.Mutex`），`reentrant` 标志防止重入死锁。

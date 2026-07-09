@@ -1,0 +1,16 @@
+{
+    "ui.play": "单人游戏",
+    "ui.host": "开房间",
+    "ui.join": "加入游戏",
+    "ui.quit": "退出",
+    "ui.current_user_prefix": "当前用户：",
+    "ui.resume": "继续游戏",
+    "ui.back_menu": "返回主菜单",
+    "ui.select_save": "选择存档",
+    "ui.delete": "删除",
+    "ui.back": "← 返回",
+    "ui.new_game": "新游戏",
+    "ui.inventory": "背包",
+    "ui.loading_world": "正在加载世界...",
+    "ui.generating_world": "正在生成世界..."
+}
