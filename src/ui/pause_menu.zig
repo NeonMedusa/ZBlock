@@ -24,11 +24,6 @@ pub fn update(_: *@This(), game: *Game) void {
 
     ui.spacing(20);
     if (ui.button(tr("ui.back_menu"), 240, 56, 22)) {
-        if (game.network.mode == .client) {
-            game.disconnectClient();
-        } else {
-            game.returnToMenu();
-            game.menu_state = .MainMenu;
-        }
+        game.returnToMenu();
     }
 }

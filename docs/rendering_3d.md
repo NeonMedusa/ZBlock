@@ -71,8 +71,10 @@ UI 的 `pow(2.2)` 是必要的——UI 颜色值在代码中以 sRGB 写出，�
 2. `render.zig` 将 `sky_pipeline.state` 的以上字段拷贝到 `game.ubo`
 3. 计算阴影 VP → 渲染阴影 pass
 4. **写 `scene_uniform_buffer` 到 GPU（阴影 pass 之后，确保主 pass 使用同一帧的 shadow_vp）**
-5. shader 从 `SceneUniform` 读取光照参数，逐像素计算
-
+   5. 实心块（`pipeline_chunk`）→ 离屏颜色
+   6. 水面（独立管线）→ 屏幕颜色（保留不透明深度）
+   7. 树叶（`pipeline_foliage`，alpha discard + GreaterEqual）→ 屏幕颜色上叠加
+   8. shader 从 `SceneUniform` 读取光照参数，逐像素计算
 ---
 
 ## 阴影贴图 (Shadow Mapping)
@@ -148,6 +150,21 @@ UV 范围外返回 1.0（无阴影）。
 | `shadow_bgl` | 渲染 pipeline group 2：深度贴图 + 比较采样器 |
 | `ShadowPipeline.light_vp` | CPU 端缓存 VP，每帧写入 shadow uniform 和 `SceneUniform.shadow_vp` |
 
+### foliage 管线
+
+树叶/半透明方块走独立 `pipeline_foliage`（与 `pipeline_chunk` 共用 `vs_chunk` 顶点入口和 `ChunkVertex` 格式，仅片段着色器不同）：
+
+| 参数 | `pipeline_chunk` | `pipeline_foliage` |
+|:-----|:----------------|:-------------------|
+| 片段入口 | `fs_main` | `fs_foliage`（alpha < 0.5 → discard） |
+| `cullMode` | `Back` | `Back` |
+| `depthWrite` | `true` | `true` |
+| `depthCompare` | `Greater` | `GreaterEqual` |
+| 渲染顺序 | Pass 1 不透明 | Pass 2 水之后 |
+
+`fs_foliage` 的 `alpha discard` 确保不透明核心写深度、半透明边缘不写，兼顾树叶间正确排序与间隙透光。
+`depthCompare = GreaterEqual` 保证树叶能正确遮挡水面（水在 Pass 2 已写入深度）。
+
 ### 文件索引
 
 | 文件 | 内容 |
@@ -163,15 +180,16 @@ UV 范围外返回 1.0（无阴影）。
 
 ---
 
-## 三管线顶点架构
+## 四管线顶点架构
 
-三种 vertex 格式分三条 pipeline 独立渲染，互不干扰。一个 `render_shader.wgsl` module 包含三个 `@vertex` 入口：
+四种 vertex 格式分四条 pipeline 独立渲染，互不干扰。一个 `render_shader.wgsl` module 包含三个 `@vertex` 入口 + 两个 `@fragment` 入口（`fs_main` 用于不透明，`fs_foliage` 带 alpha discard 用于树叶）：
 
 | Pipeline | 顶点格式 | 顶点大小 | 用途 |
 |----------|---------|---------|------|
 | `pipeline_static` | `StaticVertex` | 32B (pos+normal+texcoord) | 无骨骼 glTF 模型 |
 | `pipeline_skinned` | `SkinnedVertex` | 64B (以上+joints+weights) | 骨骼动画模型 |
-| `pipeline_chunk` | `ChunkVertex` | **4B** (packed struct) | 区块（方块世界） |
+| `pipeline_chunk` | `ChunkVertex` | **4B** (packed struct) | 实心方块（不透明） |
+| `pipeline_foliage` | `ChunkVertex` | **4B** (packed struct) | 树叶/半透明方块（alpha discard, cullMode=Back, depthCompare=GreaterEqual） |
 
 ### ChunkVertex：极致紧凑的区块顶点
 

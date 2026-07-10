@@ -186,6 +186,7 @@ fn drawFrame(game: *Game, comptime world: bool) void {
             }
         }
         Wgpu.wgpuRenderPassEncoderEnd(shadow_pass);
+        Wgpu.wgpuRenderPassEncoderRelease(shadow_pass);
     }
 
     // 写入 scene uniform（含最新 shadow_vp），阴影 pass 与主 pass 使用同一帧的 VP
@@ -369,6 +370,30 @@ fn drawFrame(game: *Game, comptime world: bool) void {
         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 2, game.ssr_bind_group, 0, null);
         Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 3, game.sky_pipeline.bind_group, 0, null);
         {
+            for (chunk_origins[0..chunk_count]) |origin| {
+                const loaded = game.server.block_world.chunks.getPtr(origin) orelse {
+                    continue;
+                };
+                const min = Vec3.new(@as(f32, @floatFromInt(origin.x)), 0, @as(f32, @floatFromInt(origin.z)));
+                const max = Vec3.new(@as(f32, @floatFromInt(origin.x + 16)), 255, @as(f32, @floatFromInt(origin.z + 16)));
+                if (!frustum.intersectsAABB(min, max)) {
+                    continue;
+                }
+                if (loaded.water_mesh.vertex_count > 0) {
+                    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, loaded.water_mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(loaded.water_mesh.vertex_buffer));
+                    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, loaded.water_mesh.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(loaded.water_mesh.index_buffer));
+                    Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, loaded.water_mesh.index_count, 1, 0, 0, 0);
+                }
+            }
+        }
+
+        // 树叶（半透明：水之后渲染，depth test 正确排序）
+        Wgpu.wgpuRenderPassEncoderSetPipeline(pass, game.render_pipeline.pipeline_foliage);
+        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 0, game.render_pipeline.global_bind_group, 0, null);
+        if (game.render_pipeline.shadow_bind_group) |sg| {
+            Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 2, sg, 0, null);
+        }
+        {
             var chunk_ins_idx = chunk_instance_idx;
             for (chunk_origins[0..chunk_count]) |origin| {
                 const loaded = game.server.block_world.chunks.getPtr(origin) orelse {
@@ -381,10 +406,16 @@ fn drawFrame(game: *Game, comptime world: bool) void {
                     chunk_ins_idx += 1;
                     continue;
                 }
-                if (loaded.water_mesh.vertex_count > 0) {
-                    Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, loaded.water_mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(loaded.water_mesh.vertex_buffer));
-                    Wgpu.wgpuRenderPassEncoderSetIndexBuffer(pass, loaded.water_mesh.index_buffer, Wgpu.WGPUIndexFormat_Uint32, 0, Wgpu.wgpuBufferGetSize(loaded.water_mesh.index_buffer));
-                    Wgpu.wgpuRenderPassEncoderDrawIndexed(pass, loaded.water_mesh.index_count, 1, 0, 0, 0);
+                var foliage_it = loaded.foliage_meshes.iterator();
+                while (foliage_it.next()) |foliage_entry| {
+                    const mat_idx = foliage_entry.key_ptr.*;
+                    const mesh = foliage_entry.value_ptr;
+                    if (mesh.vertex_count == 0) continue;
+                    if (game.server.block_world.material_registry.materials[@intCast(mat_idx)]) |*global_mat| {
+                        Wgpu.wgpuRenderPassEncoderSetVertexBuffer(pass, 0, mesh.vertex_buffer, 0, Wgpu.wgpuBufferGetSize(mesh.vertex_buffer));
+                        Wgpu.wgpuRenderPassEncoderSetBindGroup(pass, 1, global_mat.material.bind_group, 0, null);
+                        Wgpu.wgpuRenderPassEncoderDraw(pass, mesh.vertex_count, 1, 0, chunk_ins_idx);
+                    }
                 }
                 chunk_ins_idx += 1;
             }

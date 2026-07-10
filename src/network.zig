@@ -57,7 +57,7 @@ pub const DropUpdate = struct {
 pub const ServerState = struct {
     serial: u32,
     tick_count: u64, // 服务端 tick 序号（插值时间线用）
-    host_time: i64,  // 主机发送时的单调时钟 ns（延迟测量用）
+    host_time: i64, // 主机发送时的单调时钟 ns（延迟测量用）
     entities: []const EntitySnapshot,
     block_updates: []const BlockUpdate,
     drops: []const DropUpdate,
@@ -86,8 +86,14 @@ pub fn listen(port: u16) winsock.socket_t {
         .addr = 0,
         .zero = [_]u8{0} ** 8,
     };
-    if (winsock.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) { _ = winsock.closesocket(fd); return -1; }
-    if (winsock.listen(fd, 4) != 0) { _ = winsock.closesocket(fd); return -1; }
+    if (winsock.bind(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) {
+        _ = winsock.closesocket(fd);
+        return -1;
+    }
+    if (winsock.listen(fd, 4) != 0) {
+        _ = winsock.closesocket(fd);
+        return -1;
+    }
     return fd;
 }
 
@@ -102,7 +108,10 @@ pub fn connect(host: [4]u8, port: u16) winsock.socket_t {
         .addr = host_int,
         .zero = [_]u8{0} ** 8,
     };
-    if (winsock.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) { _ = winsock.closesocket(fd); return -1; }
+    if (winsock.connect(fd, @ptrCast(&addr), @sizeOf(@TypeOf(addr))) != 0) {
+        _ = winsock.closesocket(fd);
+        return -1;
+    }
     return fd;
 }
 
@@ -113,7 +122,7 @@ pub fn sendInput(fd: winsock.socket_t, input: *const ClientInput) void {
     std.mem.writeInt(u32, buf[0..4], tag << 30 | (input.serial & 0x3FFFFFFF), .little);
     const ptr: [*]const u8 = @ptrCast(input);
     @memcpy(buf[4..], ptr[0..@sizeOf(ClientInput)]);
-    _ = winsock.@"send"(fd, &buf, @intCast(buf.len), 0);
+    _ = winsock.send(fd, &buf, @intCast(buf.len), 0);
 }
 
 /// 接收 ClientInput（非阻塞，true=有新数据，false=断线，WouldBlock=无数据）
@@ -162,7 +171,7 @@ pub fn sendState(fd: winsock.socket_t, state: *const ServerState) void {
         @memcpy(buf.items[offset..][0..@sizeOf(DropUpdate)], std.mem.asBytes(d));
         offset += @sizeOf(DropUpdate);
     }
-    _ = winsock.@"send"(fd, buf.items.ptr, @intCast(buf.items.len), 0);
+    _ = winsock.send(fd, buf.items.ptr, @intCast(buf.items.len), 0);
 }
 
 /// 发送区块数据（tag=2）。origin 为 chunk 原点，palette_json 和 index_data 与存档格式相同
@@ -191,12 +200,12 @@ pub fn sendChunk(fd: winsock.socket_t, serial: u32, origin_x: i32, origin_z: i32
     off += 4;
     @memcpy(buf.items[off..][0..index_data.len], index_data);
 
-    _ = winsock.@"send"(fd, buf.items.ptr, @intCast(buf.items.len), 0);
+    _ = winsock.send(fd, buf.items.ptr, @intCast(buf.items.len), 0);
 }
 
 /// 发送 welcome（无 tag，裸 4 字节）：分配 player_id 给新连接的客机
 pub fn sendWelcome(fd: winsock.socket_t, player_id: u32) void {
-    _ = winsock.@"send"(fd, @ptrCast(&player_id), 4, 0);
+    _ = winsock.send(fd, @ptrCast(&player_id), 4, 0);
 }
 
 pub fn recvWelcome(fd: winsock.socket_t) u32 {
@@ -211,7 +220,7 @@ pub fn sendChunkUnload(fd: winsock.socket_t, origin_x: i32, origin_z: i32) void 
     std.mem.writeInt(u32, buf[0..4], @as(u32, 3) << 30, .little);
     std.mem.writeInt(i32, buf[4..8], origin_x, .little);
     std.mem.writeInt(i32, buf[8..12], origin_z, .little);
-    _ = winsock.@"send"(fd, &buf, @intCast(buf.len), 0);
+    _ = winsock.send(fd, &buf, @intCast(buf.len), 0);
 }
 
 /// 接收区块数据。返回的 palette_json 和 index_data 需要调用者释放
@@ -268,31 +277,64 @@ pub fn recvState(fd: winsock.socket_t, allocator: std.mem.Allocator, state: *Ser
     const snapshots = allocator.alloc(EntitySnapshot, count) catch return false;
     if (count > 0) {
         const snap_bytes = recvAll(fd, std.mem.sliceAsBytes(snapshots));
-        if (snap_bytes == 0) return false;
+        if (snap_bytes == 0) {
+            allocator.free(snapshots);
+            return false;
+        }
     }
     state.entities = snapshots;
 
     // 读取方块增量更新
     var bu_header: [4]u8 = undefined;
-    if (recvAll(fd, &bu_header) < 4) return false;
+    if (recvAll(fd, &bu_header) < 4) {
+        allocator.free(snapshots);
+        return false;
+    }
     const bu_count = std.mem.readInt(u32, &bu_header, .little);
-    if (bu_count > 256) return false;
-    const updates = allocator.alloc(BlockUpdate, bu_count) catch return false;
+    if (bu_count > 256) {
+        allocator.free(snapshots);
+        return false;
+    }
+    const updates = allocator.alloc(BlockUpdate, bu_count) catch {
+        allocator.free(snapshots);
+        return false;
+    };
     if (bu_count > 0) {
         const bu_bytes = recvAll(fd, std.mem.sliceAsBytes(updates));
-        if (bu_bytes == 0) return false;
+        if (bu_bytes == 0) {
+            allocator.free(snapshots);
+            allocator.free(updates);
+            return false;
+        }
     }
     state.block_updates = updates;
 
     // 读取掉落更新
     var drop_header: [4]u8 = undefined;
-    if (recvAll(fd, &drop_header) < 4) return false;
+    if (recvAll(fd, &drop_header) < 4) {
+        allocator.free(snapshots);
+        allocator.free(updates);
+        return false;
+    }
     const drop_count = std.mem.readInt(u32, &drop_header, .little);
-    if (drop_count > 64) return false;
-    const drops = allocator.alloc(DropUpdate, drop_count) catch return false;
+    if (drop_count > 64) {
+        allocator.free(snapshots);
+        allocator.free(updates);
+        return false;
+    }
+    const drops = allocator.alloc(DropUpdate, drop_count) catch {
+        allocator.free(snapshots);
+        allocator.free(updates);
+        return false;
+    };
     if (drop_count > 0) {
         const drop_bytes = recvAll(fd, std.mem.sliceAsBytes(drops));
-        if (drop_bytes == 0) return false;
+        if (drop_bytes == 0) {
+            allocator.free(snapshots);
+            allocator.free(updates);
+            allocator.free(drops);
+            return false;
+        }
     }
     state.drops = drops;
     return true;
@@ -301,7 +343,7 @@ pub fn recvState(fd: winsock.socket_t, allocator: std.mem.Allocator, state: *Ser
 /// 读取数据包的前 2 bit 标签（不消耗数据）
 pub fn peekTag(fd: winsock.socket_t) u32 {
     var header: [4]u8 = undefined;
-    const n = winsock.@"recv"(fd, &header, header.len, winsock.MSG_PEEK);
+    const n = winsock.recv(fd, &header, header.len, winsock.MSG_PEEK);
     if (n < 0) return 0;
     if (n < 4) return 0;
     return std.mem.readInt(u32, &header, .little) >> 30;
@@ -311,7 +353,7 @@ pub fn peekTag(fd: winsock.socket_t) u32 {
 fn recvAll(fd: winsock.socket_t, buf: []u8) usize {
     var off: usize = 0;
     while (off < buf.len) {
-        const n = winsock.@"recv"(fd, buf[off..].ptr, @intCast(buf[off..].len), 0);
+        const n = winsock.recv(fd, buf[off..].ptr, @intCast(buf[off..].len), 0);
         if (n < 0) return 0;
         if (n == 0) return off;
         off += @as(usize, @intCast(n));
@@ -379,8 +421,10 @@ pub const NetworkManager = struct {
         input: ClientInput = .{
             .serial = 0,
             .pos = Vec3.zero,
-            .cam_yaw = 0, .cam_pitch = 0,
-            .break_block = false, .place_block = false,
+            .cam_yaw = 0,
+            .cam_pitch = 0,
+            .break_block = false,
+            .place_block = false,
             .hotbar_slot = 0,
         },
     };

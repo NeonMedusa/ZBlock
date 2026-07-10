@@ -12,6 +12,7 @@ shader_module: Wgpu.WGPUShaderModule,
 pipeline_static: Wgpu.WGPURenderPipeline,
 pipeline_skinned: Wgpu.WGPURenderPipeline,
 pipeline_chunk: Wgpu.WGPURenderPipeline,
+pipeline_foliage: Wgpu.WGPURenderPipeline,
 
 pub fn init(game: *Game, comptime shader_path: []const u8) !@This() {
     const shader_src = Gctx.loadEmbeddedShader(shader_path);
@@ -162,9 +163,46 @@ pub fn init(game: *Game, comptime shader_path: []const u8) !@This() {
         .{ .format = Wgpu.WGPUVertexFormat_Uint32, .offset = 0, .shaderLocation = 0 },
     };
 
-    const pipe_static = createPipelineGctx(&game.gctx, pipeline_layout, shader_module, "vs_static", RenderCTX.StaticVertex, &static_attrs);
-    const pipe_skinned = createPipelineGctx(&game.gctx, pipeline_layout, shader_module, "vs_skinned", RenderCTX.SkinnedVertex, &skinned_attrs);
-    const pipe_chunk = createPipelineGctx(&game.gctx, pipeline_layout, shader_module, "vs_chunk", RenderCTX.ChunkVertex, &chunk_attrs);
+    const pipe_static = createPipelineGctx(
+        &game.gctx,
+        pipeline_layout,
+        shader_module,
+        "vs_static",
+        RenderCTX.StaticVertex,
+        &static_attrs,
+        "fs_main",
+        Wgpu.WGPUCompareFunction_Greater,
+    );
+    const pipe_skinned = createPipelineGctx(
+        &game.gctx,
+        pipeline_layout,
+        shader_module,
+        "vs_skinned",
+        RenderCTX.SkinnedVertex,
+        &skinned_attrs,
+        "fs_main",
+        Wgpu.WGPUCompareFunction_Greater,
+    );
+    const pipe_chunk = createPipelineGctx(
+        &game.gctx,
+        pipeline_layout,
+        shader_module,
+        "vs_chunk",
+        RenderCTX.ChunkVertex,
+        &chunk_attrs,
+        "fs_main",
+        Wgpu.WGPUCompareFunction_Greater,
+    );
+    const pipe_foliage = createPipelineGctx(
+        &game.gctx,
+        pipeline_layout,
+        shader_module,
+        "vs_chunk",
+        RenderCTX.ChunkVertex,
+        &chunk_attrs,
+        "fs_foliage",
+        Wgpu.WGPUCompareFunction_GreaterEqual,
+    );
 
     return @This(){
         .global_bgl = global_bgl,
@@ -175,6 +213,7 @@ pub fn init(game: *Game, comptime shader_path: []const u8) !@This() {
         .pipeline_static = pipe_static,
         .pipeline_skinned = pipe_skinned,
         .pipeline_chunk = pipe_chunk,
+        .pipeline_foliage = pipe_foliage,
         .shadow_bgl = shadow_bgl,
         .shadow_bind_group = null,
     };
@@ -184,7 +223,16 @@ pub fn setShadowBindGroup(self: *@This(), shadow_bind_group: Wgpu.WGPUBindGroup)
     self.shadow_bind_group = shadow_bind_group;
 }
 
-fn createPipelineGctx(gctx: *Gctx, layout: Wgpu.WGPUPipelineLayout, module: Wgpu.WGPUShaderModule, comptime entry: []const u8, comptime VertexType: type, attrs: []const Wgpu.WGPUVertexAttribute) Wgpu.WGPURenderPipeline {
+fn createPipelineGctx(
+    gctx: *Gctx,
+    layout: Wgpu.WGPUPipelineLayout,
+    module: Wgpu.WGPUShaderModule,
+    comptime entry: []const u8,
+    comptime VertexType: type,
+    attrs: []const Wgpu.WGPUVertexAttribute,
+    comptime frag_entry: []const u8,
+    comptime depth_compare: Wgpu.WGPUCompareFunction,
+) Wgpu.WGPURenderPipeline {
     return Wgpu.wgpuDeviceCreateRenderPipeline(gctx.device, &.{
         .layout = layout,
         .vertex = .{
@@ -205,7 +253,7 @@ fn createPipelineGctx(gctx: *Gctx, layout: Wgpu.WGPUPipelineLayout, module: Wgpu
         },
         .fragment = &Wgpu.WGPUFragmentState{
             .module = module,
-            .entryPoint = .{ .data = "fs_main", .length = 7 },
+            .entryPoint = .{ .data = frag_entry.ptr, .length = @as(u32, @intCast(frag_entry.len)) },
             .targetCount = 1,
             .targets = &Wgpu.WGPUColorTargetState{
                 .format = Wgpu.WGPUTextureFormat_BGRA8UnormSrgb,
@@ -220,7 +268,7 @@ fn createPipelineGctx(gctx: *Gctx, layout: Wgpu.WGPUPipelineLayout, module: Wgpu
         .depthStencil = &Wgpu.WGPUDepthStencilState{
             .format = Wgpu.WGPUTextureFormat_Depth24Plus,
             .depthWriteEnabled = 1,
-            .depthCompare = Wgpu.WGPUCompareFunction_Greater,
+            .depthCompare = depth_compare,
             .stencilFront = .{},
             .stencilBack = .{},
             .stencilReadMask = 0,
@@ -250,6 +298,7 @@ pub fn deinit(self: @This()) void {
     Wgpu.wgpuRenderPipelineRelease(self.pipeline_static);
     Wgpu.wgpuRenderPipelineRelease(self.pipeline_skinned);
     Wgpu.wgpuRenderPipelineRelease(self.pipeline_chunk);
+    Wgpu.wgpuRenderPipelineRelease(self.pipeline_foliage);
     Wgpu.wgpuBindGroupLayoutRelease(self.global_bgl);
     Wgpu.wgpuBindGroupRelease(self.global_bind_group);
     Wgpu.wgpuBindGroupLayoutRelease(self.material_bgl);

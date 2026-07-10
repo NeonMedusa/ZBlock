@@ -461,8 +461,17 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 
 水面是游戏中第一个非完整方块，采用独立的渲染管线和顶点格式：
 
-- **不透明方块**：`ChunkVertex`（4B），非索引（6 顶点/面），共享 bind group 1（材质纹理）
+- **不透明方块**：`ChunkVertex`（4B），非索引（6 顶点/面），共享 bind group 1（材质纹理），`pipeline_chunk`
+- **树叶/半透明方块**：`ChunkVertex`（4B），非索引（6 顶点/面），独立 `pipeline_foliage`
+  - `cullMode = Back`，`depthWrite = true`，`depthCompare = GreaterEqual`
+  - 片段着色器 `fs_foliage`：`alpha < 0.5 → discard`，利用 `GreaterEqual` 遮挡水
+  - 渲染顺序：Pass1 实心块 → Pass2 水 → 树叶（在 Pass2 内水之后绘制）
 - **水面**：`StaticVertex`（32B），索引（4 顶点+6 索引/面），独立管线，Alpha blend + 波纹动画
+
+树叶使用独立管线的原因：
+1. 需要 alpha discard（`fs_foliage`）防止半透明像素写深度
+2. 需要 `depthCompare = GreaterEqual` 而非 `Greater`，以正确遮挡水
+3. 需要 `depthWrite = true` 确保树叶间前后正确排序
 
 水面使用独立管线的原因：
 1. Alpha 混合（`SrcAlpha / OneMinusSrcAlpha`）需要单独的 blend state
@@ -508,6 +517,205 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
   根因疑似编译器优化导致 `clip.name` 的内存读取被跳过。
   修复：用 `@memcpy` 将 `clip.name` 拷贝到局部变量再访问，强制编译器做真实内存读取。
   简单测试无法复现，需要完整项目环境（多线程 ECS + 复杂调用链）才能触发。
+- 2026-07-09：程序化榕树生成（`tree_gen.zig`）。`pipeline_foliage` 独立管线（`fs_foliage` + alpha discard + `cullMode=Back` + `depthWrite=true` + `depthCompare=GreaterEqual`）。
+- 2026-07-10：根因定位 ~0.1MB/s 内存泄漏：`render.zig` 阴影 pass 缺少 `wgpuRenderPassEncoderRelease`（~1-4KB/帧，60fps → 60-240KB/s）。
+- 2026-07-10：`NeighborChunks` 结构体统一管理四邻域指针，`neighborAtXZ` helper 消除跨区块查询重复代码。
+- 2026-07-10：`disconnectClient` → `returnToMenu` 合并，消除断线双重释放竞态。
+- 2026-07-10：`pending_unloads` 消费修复，主机模式下客机现在能正确卸载远离的区块。
+- 2026-07-10：`orderedRemove(0)` 改为 swap 整列（O(n²) → O(1)）。多处 `catch {}` 泄漏修复。
+
+---
+
+## 议题六：区块两阶段生成（Terrain → Populate）
+
+### 问题
+
+树在区块交界处被切开，因为 `populateBanyan` 在 IO worker 中「生成地形后立即执行」，只知道自己区块内的方块数据，不知道邻居区块处是否有树冠伸过来。之前的方案（`estimateSurfaceHeight` 噪声估算）在非 grass 地形边界处不准确，会产生无源树叶。
+
+### 目标
+
+实现类似 Minecraft 的两阶段生成：
+
+1. **Terrain（地形）**：当前 `Chunk.generate()`——只放石头、泥土、沙、水、grass、洞穴、基岩
+2. **Populate（填充）**：种树、放草、石头等——延迟到所有邻居区块的地形都生成完再执行
+
+### 核心思路
+
+```
+IO worker 加载/生成地形 → 标记 terrain_generated = true
+  → 检查自己和 4 个邻居是否全部 terrain_generated
+    → 是 → 执行 populate（种树）+ 推入 completed_loads
+    → 否 → 暂存 pending_populate
+当任何一个新 chunk 完成地形生成时 → 再次检查邻居
+```
+
+### 数据结构
+
+#### `LoadedChunk` 新增字段
+
+```zig
+const LoadedChunk = struct {
+    chunk: *Chunk,
+    meshes: std.AutoHashMap(MaterialIdx, ChunkMesh),
+    foliage_meshes: std.AutoHashMap(MaterialIdx, ChunkMesh),
+    water_mesh: ChunkMesh,
+    build_lock: std.atomic.Value(bool),
+    dirty: bool,
+    terrain_generated: bool = false,  // <-- 新增：标记地形是否已生成
+    populate_done: bool = false,       // <-- 新增：标记 populate 是否已完成
+};
+```
+
+#### `BlockWorld` 新增字段
+
+```zig
+pending_populate: std.AutoHashMap(Vec3i, *Chunk),  // IO worker 独占，无需 mutex
+```
+
+### IO worker 流程
+
+```
+当前: Chunk.generate(o, chunk) → [立即] tree_gen.populateBanyan(chunk, o)
+改为:
+  1. chunk.* = Chunk.init(pa) + Chunk.generate(o, chunk)
+  2. chunk.terrain_generated = true
+  3. pending_populate.put(o, chunk)
+  4. 遍历 (o + 四邻居) 共 5 个坐标:
+     for each candidate in [o, o+west, o+east, o+north, o+south]:
+       if candidate 在 pending_populate 中且邻居们都 terrain_generated:
+         → pop candidate
+         → 调 tree_gen.populateWithNeighbors(candidate, ...)
+         → 标记 populate_done = true
+         → 推入 completed_loads
+  5. 如果当前 chunk 仍未 populate（条件不满足）
+      → 不推入 completed_loads，留在 pending_populate
+```
+
+### 判断条件
+
+```zig
+fn canPopulate(world: *BlockWorld, origin: Vec3i) bool {
+    const offsets = [_]struct { x: i32, z: i32 }{
+        .{ .x = 0, .z = 0 },
+        .{ .x = -1, .z = 0 },  // west
+        .{ .x = 1, .z = 0 },   // east
+        .{ .x = 0, .z = -1 },  // north
+        .{ .x = 0, .z = 1 },   // south
+    };
+    for (offsets) |off| {
+        const nb_origin = Vec3i.new(origin.x + off.x * CHUNK_WIDTH_I32, 0, origin.z + off.z * CHUNK_WIDTH_I32);
+        const entry = world.pending_populate.get(nb_origin) orelse return false;
+        if (!entry.terrain_generated) return false;
+    }
+    return true;
+}
+```
+
+### Populate 阶段的树种树
+
+```zig
+fn tryPopulate(world: *BlockWorld, origin: Vec3i) void {
+    if (!canPopulate(world, origin)) return;
+    _ = world.pending_populate.remove(origin);
+    const chunk = world.pending_populate.get(origin).?;  // 已取
+
+    // 查邻居 chunk 指针
+    const nb_west  = world.pending_populate.get(Vec3i.new(...));
+    const nb_east  = world.pending_populate.get(Vec3i.new(...));
+    const nb_north = world.pending_populate.get(Vec3i.new(...));
+    const nb_south = world.pending_populate.get(Vec3i.new(...));
+
+    tree_gen.populateWithNeighbors(chunk, origin, nb_west, nb_east, nb_north, nb_south);
+    chunk.populate_done = true;
+
+    // 推入 completed_loads（主线程接收）
+    world.completed_loads_mutex.lockUncancelable(io);
+    world.completed_loads.append(world.allocator, .{ .origin = origin, .chunk = chunk }) catch {};
+    world.completed_loads_mutex.unlock(io);
+}
+```
+
+### `tree_gen.populateWithNeighbors`
+
+签名变化：
+```zig
+pub fn populateWithNeighbors(
+    chunk: *Chunk,
+    world_origin: Vec3i,
+    nb_west: ?*const Chunk,
+    nb_east: ?*const Chunk,
+    nb_north: ?*const Chunk,
+    nb_south: ?*const Chunk,
+) void
+```
+
+不再需要 `estimateSurfaceHeight`。判断地表类型时，查邻居 chunk 的 `getBlockId`。
+
+### 世界边缘处理
+
+最外层区块永远等不到所有邻居 → IO worker 空闲时扫 pending_populate，设定超时机制：
+
+```
+每处理完一批 load 任务后：
+  for each origin in pending_populate:
+    if (当前时间 - origin 入队时间) > 超时阈值(如 500ms)
+      → 强制 populate（只用自己的数据）
+      → 推入 completed_loads
+```
+
+或者更简单：每次 IO worker 空闲（`io_cond.wait` 前），扫一遍 pending_populate 强制全部 populate。
+
+### 存档兼容性
+
+- **旧存档**：没有 populate 标记 → 加载后视为 terrain_generated = true，在 `processCompletedLoads` 中触发 populate
+- **新存档**：存 `populate_done = true`（1 bit per chunk，可放进 chunk 元数据）
+- **崩溃恢复**：如果 `populate_done = false`，下次加载时重新 populate
+
+### 多人游戏
+
+- `completed_loads` 是主线程接收新 chunk 的唯一入口
+- `sendChunk` 在 `processCompletedLoads` 中触发
+- 因为 populate 在进入 `completed_loads` 前已完成
+- **客机天然只收到 populate 完成的 chunk**，无需额外同步
+
+### 与现有异步系统的关系
+
+```
+IO worker:
+  generate terrain → pending_populate → 检查邻居 → 
+    [成熟] populate → completed_loads
+    [不成熟] 留在 pending_populate
+
+Mesh worker:  不变，从 pending 取 origin → 从 chunks 读数据
+主线程:       processCompletedLoads → chunks.put（populate 已完成）
+```
+
+**无需新 mutex**：pending_populate 是 IO worker 独占。
+
+### 分步实施
+
+| 步骤 | 改动 | 文件 |
+|:----|:-----|:-----|
+| 1 | LoadedChunk: 加 `terrain_generated` / `populate_done` | `block_world.zig` |
+| 2 | BlockWorld: 加 `pending_populate: std.AutoHashMap(Vec3i, *Chunk)` + deinit 清理 | `block_world.zig` |
+| 3 | IO worker 地形生成后标记 + 入队 pending_populate | `block_world.zig` |
+| 4 | `canPopulate` / `tryPopulate` 实现 | `block_world.zig` |
+| 5 | `populateWithNeighbors` 替代 `populateBanyan` | `tree_gen.zig` |
+| 6 | 世界边缘兜底：超时/空闲强制 populate | `block_world.zig` |
+| 7 | 存档 save/load `populate_done` | `save_manager.zig` |
+
+### 未来扩展
+
+这套 populate 机制不限于树：
+
+| 填充物 | 条件 | 优先级 |
+|:-------|:-----|:------|
+| 树（榕树） | grass、海拔 < 80、噪声密度 | P0—当前 |
+| 贴图草 | grass、noise | P1 |
+| 花 | grass、small noise | P2 |
+| 蘑菇（洞穴） | cave air、低光 | P2 |
+| 矿石团 | stone 内部 | P3（可走 terrain） |
+| 建筑预制 | 额外邻居范围 | P3 |
 
 ### 武器系统方案
 

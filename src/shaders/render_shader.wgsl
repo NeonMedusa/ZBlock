@@ -290,3 +290,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let lit_color = calculateLighting(normal, in.world_position, base_color);
     return lit_color;
 }
+
+// --- 树叶/半透明方块片段着色器（带 alpha discard） ---
+@fragment
+fn fs_foliage(in: VertexOutput) -> @location(0) vec4f {
+    var base_color = textureSample(color_texture, color_sampler, in.texcoord);
+    base_color = base_color * material_uniform.base_color_factor;
+    base_color = base_color * in.color;
+    if (base_color.a < 0.5) { discard; }
+    let normal = normalize(in.world_normal);
+    let lit_color = calculateLighting(normal, in.world_position, base_color);
+    return lit_color;
+}

@@ -25,6 +25,24 @@ const StaticVertex = @import("rend_ctx.zig").StaticVertex;
 
 pub const MAX_VARIANTS = 8;
 
+/// 当前区块的四邻域指针（供 mesh 构建时跨区块查方块用）
+pub const NeighborChunks = struct {
+    west: ?*const Chunk,
+    east: ?*const Chunk,
+    north: ?*const Chunk,
+    south: ?*const Chunk,
+
+    pub fn get(self: *const NeighborChunks, dir: Direction) ?*const Chunk {
+        return switch (dir) {
+            .west => self.west,
+            .east => self.east,
+            .north => self.north,
+            .south => self.south,
+            else => null,
+        };
+    }
+};
+
 pub const MaterialKey = struct {
     block_id: BlockId,
     variant: u3,
@@ -227,17 +245,48 @@ pub const MeshBuildResult = struct {
     origin: Vec3i,
     allocator: std.mem.Allocator,
     vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(u8) = [_]std.ArrayListUnmanaged(u8){.empty} ** MAX_MATERIALS,
+    foliage_vertices: [MAX_MATERIALS]std.ArrayListUnmanaged(u8) = [_]std.ArrayListUnmanaged(u8){.empty} ** MAX_MATERIALS,
     water_vertices: std.ArrayListUnmanaged(u8) = .empty,
     water_indices: std.ArrayListUnmanaged(u8) = .empty,
 
     pub fn deinit(self: *MeshBuildResult) void {
         for (0..MAX_MATERIALS) |i| {
             self.vertices[i].deinit(self.allocator);
+            self.foliage_vertices[i].deinit(self.allocator);
         }
         self.water_vertices.deinit(self.allocator);
         self.water_indices.deinit(self.allocator);
     }
 };
+
+/// 通过 (dx, dz) 偏移获取邻居方块（支持跨区块边界），失败返回 air
+fn neighborAtXZ(
+    chunk: *const Chunk,
+    x: usize,
+    y: usize,
+    z: usize,
+    dx: i32,
+    dz: i32,
+    chunk_origin: Vec3i,
+    neighbors: NeighborChunks,
+) BlockId {
+    const cnx = @as(i32, @intCast(x)) + dx;
+    const cnz = @as(i32, @intCast(z)) + dz;
+    if (cnx >= 0 and cnx < CHUNK_WIDTH and cnz >= 0 and cnz < CHUNK_WIDTH) {
+        return chunk.getBlockId(@intCast(cnx), @intCast(y), @intCast(cnz));
+    }
+    const dir: Direction = if (dx == -1) .west else if (dx == 1) .east else if (dz == -1) .north else .south;
+    if (neighbors.get(dir)) |nb| {
+        const wn_x = chunk_origin.x + cnx;
+        const wn_z = chunk_origin.z + cnz;
+        const nb_origin = BlockWorld.chunkOrigin(wn_x, wn_z);
+        const lnx = wn_x - nb_origin.x;
+        const lnz = wn_z - nb_origin.z;
+        if (lnx >= 0 and lnx < CHUNK_WIDTH and lnz >= 0 and lnz < CHUNK_WIDTH)
+            return nb.getBlockId(@intCast(lnx), @as(u32, @truncate(y)), @intCast(lnz));
+    }
+    return BlockId.fromName("air");
+}
 
 /// 在 worker 线程中运行：遍历方块生成 CPU 侧顶点/索引数据。
 /// 不接触 GPU 和材质引用计数。邻居区块通过指针传入以支持跨区块面剔除。
@@ -245,10 +294,7 @@ pub fn buildChunkMeshCPU(
     allocator: std.mem.Allocator,
     chunk_origin: Vec3i,
     chunk: *const Chunk,
-    nb_west: ?*const Chunk,
-    nb_east: ?*const Chunk,
-    nb_north: ?*const Chunk,
-    nb_south: ?*const Chunk,
+    neighbors: NeighborChunks,
 ) !MeshBuildResult {
     var result = MeshBuildResult{
         .origin = chunk_origin,
@@ -292,13 +338,7 @@ pub fn buildChunkMeshCPU(
                         {
                             neighbor = chunk.getBlockId(@intCast(nx), @intCast(ny), @intCast(nz));
                         } else {
-                            const nb_chunk: ?*const Chunk = switch (world_dir) {
-                                .west => nb_west,
-                                .east => nb_east,
-                                .north => nb_north,
-                                .south => nb_south,
-                                else => null,
-                            };
+                            const nb_chunk: ?*const Chunk = neighbors.get(world_dir);
                             if (nb_chunk) |nb| {
                                 const wn_x = chunk_origin.x + nx;
                                 const wn_z = chunk_origin.z + nz;
@@ -319,6 +359,7 @@ pub fn buildChunkMeshCPU(
                         continue;
                     }
 
+                    const is_foliage = proto.opacity < 1.0 and block_id != BlockId.fromName("water");
                     const neighbor_proto = neighbor.prototype();
                     if (neighbor_proto.occludes) {
                         // 0.8 高度水面的 UP 面不剔除（水面没和上方实心方块重叠）
@@ -326,7 +367,7 @@ pub fn buildChunkMeshCPU(
                             continue;
                         }
                     }
-                    if (!proto.occludes and block_id == neighbor and neighbor != BlockId.fromName("air")) continue;
+                    if (!proto.occludes and block_id == neighbor and neighbor != BlockId.fromName("air") and !is_foliage) continue;
 
                     const local_dir = if (proto.is_directional) blk: {
                         const world_vec = world_dir.normal();
@@ -350,12 +391,6 @@ pub fn buildChunkMeshCPU(
                     const face_positions = face_data.positions;
                     // corner 顺序: v0=0, v1=1, v2=2, v3=3
                     const tri_verts = [_]u32{ 0, 2, 1, 0, 3, 2 };
-                    if (is_water and y + 1 < CHUNK_HEIGHT) {
-                        const above = chunk.getBlockId(@intCast(x), @intCast(y + 1), @intCast(z));
-                        if (above != BlockId.fromName("water")) {
-                            water_height_f = 0.8; // 上方不是水 → 0.8 高度
-                        }
-                    }
                     for (tri_verts) |ci| {
                         var local_pos = face_positions[ci];
                         if (is_water and water_height_f < 1.0 and local_pos.y > 0.0) {
@@ -366,43 +401,9 @@ pub fn buildChunkMeshCPU(
                                 if (local_pos.z < 0.0) [_]i32{ 0, -1 } else [_]i32{ 0, 1 },
                             };
                             for (vertex_dirs) |d| {
-                                const cnx = @as(i32, @intCast(x)) + d[0];
-                                const cnz = @as(i32, @intCast(z)) + d[1];
-                                // 查找邻居方块（当前区块或跨区块）
-                                const nb_block: BlockId = blk: {
-                                    if (cnx >= 0 and cnx < CHUNK_WIDTH and cnz >= 0 and cnz < CHUNK_WIDTH) {
-                                        break :blk chunk.getBlockId(@intCast(cnx), @intCast(y), @intCast(cnz));
-                                    }
-                                    // 跨区块：根据方向选择邻居区块指针
-                                    const nb_ptr: ?*const Chunk = if (d[0] == -1) nb_west else if (d[0] == 1) nb_east else if (d[1] == -1) nb_north else nb_south;
-                                    if (nb_ptr) |nb| {
-                                        const wn_x = chunk_origin.x + cnx;
-                                        const wn_z = chunk_origin.z + cnz;
-                                        const nb_origin = BlockWorld.chunkOrigin(wn_x, wn_z);
-                                        const lnx = wn_x - nb_origin.x;
-                                        const lnz = wn_z - nb_origin.z;
-                                        if (lnx >= 0 and lnx < CHUNK_WIDTH and lnz >= 0 and lnz < CHUNK_WIDTH)
-                                            break :blk nb.getBlockId(@intCast(lnx), @intCast(y), @intCast(lnz));
-                                    }
-                                    break :blk BlockId.fromName("air");
-                                };
+                                const nb_block = neighborAtXZ(chunk, x, y, z, d[0], d[1], chunk_origin, neighbors);
                                 if (nb_block == BlockId.fromName("water") and y + 1 < CHUNK_HEIGHT) {
-                                    const above_block: BlockId = blk: {
-                                        if (cnx >= 0 and cnx < CHUNK_WIDTH and cnz >= 0 and cnz < CHUNK_WIDTH) {
-                                            break :blk chunk.getBlockId(@intCast(cnx), @intCast(y + 1), @intCast(cnz));
-                                        }
-                                        const nb_ptr: ?*const Chunk = if (d[0] == -1) nb_west else if (d[0] == 1) nb_east else if (d[1] == -1) nb_north else nb_south;
-                                        if (nb_ptr) |nb| {
-                                            const wn_x = chunk_origin.x + cnx;
-                                            const wn_z = chunk_origin.z + cnz;
-                                            const nb_origin = BlockWorld.chunkOrigin(wn_x, wn_z);
-                                            const lnx = wn_x - nb_origin.x;
-                                            const lnz = wn_z - nb_origin.z;
-                                            if (lnx >= 0 and lnx < CHUNK_WIDTH and lnz >= 0 and lnz < CHUNK_WIDTH)
-                                                break :blk nb.getBlockId(@intCast(lnx), @intCast(y + 1), @intCast(lnz));
-                                        }
-                                        break :blk BlockId.fromName("air");
-                                    };
+                                    const above_block = neighborAtXZ(chunk, x, y + 1, z, d[0], d[1], chunk_origin, neighbors);
                                     if (above_block == BlockId.fromName("water")) {
                                         vertex_raised = true;
                                     }
@@ -427,37 +428,9 @@ pub fn buildChunkMeshCPU(
                                         if (lp.z < 0.0) [_]i32{ 0, -1 } else [_]i32{ 0, 1 },
                                     };
                                     for (vd) |d| {
-                                        const cnx = @as(i32, @intCast(x)) + d[0];
-                                        const cnz = @as(i32, @intCast(z)) + d[1];
-                                        const nb: BlockId = blk: {
-                                            if (cnx >= 0 and cnx < CHUNK_WIDTH and cnz >= 0 and cnz < CHUNK_WIDTH) break :blk chunk.getBlockId(@intCast(cnx), @intCast(y), @intCast(cnz));
-                                            const nbp: ?*const Chunk = if (d[0] == -1) nb_west else if (d[0] == 1) nb_east else if (d[1] == -1) nb_north else nb_south;
-                                            if (nbp) |nb| {
-                                                const wn_x = chunk_origin.x + cnx;
-                                                const wn_z = chunk_origin.z + cnz;
-                                                const nbo = BlockWorld.chunkOrigin(wn_x, wn_z);
-                                                const lnx = wn_x - nbo.x;
-                                                const lnz = wn_z - nbo.z;
-                                                if (lnx >= 0 and lnx < CHUNK_WIDTH and lnz >= 0 and lnz < CHUNK_WIDTH)
-                                                    break :blk nb.getBlockId(@intCast(lnx), @intCast(y), @intCast(lnz));
-                                            }
-                                            break :blk BlockId.fromName("air");
-                                        };
+                                        const nb = neighborAtXZ(chunk, x, y, z, d[0], d[1], chunk_origin, neighbors);
                                         if (nb == BlockId.fromName("water") and y + 1 < CHUNK_HEIGHT) {
-                                            const ab: BlockId = blk: {
-                                                if (cnx >= 0 and cnx < CHUNK_WIDTH and cnz >= 0 and cnz < CHUNK_WIDTH) break :blk chunk.getBlockId(@intCast(cnx), @intCast(y + 1), @intCast(cnz));
-                                                const nbp: ?*const Chunk = if (d[0] == -1) nb_west else if (d[0] == 1) nb_east else if (d[1] == -1) nb_north else nb_south;
-                                                if (nbp) |nb2| {
-                                                    const wn_x = chunk_origin.x + cnx;
-                                                    const wn_z = chunk_origin.z + cnz;
-                                                    const nbo = BlockWorld.chunkOrigin(wn_x, wn_z);
-                                                    const lnx = wn_x - nbo.x;
-                                                    const lnz = wn_z - nbo.z;
-                                                    if (lnx >= 0 and lnx < CHUNK_WIDTH and lnz >= 0 and lnz < CHUNK_WIDTH)
-                                                        break :blk nb2.getBlockId(@intCast(lnx), @intCast(y + 1), @intCast(lnz));
-                                                }
-                                                break :blk BlockId.fromName("air");
-                                            };
+                                            const ab = neighborAtXZ(chunk, x, y + 1, z, d[0], d[1], chunk_origin, neighbors);
                                             if (ab == BlockId.fromName("water")) raised = true;
                                         }
                                     }
@@ -473,6 +446,16 @@ pub fn buildChunkMeshCPU(
                             // 6 索引：(0,2,1) (0,3,2)
                             const idx = [_]u32{ sv_start, sv_start + 2, sv_start + 1, sv_start, sv_start + 3, sv_start + 2 };
                             try result.water_indices.appendSlice(allocator, std.mem.sliceAsBytes(&idx));
+                        } else if (is_foliage) {
+                            const cv = ChunkVertex{
+                                .bx = @truncate(@as(u32, @intFromFloat(world_pos.x - @as(f32, @floatFromInt(chunk_origin.x)) + 0.01))),
+                                .by = @truncate(@as(u32, @intFromFloat(world_pos.y + 0.01))),
+                                .bz = @truncate(@as(u32, @intFromFloat(world_pos.z - @as(f32, @floatFromInt(chunk_origin.z)) + 0.01))),
+                                .face_dir = @truncate(@as(u32, @intFromEnum(local_dir))),
+                                .world_dir = @truncate(@as(u32, @intFromEnum(world_dir))),
+                                .corner = @truncate(ci),
+                            };
+                            try result.foliage_vertices[mat_idx].appendSlice(allocator, std.mem.asBytes(&cv));
                         } else {
                             const cv = ChunkVertex{
                                 .bx = @truncate(@as(u32, @intFromFloat(world_pos.x - @as(f32, @floatFromInt(chunk_origin.x)) + 0.01))),
@@ -493,9 +476,10 @@ pub fn buildChunkMeshCPU(
     return result;
 }
 
-/// 在主线程调用：释放旧网格，acquire 材质，写入新顶点到 Chunk 的 meshes HashMap，上传 GPU。
+/// 在主线程调用：释放旧网格，acquire 材质，写入新顶点到 Chunk 的 meshes/foliage_meshes HashMap，上传 GPU。
 pub fn applyMeshResult(
     meshes: *std.AutoHashMap(MaterialIdx, ChunkMesh),
+    foliage_meshes: *std.AutoHashMap(MaterialIdx, ChunkMesh),
     water_mesh: *ChunkMesh,
     allocator: std.mem.Allocator,
     gctx: *Gctx,
@@ -511,6 +495,15 @@ pub fn applyMeshResult(
             global_registry.releaseById(mat_idx);
         }
         meshes.clearRetainingCapacity();
+        {
+            var fit = foliage_meshes.iterator();
+            while (fit.next()) |entry| {
+                const mat_idx = entry.key_ptr.*;
+                entry.value_ptr.deinit(allocator);
+                global_registry.releaseById(mat_idx);
+            }
+        }
+        foliage_meshes.clearRetainingCapacity();
         water_mesh.deinit(allocator);
         water_mesh.* = try ChunkMesh.init(gctx);
     }
@@ -530,6 +523,22 @@ pub fn applyMeshResult(
         try mesh_entry.value_ptr.cpu_vertices.appendSlice(allocator, verts);
     }
 
+    // 树叶顶点单独处理（半透明管线渲染）
+    for (0..MAX_MATERIALS) |mat_idx_usize| {
+        const mat_idx: MaterialIdx = @intCast(mat_idx_usize);
+        const verts = result.foliage_vertices[mat_idx_usize].items;
+        if (verts.len == 0) continue;
+
+        const mat_key = MaterialKey.fromId(mat_idx);
+        _ = try global_registry.acquire(mat_key);
+
+        const mesh_entry = try foliage_meshes.getOrPut(mat_idx);
+        if (!mesh_entry.found_existing) {
+            mesh_entry.value_ptr.* = try ChunkMesh.init(gctx);
+        }
+        try mesh_entry.value_ptr.cpu_vertices.appendSlice(allocator, verts);
+    }
+
     // 水面顶点和索引单独处理
     if (result.water_vertices.items.len > 0) {
         try water_mesh.cpu_vertices.appendSlice(allocator, result.water_vertices.items);
@@ -543,6 +552,15 @@ pub fn applyMeshResult(
             if (mesh.cpu_vertices.items.len > 0) {
                 try mesh.uploadMeshData(gctx, @sizeOf(ChunkVertex));
                 mesh.clearCpuData(allocator);
+            }
+        }
+        {
+            var fit = foliage_meshes.valueIterator();
+            while (fit.next()) |mesh| {
+                if (mesh.cpu_vertices.items.len > 0) {
+                    try mesh.uploadMeshData(gctx, @sizeOf(ChunkVertex));
+                    mesh.clearCpuData(allocator);
+                }
             }
         }
         if (water_mesh.cpu_vertices.items.len > 0) {

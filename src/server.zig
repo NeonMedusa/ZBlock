@@ -93,6 +93,7 @@ pub const Server = struct {
         self.input_queue.deinit(self.allocator);
         self.pending_chunks.deinit(self.allocator);
         self.pending_block_updates.deinit(self.allocator);
+        self.pending_drops.deinit(self.allocator);
         self.pending_unloads.deinit(self.allocator);
         var it = self.player_chunks.valueIterator();
         while (it.next()) |list| list.deinit(self.allocator);
@@ -141,13 +142,11 @@ pub const Server = struct {
                 }
             }
 
-            var inputs: std.ArrayListUnmanaged(PlayerInput) = .empty;
-            defer inputs.deinit(self.allocator);
             self.queue_mutex.lockUncancelable(io);
-            while (self.input_queue.items.len > 0) {
-                inputs.append(self.allocator, self.input_queue.orderedRemove(0)) catch {};
-            }
+            var inputs = self.input_queue;
+            self.input_queue = .empty;
             self.queue_mutex.unlock(io);
+            defer inputs.deinit(self.allocator);
 
             self.tick(inputs.items, res_manager) catch {};
 

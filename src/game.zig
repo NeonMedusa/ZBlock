@@ -698,9 +698,6 @@ pub fn deinit(self: *@This()) void {
     // 最后释放自己
     defer self.allocator.destroy(self);
 
-    self.window.deinit();
-    self.gctx.deinit();
-
     self.res_manager.deinit(self.allocator);
     self.render_pipeline.deinit();
     self.water_pipeline.deinit(&self.gctx);
@@ -717,9 +714,11 @@ pub fn deinit(self: *@This()) void {
     self.sky_pipeline.deinit();
     self.wireframe_pipeline.deinit();
     self.ui_system.deinit();
+    self.icon_atlas.deinit();
+    self.gctx.deinit();
+    self.window.deinit();
     i18n.deinit();
     if (self.player_name.len > 0) self.allocator.free(self.player_name);
-    self.icon_atlas.deinit();
 
     if (!self.game_cleaned and self.save_initialized and self.network.mode != .client) {
         self.save_manager.savePlayer(self.player_name, &self.hotbar, &self.inventory, &self.server.registry, self.server.tick_count) catch |err| std.debug.print("savePlayer error: {}\n", .{err});
@@ -888,6 +887,8 @@ pub fn returnToMenu(self: *Game) void {
     self.server.block_world.deinit();
     self.server.input_queue.deinit(self.allocator);
     self.server.pending_chunks.deinit(self.allocator);
+    self.server.pending_block_updates.deinit(self.allocator);
+    self.server.pending_drops.deinit(self.allocator);
     self.server.pending_unloads.deinit(self.allocator);
     {
         var it = self.server.player_chunks.valueIterator();
@@ -899,6 +900,8 @@ pub fn returnToMenu(self: *Game) void {
     self.server.registry = ECS.Registry.init(self.allocator);
     self.server.input_queue = .empty;
     self.server.pending_chunks = .empty;
+    self.server.pending_block_updates = .empty;
+    self.server.pending_drops = .empty;
     self.server.pending_unloads = .empty;
     self.server.player_chunks = .empty;
     self.server.snapshot_count = 0;
@@ -908,6 +911,7 @@ pub fn returnToMenu(self: *Game) void {
     self.save_initialized = false;
     self.server.player_id = 0;
     self.server.flying = false;
+    self.menu_state = .MainMenu;
 }
 
 /// 运行一个物理 tick（纯逻辑，不碰渲染/输入）
@@ -918,22 +922,8 @@ fn tick(self: *Game) !void {
 
     // ── 联机：主机更新共享数据（供网络线程读取）──
     if (self.network.mode == .host) {
-        // 客机断线清理（网络线程已标记 disconnect，tick 中清理 ECS）
-        var ci: usize = 0;
-        while (ci < self.network.clients.items.len) {
-            if (self.network.clients.items[ci].disconnect) {
-                const c = &self.network.clients.items[ci];
-                if (self.server.registry.tryGet(Comps.Position, c.entity)) |pos| {
-                    self.network.net_saved_client_pos = pos.vec;
-                }
-                self.server.block_world.cleanupEntity(&self.server.registry, c.entity);
-                if (self.server.registry.valid(c.entity)) self.server.registry.destroy(c.entity);
-                _ = self.network.clients.swapRemove(ci);
-                Log.info(.network, "client id={} cleaned up", .{c.player_id});
-            } else {
-                ci += 1;
-            }
-        }
+        // 客机断线由网络线程处理（关 socket + registry 清理 + 移出 clients 列表）
+        // 主线程不做任何 ECS 操作，避免双重释放
 
         // 主机相机朝向（网络线程需读取，用于主机玩家快照）
         self.network.net_mutex.lockUncancelable(io);
@@ -1170,6 +1160,18 @@ fn hostNetworkThread(self: *Game) void {
         }
         block_updates.deinit(self.server.allocator);
         pending_drops.deinit(self.server.allocator);
+
+        // ── 发送卸载指令给所有客户端 ──
+        self.server.pending_unloads_mutex.lockUncancelable(io);
+        var unloads = self.server.pending_unloads;
+        self.server.pending_unloads = .empty;
+        self.server.pending_unloads_mutex.unlock(io);
+        defer unloads.deinit(self.server.allocator);
+        for (self.network.clients.items) |c| {
+            for (unloads.items) |origin| {
+                Network.sendChunkUnload(c.fd, origin.x, origin.z);
+            }
+        }
     }
 }
 
@@ -1462,14 +1464,14 @@ fn clientReceivePackets(self: *Game) void {
         const tag = Network.peekTag(self.network.client_fd);
         if (tag == 0) {
             // select 说有数据但 peekTag 返回 0 → 连接已关闭
-            self.disconnectClient();
+            self.returnToMenu();
             return;
         }
         if (tag == 2) {
             self.network.chunk_count += 1;
             const result = Network.recvChunk(self.network.client_fd, self.allocator);
             if (result == null) {
-                self.disconnectClient();
+                self.returnToMenu();
                 return;
             }
             if (result) |chunk| {
@@ -1488,7 +1490,7 @@ fn clientReceivePackets(self: *Game) void {
 
             const got = Network.recvState(self.network.client_fd, self.allocator, &state);
             if (!got) {
-                self.disconnectClient();
+                self.returnToMenu();
                 return;
             }
             state_initialized = true;
@@ -1606,7 +1608,10 @@ fn clientReceivePackets(self: *Game) void {
             // 如果服务端句柄不在当前快照中，则销毁
             var found = false;
             for (server_raw_set[0..server_raw_count]) |raw| {
-                if (raw == k.*) { found = true; break; }
+                if (raw == k.*) {
+                    found = true;
+                    break;
+                }
             }
             if (!found) {
                 keys_to_remove.append(self.allocator, k.*) catch {};
@@ -1636,26 +1641,6 @@ fn clientReceivePackets(self: *Game) void {
         }
     }
     self.server.animation_system.update(&self.server.registry, &self.res_manager, TICK_DT);
-}
-
-/// 客户端断开连接，回到主菜单
-pub fn disconnectClient(self: *Game) void {
-    Log.info(.network, "client disconnected", .{});
-    self.network.snapshot_info.deinit(self.allocator);
-    self.network.snapshot_info = .{};
-    if (self.network.client_connected.load(.acquire)) {
-        _ = winsock.closesocket(self.network.client_fd);
-        self.network.client_fd = undefined;
-        self.network.client_connected.store(false, .release);
-    }
-    self.server.block_world.deinit();
-    self.server.registry.deinit();
-    self.server.registry = ECS.Registry.init(self.allocator);
-    self.network.net_running.store(false, .release);
-    self.save_initialized = false;
-    self.menu_state = .MainMenu;
-    self.network.snapshot_info = .{}; // 已在上方 deinit，重置标记
-    Log.info(.startup, "returned to menu\n", .{});
 }
 
 /// 物品栏输入处理：数字键切换到、滚轮切换、中键拾取方块

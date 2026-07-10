@@ -42,7 +42,8 @@ src/
 ├── bitstream.zig          — 位读写工具（调色板索引编码用）
 │
 ├── block_world.zig        — 方块世界（chunk 管理 + 3 异步 worker 线程）
-├── chunk_mesh.zig         — chunk 网格生成（greedy mesh）
+├── chunk_mesh.zig         — chunk 网格生成（greedy mesh）+ NeighborChunks 邻域结构体
+├── tree_gen.zig           — 程序化树生成（榕树，噪声密度 + 椭球树冠）
 ├── noise.zig              — 地形噪声生成
 ├── raycast.zig            — 射线检测（方块 + 实体）
 ├── pathfind.zig           — A* 寻路
@@ -135,7 +136,7 @@ src/
 - `updateChunks` 遍历所有玩家，主机从磁盘加载/卸载
 - 远程玩家：计算所需区块范围，与已发送列表对比
   - 未发送的区块 → `enqueueChunkUpdate`（网络线程发 `sendChunk`）
-  - 已远离的区块 → `enqueueChunkUnload`（网络线程发 `sendChunkUnload`）
+  - 已远离的区块 → `enqueueChunkUnload`（网络线程读取 `pending_unloads` 发 `sendChunkUnload`）
 - 主机卸载前检查是否有其他玩家仍然需要该区块
 
 ### 方块增量同步

@@ -26,12 +26,12 @@ pub const Bvh = struct {
 
     pub const Node = struct {
         aabb: AABB,
-        entity: ECS.Entity,    // 叶子节点关联的实体
-        parent: i32,    // 父节点索引，-1 = 根或游离
-        child1: i32,    // -1 = 叶子节点
+        entity: ECS.Entity, // 叶子节点关联的实体
+        parent: i32, // 父节点索引，-1 = 根或游离
+        child1: i32, // -1 = 叶子节点
         child2: i32,
-        height: i32,    // 叶⼦高度为 0，内部节点 = max(child) + 1
-        crossed: bool,  // queryPairs 临时标志，防重复交叉
+        height: i32, // 叶⼦高度为 0，内部节点 = max(child) + 1
+        crossed: bool, // queryPairs 临时标志，防重复交叉
     };
 
     pub fn init(allocator: std.mem.Allocator, margin_ratio: f32) Self {
@@ -69,6 +69,9 @@ pub const Bvh = struct {
         try self.nodes.append(self.allocator, undefined);
         return idx;
     }
+
+    // 注意：以下 remove/removeLeaf/freeNode 是死代码（当前 BVH 每 tick 完全重建，从不动态删除）。
+    // 引入时有 bug（freeNode 设 child1=0 而非 NULL_NODE=-1），将来需要动态删除时请重写。
 
     fn freeNode(self: *Self, idx: i32) void {
         // 标记为非叶子，使 findLeaf 跳过（节点可被后续 allocNode 覆盖）
@@ -266,7 +269,7 @@ pub const Bvh = struct {
     /// ctx 为运行时上下文，callback 为编译期函数，签名 fn(ctx: C, a: u32, b: u32) void
     /// 先递归遍历所有内部节点，交叉检测其两个孩子的子树，
     /// 再逐一检测所有可能重叠的实体对。
-    pub fn queryPairs(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, ECS.Entity) void) void {
+    pub fn queryPairs(self: *Self, ctx: anytype, comptime callback: fn (@TypeOf(ctx), ECS.Entity, ECS.Entity) void) void {
         if (self.root == NULL_NODE) return;
         self.clearCrossFlags();
         // crossAll 递归遍历所有内部节点，自动交叉每个节点的两个孩子
@@ -280,7 +283,7 @@ pub const Bvh = struct {
     }
 
     /// 递归遍历所有内部节点，交叉检测其两个孩子
-    fn crossAll(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, ECS.Entity) void, node_idx: i32) void {
+    fn crossAll(self: *Self, ctx: anytype, comptime callback: fn (@TypeOf(ctx), ECS.Entity, ECS.Entity) void, node_idx: i32) void {
         const n = &self.nodes.items[@as(usize, @intCast(node_idx))];
         if (n.child1 == NULL_NODE or n.crossed) return;
         n.crossed = true;
@@ -289,7 +292,7 @@ pub const Bvh = struct {
         self.crossAll(ctx, callback, n.child2);
     }
 
-    fn queryInternal(self: *Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, ECS.Entity) void, a: i32, b: i32) void {
+    fn queryInternal(self: *Self, ctx: anytype, comptime callback: fn (@TypeOf(ctx), ECS.Entity, ECS.Entity) void, a: i32, b: i32) void {
         const na = &self.nodes.items[@as(usize, @intCast(a))];
         const nb = &self.nodes.items[@as(usize, @intCast(b))];
         if (!overlapAABB(na.aabb, nb.aabb)) return;
@@ -331,12 +334,12 @@ pub const Bvh = struct {
     /// 遍历 BVH，找到射线命中的最近实体。
     /// ctx 为运行时上下文，callback 签名 fn(ctx, entity: u32, t: f32) bool
     /// callback 返回 true 表示已找到（停止继续搜索）
-    pub fn raycast(self: *const Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, f32) bool, origin: Vec3, dir: Vec3) void {
+    pub fn raycast(self: *const Self, ctx: anytype, comptime callback: fn (@TypeOf(ctx), ECS.Entity, f32) bool, origin: Vec3, dir: Vec3) void {
         if (self.root == NULL_NODE) return;
         self.raycastNode(ctx, callback, self.root, origin, dir);
     }
 
-    fn raycastNode(self: *const Self, ctx: anytype, comptime callback: fn(@TypeOf(ctx), ECS.Entity, f32) bool, node_idx: i32, origin: Vec3, dir: Vec3) void {
+    fn raycastNode(self: *const Self, ctx: anytype, comptime callback: fn (@TypeOf(ctx), ECS.Entity, f32) bool, node_idx: i32, origin: Vec3, dir: Vec3) void {
         const n = &self.nodes.items[@as(usize, @intCast(node_idx))];
         const t = rayAABB(n.aabb, origin, dir);
         if (t == null or t.? < 0) return;
@@ -548,13 +551,27 @@ fn runDenseTest(count: usize, label: []const u8) !void {
     std.debug.print("  {s} ({d} 个挤在 2×2): {d} 对 ✓\n", .{ label, count, bvh_pairs.count() });
 }
 
-test "BVH sparse — 10 entities in 100×100" { try runOneTest(10, 100, 0.5, "稀疏"); }
-test "BVH sparse — 50 entities in 100×100" { try runOneTest(50, 100, 0.5, "稀疏"); }
-test "BVH sparse — 200 entities in 100×100" { try runOneTest(200, 100, 0.5, "稀疏"); }
-test "BVH medium — 50 entities in 20×20" { try runOneTest(50, 20, 0.5, "中等"); }
-test "BVH medium — 200 entities in 20×20" { try runOneTest(200, 20, 0.5, "中等"); }
-test "BVH dense — 50 entities cluster" { try runDenseTest(50, "密集"); }
-test "BVH dense — 200 entities cluster" { try runDenseTest(200, "密集"); }
+test "BVH sparse — 10 entities in 100×100" {
+    try runOneTest(10, 100, 0.5, "稀疏");
+}
+test "BVH sparse — 50 entities in 100×100" {
+    try runOneTest(50, 100, 0.5, "稀疏");
+}
+test "BVH sparse — 200 entities in 100×100" {
+    try runOneTest(200, 100, 0.5, "稀疏");
+}
+test "BVH medium — 50 entities in 20×20" {
+    try runOneTest(50, 20, 0.5, "中等");
+}
+test "BVH medium — 200 entities in 20×20" {
+    try runOneTest(200, 20, 0.5, "中等");
+}
+test "BVH dense — 50 entities cluster" {
+    try runDenseTest(50, "密集");
+}
+test "BVH dense — 200 entities cluster" {
+    try runDenseTest(200, "密集");
+}
 
 test "BVH insert 2 overlapping" {
     var bvh = Bvh.init(std.heap.page_allocator, 0.5);
@@ -563,7 +580,11 @@ test "BVH insert 2 overlapping" {
     var pair_count: u32 = 0;
     const Ctx = struct {
         count: *u32,
-        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void { _ = a; _ = b; ctx.count.* += 1; }
+        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void {
+            _ = a;
+            _ = b;
+            ctx.count.* += 1;
+        }
     };
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 0);
@@ -582,7 +603,11 @@ test "BVH insert 2 non-overlapping" {
     var pair_count: u32 = 0;
     const Ctx = struct {
         count: *u32,
-        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void { _ = a; _ = b; ctx.count.* += 1; }
+        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void {
+            _ = a;
+            _ = b;
+            ctx.count.* += 1;
+        }
     };
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);
     try std.testing.expect(pair_count == 0);
@@ -597,7 +622,11 @@ test "BVH update and re-insert" {
     var pair_count: u32 = 0;
     const Ctx = struct {
         count: *u32,
-        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void { _ = a; _ = b; ctx.count.* += 1; }
+        fn callback(ctx: @This(), a: ECS.Entity, b: ECS.Entity) void {
+            _ = a;
+            _ = b;
+            ctx.count.* += 1;
+        }
     };
     try bvh.update(ECS.Entity{ .index = 2, .version = 0 }, AABB{ .min_x = 100, .max_x = 101, .min_y = 0, .max_y = 1, .min_z = 0, .max_z = 1 });
     bvh.queryPairs(Ctx{ .count = &pair_count }, Ctx.callback);

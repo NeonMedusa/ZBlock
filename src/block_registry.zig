@@ -76,6 +76,18 @@ pub const block_infos = [_]BlockProtoType{
         .name = "foo",
         .drops = &.{.{ .item_name = "foo" }},
     },
+    .{ // 榕树木头：横切面（上/下）≈ trunk_0，侧面 ≈ trunk_2
+        .name = "banyan_trunk",
+        .face_variants = .{ 0, 0, 2, 2, 2, 2 },
+        .drops = &.{.{ .item_name = "banyan_trunk" }},
+    },
+    .{ // 榕树树叶：半透明，不遮挡邻接面
+        .name = "banyan_leaves",
+        .occludes = false,
+        .opacity = 0.8,
+        .is_directional = false,
+        .drops = &.{.{ .item_name = "banyan_leaves" }},
+    },
 };
 
 pub const MAX_BLOCKS = block_infos.len;

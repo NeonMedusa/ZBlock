@@ -23,6 +23,7 @@ const writeBits = bitstream.writeBits;
 const fr = @import("fridge");
 const registries = @import("registries.zig");
 const PerfTimer = @import("log.zig").PerfTimer;
+const tree_gen = @import("tree_gen.zig");
 
 pub const CHUNK_WIDTH: u32 = 16;
 pub const CHUNK_HEIGHT: u32 = 255;
@@ -303,6 +304,7 @@ const FLY_SPEED_MULTIPLIER: f32 = 2.3; // 飞行极速 = 走速 × 此值
 const LoadedChunk = struct {
     chunk: *Chunk,
     meshes: std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh),
+    foliage_meshes: std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh) = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(undefined),
     water_mesh: ChunkMesh.ChunkMesh = undefined, // 水面顶点（单独管线渲染）
     build_lock: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     dirty: bool = false, // 被修改过，需要写入存档
@@ -526,6 +528,14 @@ pub const BlockWorld = struct {
                     self.material_registry.releaseById(entry.key_ptr.*);
                 }
                 loaded.meshes.deinit();
+                {
+                    var fm_it = loaded.foliage_meshes.iterator();
+                    while (fm_it.next()) |entry| {
+                        entry.value_ptr.deinit(self.allocator);
+                        self.material_registry.releaseById(entry.key_ptr.*);
+                    }
+                }
+                loaded.foliage_meshes.deinit();
                 loaded.water_mesh.deinit(self.allocator);
                 loaded.chunk.deinit();
                 self.allocator.destroy(loaded.chunk);
@@ -585,7 +595,15 @@ pub const BlockWorld = struct {
 
         for (self.completed.items) |*r| {
             if (self.chunks.getPtr(r.origin)) |loaded| {
-                applyMeshResult(&loaded.meshes, &loaded.water_mesh, self.allocator, self.gctx, &self.material_registry, r) catch |err| {
+                applyMeshResult(
+                    &loaded.meshes,
+                    &loaded.foliage_meshes,
+                    &loaded.water_mesh,
+                    self.allocator,
+                    self.gctx,
+                    &self.material_registry,
+                    r,
+                ) catch |err| {
                     std.debug.print("applyMeshResult failed: {}\n", .{err});
                 };
             }
@@ -664,9 +682,12 @@ pub const BlockWorld = struct {
             {
                 self.chunk_mutex.lockUncancelable(io);
                 defer self.chunk_mutex.unlock(io);
+                var foliage_meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
+                try foliage_meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS));
                 try self.chunks.put(result.origin, .{
                     .chunk = result.chunk,
                     .meshes = meshes,
+                    .foliage_meshes = foliage_meshes,
                     .water_mesh = water_mesh,
                     .dirty = false,
                 });
@@ -769,10 +790,17 @@ pub const BlockWorld = struct {
                 while (m_it.next()) |m| m.deinit(self.allocator);
             }
             loaded.meshes.deinit();
+            {
+                var fm_it = loaded.foliage_meshes.valueIterator();
+                while (fm_it.next()) |m| m.deinit(self.allocator);
+            }
+            loaded.foliage_meshes.deinit();
             loaded.water_mesh.deinit(self.allocator);
             loaded.water_mesh = try ChunkMesh.ChunkMesh.init(self.gctx);
             loaded.meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
             loaded.meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
+            loaded.foliage_meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
+            loaded.foliage_meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
             loaded.dirty = false;
 
             self.chunk_mutex.unlock(io);
@@ -804,7 +832,8 @@ pub const BlockWorld = struct {
         meshes.ensureTotalCapacity(@intCast(MAX_MATERIALS)) catch {};
         const water_mesh = try ChunkMesh.ChunkMesh.init(self.gctx);
 
-        try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .water_mesh = water_mesh, .dirty = false });
+        const foliage_meshes = std.AutoHashMap(MaterialIdx, ChunkMesh.ChunkMesh).init(self.allocator);
+        try self.chunks.put(origin, .{ .chunk = chunk, .meshes = meshes, .foliage_meshes = foliage_meshes, .water_mesh = water_mesh, .dirty = false });
         self.chunk_mutex.unlock(io);
 
         self.enqueueMeshBuild(origin) catch {};
@@ -849,6 +878,14 @@ pub const BlockWorld = struct {
                 }
             }
             loaded.meshes.deinit();
+            {
+                var fm_it = loaded.foliage_meshes.iterator();
+                while (fm_it.next()) |entry| {
+                    entry.value_ptr.deinit(self.allocator);
+                    self.material_registry.releaseById(entry.key_ptr.*);
+                }
+            }
+            loaded.foliage_meshes.deinit();
             loaded.water_mesh.deinit(self.allocator);
 
             loaded.chunk.deinit();
@@ -1643,8 +1680,14 @@ fn meshWorkerFn(world: *BlockWorld) void {
             const nb_e: ?*const Chunk = if (loaded_ptr_chunks[2]) |l| l.chunk else null;
             const nb_n: ?*const Chunk = if (loaded_ptr_chunks[3]) |l| l.chunk else null;
             const nb_s: ?*const Chunk = if (loaded_ptr_chunks[4]) |l| l.chunk else null;
+            const neighbors = ChunkMesh.NeighborChunks{
+                .west = nb_w,
+                .east = nb_e,
+                .north = nb_n,
+                .south = nb_s,
+            };
 
-            var result = buildChunkMeshCPU(alloc, origin, loaded.chunk, nb_w, nb_e, nb_n, nb_s) catch {
+            var result = buildChunkMeshCPU(alloc, origin, loaded.chunk, neighbors) catch {
                 for (loaded_ptr_chunks) |opt_l| {
                     if (opt_l) |l| l.build_lock.store(false, .release);
                 }
@@ -1734,6 +1777,11 @@ fn ioWorkerFn(world: *BlockWorld) void {
         }
 
         if (save_task) |t| {
+            var save_ok = false;
+            defer if (!save_ok) {
+                world.allocator.free(t.palette_json);
+                world.allocator.free(t.index_data);
+            };
             // 原有保存逻辑（略作调整用 pa 替代 world.allocator）
             const cx = @divExact(t.origin.x, 16);
             const cz = @divExact(t.origin.z, 16);
@@ -1780,8 +1828,13 @@ fn ioWorkerFn(world: *BlockWorld) void {
                 _ = stmt.exec() catch {};
             }
             world.completed_saves_mutex.lockUncancelable(io);
-            world.completed_saves.append(world.allocator, t) catch {};
+            world.completed_saves.append(world.allocator, t) catch {
+                world.completed_saves_mutex.unlock(io);
+                _ = world.pending_io_count.fetchSub(1, .release);
+                continue;
+            };
             world.completed_saves_mutex.unlock(io);
+            save_ok = true;
             _ = world.pending_io_count.fetchSub(1, .release);
             continue;
         }
@@ -1846,7 +1899,11 @@ fn ioWorkerFn(world: *BlockWorld) void {
                 _ = world.pending_io_count.fetchSub(1, .release);
                 continue;
             };
-            errdefer world.allocator.destroy(chunk);
+            var load_ok = false;
+            defer if (!load_ok) {
+                chunk.deinit();
+                world.allocator.destroy(chunk);
+            };
 
             if (found) {
                 // 从存档加载
@@ -1914,12 +1971,18 @@ fn ioWorkerFn(world: *BlockWorld) void {
             } else {
                 chunk.* = Chunk.init(pa);
                 Chunk.generate(o, chunk);
+                tree_gen.populateBanyan(chunk, o);
             }
 
             // 推送 completed_loads
             world.completed_loads_mutex.lockUncancelable(io);
-            world.completed_loads.append(world.allocator, .{ .origin = o, .chunk = chunk }) catch {};
+            world.completed_loads.append(world.allocator, .{ .origin = o, .chunk = chunk }) catch {
+                world.completed_loads_mutex.unlock(io);
+                _ = world.pending_io_count.fetchSub(1, .release);
+                continue;
+            };
             world.completed_loads_mutex.unlock(io);
+            load_ok = true;
             _ = world.pending_io_count.fetchSub(1, .release);
         } else {
             world.io_queue_mutex.lockUncancelable(io);
