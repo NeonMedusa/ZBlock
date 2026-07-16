@@ -265,9 +265,10 @@ pub const Skeleton = struct {
     parent_indices: []i32,
 };
 
-pub const MAX_BONES: u32 = 128;
-pub const MAX_ANIM_ENTITIES: u32 = 1000;
-pub const TOTAL_BONES: usize = MAX_ANIM_ENTITIES * MAX_BONES;
+/// evaluateClip 栈数组上限。超出此数值的骨骼保持 bind pose，不影响 GPU 蒙皮。
+pub const MAX_EVAL_BONES: u32 = 1024;
+/// 全局骨骼 pool 容量（所有实体骨骼槽位总和）。allocBoneSlot 由此分配。
+pub const BONE_POOL_SIZE: usize = 150000;
 
 pub const ModelInfo = struct {
     name: [:0]const u8,
@@ -283,6 +284,7 @@ const model_infos = [_]ModelInfo{
     .{ .name = "Avocado", .path = "resources/models/Avocado.glb" },
     .{ .name = "Deer", .path = "resources/models/Deer.glb" },
     .{ .name = "Fox", .path = "resources/models/Fox.glb" },
+    .{ .name = "Human", .path = "resources/models/Human.glb" },
 };
 
 pub const MAX_MODELS = model_infos.len;
@@ -386,7 +388,7 @@ pub const Model = struct {
             }
 
             model.skeleton = Skeleton{
-                .joint_count = @intCast(joint_count),
+                .joint_count = @as(u32, @intCast(joint_count)),
                 .inverse_bind_matrices = ibms,
                 .parent_indices = parents,
             };

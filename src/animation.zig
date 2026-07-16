@@ -9,9 +9,8 @@ const Wgpu = @import("imports.zig").Wgpu;
 const rend_ctx = @import("rend_ctx.zig");
 const AnimClip = rend_ctx.AnimClip;
 const Skeleton = rend_ctx.Skeleton;
-const MAX_BONES = rend_ctx.MAX_BONES;
-const MAX_ANIM_ENTITIES = rend_ctx.MAX_ANIM_ENTITIES;
-const TOTAL_BONES = rend_ctx.TOTAL_BONES;
+const MAX_EVAL_BONES = rend_ctx.MAX_EVAL_BONES;
+const BONE_POOL_SIZE = rend_ctx.BONE_POOL_SIZE;
 const Comps = @import("components.zig").Components;
 const ResManager = rend_ctx.ResManager;
 
@@ -25,13 +24,13 @@ pub const AnimationSystem = struct {
     bone_pool_buffer: Wgpu.WGPUBuffer,
 
     pub fn init(allocator: Allocator, device: Wgpu.WGPUDevice) !AnimationSystem {
-        const bone_prev = try allocator.alloc(Mat4, TOTAL_BONES);
-        const bone_current = try allocator.alloc(Mat4, TOTAL_BONES);
+        const bone_prev = try allocator.alloc(Mat4, BONE_POOL_SIZE);
+        const bone_current = try allocator.alloc(Mat4, BONE_POOL_SIZE);
         @memset(bone_prev, Mat4.identity);
         @memset(bone_current, Mat4.identity);
 
         const bone_pool_buffer = Wgpu.wgpuDeviceCreateBuffer(device, &.{
-            .size = @sizeOf(Mat4) * TOTAL_BONES,
+            .size = @sizeOf(Mat4) * BONE_POOL_SIZE,
             .usage = Wgpu.WGPUBufferUsage_Storage | Wgpu.WGPUBufferUsage_CopyDst,
             .mappedAtCreation = 0,
         });
@@ -50,13 +49,14 @@ pub const AnimationSystem = struct {
         Wgpu.wgpuBufferRelease(self.bone_pool_buffer);
     }
 
-    /// 分配一个骨骼槽位（每实体一个，内含 MAX_BONES 个矩阵）。
+    /// 分配一个骨骼槽位（按实际骨骼数分配连续区域）。
     /// 使用原子自增，可被多线程安全调用（服务端线程/spawnEnemy、
     /// 网络线程/hostNetworkThread、主线程/initGame）。
-    pub fn allocBoneSlot(self: *AnimationSystem) ?u32 {
-        const slot = @atomicRmw(u32, &self.next_bone_offset, .Add, 1, .monotonic);
-        if (slot >= MAX_ANIM_ENTITIES) return null;
-        return slot * MAX_BONES;
+    pub fn allocBoneSlot(self: *AnimationSystem, bone_count: u32) ?u32 {
+        if (bone_count == 0) return null;
+        const offset = @atomicRmw(u32, &self.next_bone_offset, .Add, bone_count, .monotonic);
+        if (offset + bone_count > BONE_POOL_SIZE) return null;
+        return offset;
     }
 
     /// 在物理 tick 开始时调用：bone_prev = bone_current
@@ -85,8 +85,8 @@ pub const AnimationSystem = struct {
 
             // 跳过被 ECS 跨线程踩踏导致 bone_offset 损坏的实体（0xAAAAAAAA），
             // 由 pollServerSnapshot 的修复循环重新分配。不直接崩掉。
-            if (state.bone_offset >= TOTAL_BONES) continue;
-            evaluateClip(self, skel, clip, state.bone_offset, state.time);
+            if (state.bone_offset >= BONE_POOL_SIZE) continue;
+            self.evaluateClip(skel, clip, state.bone_offset, state.time);
 
             const end = state.bone_offset + skel.joint_count;
             if (end > self.max_bone_slot) self.max_bone_slot = end;
@@ -107,6 +107,113 @@ pub const AnimationSystem = struct {
             self.bone_prev.ptr,
             @sizeOf(Mat4) * count,
         );
+    }
+
+    fn evaluateClip(sys: *AnimationSystem, skel: Skeleton, clip: *AnimClip, bone_offset: u32, time: f32) void {
+        const joint_count = @min(skel.joint_count, MAX_EVAL_BONES);
+        var joint_trans: [MAX_EVAL_BONES]Vec3 = [_]Vec3{Vec3.zero} ** MAX_EVAL_BONES;
+        var joint_rot: [MAX_EVAL_BONES]Quat = [_]Quat{Quat.identity} ** MAX_EVAL_BONES;
+        var joint_scale: [MAX_EVAL_BONES]Vec3 = [_]Vec3{Vec3.one} ** MAX_EVAL_BONES;
+
+        for (clip.channels) |*ch| {
+            const joint = ch.joint_index;
+            if (joint >= joint_count) continue;
+
+            switch (ch.interpolation) {
+                .linear => {
+                    const prev, const next, const t = findKeyframe(ch.times, time);
+                    if (ch.stride == 3) {
+                        const p0 = ch.values[prev * 3 .. prev * 3 + 3];
+                        const p1 = ch.values[next * 3 .. next * 3 + 3];
+                        const val = Vec3.lerp(Vec3.new(p0[0], p0[1], p0[2]), Vec3.new(p1[0], p1[1], p1[2]), t);
+                        switch (ch.property) {
+                            .translation => joint_trans[joint] = val,
+                            .scale => joint_scale[joint] = val,
+                            else => {},
+                        }
+                    } else if (ch.stride == 4) {
+                        const q0 = Quat.init(ch.values[prev * 4], ch.values[prev * 4 + 1], ch.values[prev * 4 + 2], ch.values[prev * 4 + 3]);
+                        const q1 = Quat.init(ch.values[next * 4], ch.values[next * 4 + 1], ch.values[next * 4 + 2], ch.values[next * 4 + 3]);
+                        joint_rot[joint] = Quat.slerp(q0, q1, t);
+                    }
+                },
+                .step => {
+                    const idx = prevIdx(ch.times, time);
+                    if (ch.stride == 3) {
+                        const p = ch.values[idx * 3 ..];
+                        const val = Vec3.new(p[0], p[1], p[2]);
+                        switch (ch.property) {
+                            .translation => joint_trans[joint] = val,
+                            .scale => joint_scale[joint] = val,
+                            else => {},
+                        }
+                    } else if (ch.stride == 4) {
+                        const p = ch.values[idx * 4 ..];
+                        joint_rot[joint] = Quat.init(p[0], p[1], p[2], p[3]);
+                    }
+                },
+                .cubic => {
+                    // TODO: 未用 CUBICSPLINE 资产实测，如有动画异常请排查此处
+                    const prev, const next, const t = findKeyframe(ch.times, time);
+                    const ofs = ch.stride;
+                    if (ofs == 3) {
+                        // Hermite 插值：p(t) = h00×v0 + h10×m0 + h01×v1 + h11×m1
+                        const v0 = ch.values[prev * ofs * 3 + ofs .. prev * ofs * 3 + ofs + 3];
+                        const v1 = ch.values[next * ofs * 3 + ofs .. next * ofs * 3 + ofs + 3];
+                        const m0 = ch.values[prev * ofs * 3 + 2 * ofs .. prev * ofs * 3 + 2 * ofs + 3];
+                        const m1 = ch.values[next * ofs * 3 .. next * ofs * 3 + ofs];
+
+                        const t2 = t * t;
+                        const t3 = t2 * t;
+                        const h00 = 2 * t3 - 3 * t2 + 1;
+                        const h10 = t3 - 2 * t2 + t;
+                        const h01 = -2 * t3 + 3 * t2;
+                        const h11 = t3 - t2;
+
+                        const va = Vec3.new(v0[0], v0[1], v0[2]);
+                        const vb = Vec3.new(v1[0], v1[1], v1[2]);
+                        const ta = Vec3.new(m0[0], m0[1], m0[2]);
+                        const tb = Vec3.new(m1[0], m1[1], m1[2]);
+
+                        var val = Vec3.scale(va, h00);
+                        val = Vec3.add(val, Vec3.scale(ta, h10));
+                        val = Vec3.add(val, Vec3.scale(vb, h01));
+                        val = Vec3.add(val, Vec3.scale(tb, h11));
+
+                        switch (ch.property) {
+                            .translation => joint_trans[joint] = val,
+                            .scale => joint_scale[joint] = val,
+                            else => {},
+                        }
+                    } else if (ofs == 4) {
+                        // 四元数 CUBICSPLINE 暂用 slerp 回退，待 Squad 实现
+                        const p0 = ch.values[prev * ofs * 3 + ofs .. prev * ofs * 3 + ofs + 4];
+                        const p1 = ch.values[next * ofs * 3 + ofs .. next * ofs * 3 + ofs + 4];
+                        const q0 = Quat.init(p0[0], p0[1], p0[2], p0[3]);
+                        const q1 = Quat.init(p1[0], p1[1], p1[2], p1[3]);
+                        joint_rot[joint] = Quat.slerp(q0, q1, t);
+                    }
+                },
+            }
+        }
+
+        // TRS compositing: local_mats[i] = T × R × S
+        var local_mats: [MAX_EVAL_BONES]Mat4 = undefined;
+        for (0..joint_count) |i| {
+            const t = Mat4.fromTranslate(joint_trans[i]);
+            const r = joint_rot[i].toMat4();
+            const s = Mat4.fromScale(joint_scale[i]);
+            local_mats[i] = Mat4.mul(t, Mat4.mul(r, s));
+        }
+
+        // FK + IBM：自顶向下传播世界矩阵（glTF skin joint 保证拓扑序）
+        for (0..joint_count) |i| {
+            const parent = skel.parent_indices[i];
+            if (parent >= 0) {
+                local_mats[i] = Mat4.mul(local_mats[@as(usize, @intCast(parent))], local_mats[i]);
+            }
+            sys.bone_current[bone_offset + i] = Mat4.mul(local_mats[i], skel.inverse_bind_matrices[i]);
+        }
     }
 };
 
@@ -136,119 +243,6 @@ fn resolveClip(model: *const rend_ctx.Model, name: []const u8) ?*rend_ctx.AnimCl
 
     if (anims.len > 0) return &anims[0];
     return null;
-}
-
-fn evaluateClip(sys: *AnimationSystem, skel: Skeleton, clip: *AnimClip, bone_offset: u32, time: f32) void {
-    var joint_trans: [MAX_BONES]Vec3 = undefined;
-    var joint_rot: [MAX_BONES]Quat = undefined;
-    var joint_scale: [MAX_BONES]Vec3 = undefined;
-    for (0..skel.joint_count) |i| {
-        joint_trans[i] = Vec3.zero;
-        joint_rot[i] = Quat.identity;
-        joint_scale[i] = Vec3.new(1, 1, 1);
-    }
-
-    for (clip.channels) |*ch| {
-        const joint = ch.joint_index;
-        if (joint >= skel.joint_count) continue;
-
-        switch (ch.interpolation) {
-            .linear => {
-                const prev, const next, const t = findKeyframe(ch.times, time);
-                if (ch.stride == 3) {
-                    const p0 = ch.values[prev * 3 .. prev * 3 + 3];
-                    const p1 = ch.values[next * 3 .. next * 3 + 3];
-                    const val = Vec3.lerp(Vec3.new(p0[0], p0[1], p0[2]), Vec3.new(p1[0], p1[1], p1[2]), t);
-                    switch (ch.property) {
-                        .translation => joint_trans[joint] = val,
-                        .scale => joint_scale[joint] = val,
-                        else => {},
-                    }
-                } else if (ch.stride == 4) {
-                    const q0 = Quat.init(ch.values[prev * 4], ch.values[prev * 4 + 1], ch.values[prev * 4 + 2], ch.values[prev * 4 + 3]);
-                    const q1 = Quat.init(ch.values[next * 4], ch.values[next * 4 + 1], ch.values[next * 4 + 2], ch.values[next * 4 + 3]);
-                    joint_rot[joint] = Quat.slerp(q0, q1, t);
-                }
-            },
-            .step => {
-                const idx = prevIdx(ch.times, time);
-                if (ch.stride == 3) {
-                    const p = ch.values[idx * 3 ..];
-                    const val = Vec3.new(p[0], p[1], p[2]);
-                    switch (ch.property) {
-                        .translation => joint_trans[joint] = val,
-                        .scale => joint_scale[joint] = val,
-                        else => {},
-                    }
-                } else if (ch.stride == 4) {
-                    const p = ch.values[idx * 4 ..];
-                    joint_rot[joint] = Quat.init(p[0], p[1], p[2], p[3]);
-                }
-            },
-            .cubic => {
-                // TODO: 未用 CUBICSPLINE 资产实测，如有动画异常请排查此处
-                const prev, const next, const t = findKeyframe(ch.times, time);
-                const ofs = ch.stride;
-                if (ofs == 3) {
-                    // Hermite 插值：p(t) = h00×v0 + h10×m0 + h01×v1 + h11×m1
-                    const v0 = ch.values[prev * ofs * 3 + ofs .. prev * ofs * 3 + ofs + 3];
-                    const v1 = ch.values[next * ofs * 3 + ofs .. next * ofs * 3 + ofs + 3];
-                    const m0 = ch.values[prev * ofs * 3 + 2 * ofs .. prev * ofs * 3 + 2 * ofs + 3];
-                    const m1 = ch.values[next * ofs * 3 .. next * ofs * 3 + ofs];
-
-                    const t2 = t * t;
-                    const t3 = t2 * t;
-                    const h00 = 2 * t3 - 3 * t2 + 1;
-                    const h10 = t3 - 2 * t2 + t;
-                    const h01 = -2 * t3 + 3 * t2;
-                    const h11 = t3 - t2;
-
-                    const va = Vec3.new(v0[0], v0[1], v0[2]);
-                    const vb = Vec3.new(v1[0], v1[1], v1[2]);
-                    const ta = Vec3.new(m0[0], m0[1], m0[2]);
-                    const tb = Vec3.new(m1[0], m1[1], m1[2]);
-
-                    var val = Vec3.scale(va, h00);
-                    val = Vec3.add(val, Vec3.scale(ta, h10));
-                    val = Vec3.add(val, Vec3.scale(vb, h01));
-                    val = Vec3.add(val, Vec3.scale(tb, h11));
-
-                    switch (ch.property) {
-                        .translation => joint_trans[joint] = val,
-                        .scale => joint_scale[joint] = val,
-                        else => {},
-                    }
-                } else if (ofs == 4) {
-                    // 四元数 CUBICSPLINE 暂用 slerp 回退，待 Squad 实现
-                    const p0 = ch.values[prev * ofs * 3 + ofs .. prev * ofs * 3 + ofs + 4];
-                    const p1 = ch.values[next * ofs * 3 + ofs .. next * ofs * 3 + ofs + 4];
-                    const q0 = Quat.init(p0[0], p0[1], p0[2], p0[3]);
-                    const q1 = Quat.init(p1[0], p1[1], p1[2], p1[3]);
-                    joint_rot[joint] = Quat.slerp(q0, q1, t);
-                }
-            },
-        }
-    }
-
-    // TRS compositing: local_mats[i] = T × R × S
-    var local_mats: [MAX_BONES]Mat4 = undefined;
-    for (0..skel.joint_count) |i| {
-        const t = Mat4.fromTranslate(joint_trans[i]);
-        const r = joint_rot[i].toMat4();
-        const s = Mat4.fromScale(joint_scale[i]);
-        local_mats[i] = Mat4.mul(t, Mat4.mul(r, s));
-    }
-
-    // FK + IBM
-    for (0..skel.joint_count) |i| {
-        var world = local_mats[i];
-        var parent = skel.parent_indices[i];
-        while (parent >= 0) {
-            world = Mat4.mul(local_mats[@as(usize, @intCast(parent))], world);
-            parent = skel.parent_indices[@as(usize, @intCast(parent))];
-        }
-        sys.bone_current[bone_offset + i] = Mat4.mul(world, skel.inverse_bind_matrices[i]);
-    }
 }
 
 fn prevIdx(times: []const f32, time: f32) usize {

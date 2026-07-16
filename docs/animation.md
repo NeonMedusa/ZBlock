@@ -34,18 +34,24 @@ render (变帧率):
 - 为将来布娃娃物理预留架构位置——物理 tick 层天然适合物理模拟
 - 渲染层动画插值只有 mat4 逐分量 lerp，比重新采样动画轻得多
 
-### 3. 骨骼矩阵存储：double-buffered pool
+### 3. 骨骼矩阵存储：double-buffered pool + 按需分配
 
-每帧维护两套矩阵：
+每帧维护两套矩阵（连续池，逐实体按实际骨骼数分配连续区域）：
 
 ```
 bone_pool 布局（CPU）:
   [0..N-1]               bone_prev     — 上一 tick 的骨骼矩阵
   [N..2N-1]              bone_current  — 当前 tick 的骨骼矩阵
-  N = MAX_BONES × MAX_ANIMATED_ENTITIES
+  N = BONE_POOL_SIZE（不限实体数，按需分配）
 ```
 
 GPU bone_pool buffer 每帧接收插值后的 `bone_render`。
+
+骨骼槽位通过 `allocBoneSlot(bone_count)` 分配：
+- 每实体按其模型实际 `joint_count` 分配合适大小的连续区域
+- 使用原子自增，可被多线程安全调用（服务端线程、网络线程、主线程）
+- `BONE_POOL_SIZE = 150000`，约 9.6MB 显存
+- 避免传统 `MAX_BONES × MAX_ENTITIES` 的固定分配浪费
 
 ### 4. CUBICSPLINE（三次样条插值）
 
@@ -122,15 +128,14 @@ pub const ClipName = enum(u16) {
 
 ```
 CPU:
-  bone_prev    [MAX_ENTITIES × MAX_BONES]Mat4     — 上一 tick 矩阵
-  bone_current [MAX_ENTITIES × MAX_BONES]Mat4     — 当前 tick 矩阵
+  bone_prev    [BONE_POOL_SIZE]Mat4     — 上一 tick 矩阵
+  bone_current [BONE_POOL_SIZE]Mat4     — 当前 tick 矩阵
 
 GPU（每帧上传）:
-  bone_render  [MAX_ENTITIES × MAX_BONES]Mat4     — 插值后的渲染矩阵
+  bone_render  [BONE_POOL_SIZE]Mat4     — 插值后的渲染矩阵
 
-MAX_BONES = 128（可调）
-MAX_ENTITIES = 1000（预分配不改）
-bone_pool 显存 ≈ 1000 × 128 × 64B = 8MB
+BONE_POOL_SIZE = 150000（全局 pool 容量，~9.6MB 显存）
+MAX_EVAL_BONES = 1024（栈数组上限，超过的骨骼不参与 CPU 动画评估）
 ```
 
 ### EntityData / InstanceData 的 bone_offset
@@ -208,6 +213,75 @@ fn findClipByName(anims: []AnimClip, name: []const u8) ?*AnimClip {
     return null;
 }
 ```
+
+---
+
+## FK 算法（Forward Kinematics）
+
+evaluateClip 采用自顶向下 O(N) 传播（利用 glTF skin joint 的拓扑序保证）：
+
+```zig
+// TRS compositing → local_mats[i] = T_i × R_i × S_i
+for (0..joint_count) |i| { /* ... */ }
+
+// FK：父节点一定在子节点之前处理（拓扑序保证）
+for (0..joint_count) |i| {
+    const parent = skel.parent_indices[i];
+    if (parent >= 0)
+        local_mats[i] = Mat4.mul(local_mats[parent], local_mats[i]);
+    sys.bone_current[bone_offset + i] =
+        Mat4.mul(local_mats[i], skel.inverse_bind_matrices[i]);
+}
+```
+
+避免传统 O(N²) 的逐骨骼独立上溯写法，实测 Human 模型（130 根骨骼）
+每 tick Mat4.mul 从约 8385 次降至约 130 次。
+
+`MAX_EVAL_BONES=1024` 用于 evaluateClip 内的栈数组（`[MAX_EVAL_BONES]Vec3`），
+超过上限的骨骼不参与 CPU 评估（不影响 GPU 侧蒙皮）。
+
+---
+
+## 动画状态更新
+
+所有实体在服务端 tick 的 `updateAnimation()` 中设置 clip_name：
+
+### AI 实体
+
+按 `AIAgent.state` 切换：`.idle → "idle"`、`.wandering → "walk"`、`.chasing/.fleeing → "run"`
+
+### 玩家实体
+
+读取 `MoveIntent` 组件：
+
+| 状态 | clip_name |
+|------|-----------|
+| 飞行 + 移动 | `"run"` |
+| 飞行 + 静止 | `"idle"` |
+| 冲刺 + 地面移动 | `"run"` |
+| 地面移动（非冲刺） | `"walk"` |
+| 静止 | `"idle"` |
+
+玩家 clip 通过现有 `EntitySnapshot.clip_name_id` 同步到所有客户端。
+
+---
+
+## 网络同步
+
+`ClientInput` 携带移动状态用于远程玩家动画：
+
+```zig
+pub const ClientInput = struct {
+    // ... 位置/朝向/操作 ...
+    is_moving: bool,
+    is_sprinting: bool,
+    is_sneaking: bool,
+    wants_fly: bool,
+};
+```
+
+主机端收到后同步到远程玩家的 `MoveIntent` 组件，
+供 `updateAnimation()` 读取。
 
 ---
 
@@ -340,7 +414,7 @@ bone_current[bone_offset + i] = world × inverse_bind_matrix[i]
 
 ## 活跃骨骼范围优化
 
-每帧对所有 TOTAL_BONES（128×1000=128000）个矩阵做 lerp + upload 是巨大的浪费。实际同时活跃的动画实体通常只有个位数。
+每帧对所有 BONE_POOL_SIZE（128×1000=128000）个矩阵做 lerp + upload 是巨大的浪费。实际同时活跃的动画实体通常只有个位数。
 
 **`max_bone_slot`** 记录当前帧所有动画实体骨骼范围的最大值。`update()` 中计算：
 

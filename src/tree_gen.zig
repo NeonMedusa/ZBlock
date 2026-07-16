@@ -24,6 +24,8 @@ fn hashSeed(x: i32, y: i32, z: i32) u64 {
 pub fn populateBanyan(chunk: *Chunk, world_origin: Vec3i) void {
     const tree_density_scale: f32 = 0.03;
     const tree_threshold: f32 = 0.25;
+    const min_spacing: i32 = 7;
+    const margin: u32 = 4; // 树干离边界至少 4 格，确保树冠不跨区块
 
     const wx0 = world_origin.x;
     const wz0 = world_origin.z;
@@ -31,12 +33,12 @@ pub fn populateBanyan(chunk: *Chunk, world_origin: Vec3i) void {
     // 间距标记网格，标记过的位置不再种树
     var occupied: [CHUNK_WIDTH][CHUNK_WIDTH]bool = [_][CHUNK_WIDTH]bool{[_]bool{false} ** CHUNK_WIDTH} ** CHUNK_WIDTH;
 
-    var x: u32 = 0;
-    while (x < CHUNK_WIDTH) : (x += 1) {
+    var x: u32 = margin;
+    while (x < CHUNK_WIDTH - margin) : (x += 1) {
         const world_x = wx0 + @as(i32, @intCast(x));
 
-        var z: u32 = 0;
-        while (z < CHUNK_WIDTH) : (z += 1) {
+        var z: u32 = margin;
+        while (z < CHUNK_WIDTH - margin) : (z += 1) {
             if (occupied[x][z]) continue;
             const world_z = wz0 + @as(i32, @intCast(z));
 
@@ -68,8 +70,8 @@ pub fn populateBanyan(chunk: *Chunk, world_origin: Vec3i) void {
             const rdm = rng.random();
 
             const trunk_h: u32 = 4 + rdm.uintLessThan(u32, 3);
-            const canopy_r: f32 = 3.0 + @as(f32, @floatFromInt(rdm.uintLessThan(u32, 3)));
-            const canopy_vr: f32 = canopy_r * 0.55;
+            const canopy_r: f32 = 2.0 + @as(f32, @floatFromInt(rdm.uintLessThan(u32, 2))); // 2-3 格，不跨区块
+            const canopy_vr: f32 = canopy_r * 0.65; // 竖径比 0.75，更接近球形
 
             // ——— 树干 ———
             var dy: u32 = 0;
@@ -77,9 +79,10 @@ pub fn populateBanyan(chunk: *Chunk, world_origin: Vec3i) void {
                 chunk.setBlock(x, sy + dy, z, BlockState.init(BlockId.fromName("banyan_trunk")));
             }
 
-            // ——— 树冠（扁平椭球） ———
+            // ——— 树冠（椭球） ———
             const trunk_top_i32: i32 = @as(i32, @intCast(sy + trunk_h));
-            const crown_cy_i32: i32 = trunk_top_i32 + @as(i32, @intFromFloat(canopy_vr * 0.3));
+            // 树冠中心放在树干顶部偏下一点，让树干穿入树冠内部
+            const crown_cy_i32: i32 = trunk_top_i32 - @as(i32, @intFromFloat(canopy_vr * 0.4));
             const cr_i32: i32 = @as(i32, @intFromFloat(@ceil(canopy_r))) + 1;
             const cvr_i32: i32 = @as(i32, @intFromFloat(@ceil(canopy_vr))) + 1;
             const r2 = canopy_r * canopy_r;
@@ -122,7 +125,6 @@ pub fn populateBanyan(chunk: *Chunk, world_origin: Vec3i) void {
                 }
             }
             // 标记间距：以 (x,z) 为中心 min_spacing 半径内不再种树
-            const min_spacing: i32 = 9;
             const x_start = if (x < min_spacing) 0 else x - min_spacing;
             const x_end = @min(x + min_spacing, CHUNK_WIDTH - 1);
             const z_start = if (z < min_spacing) 0 else z - min_spacing;

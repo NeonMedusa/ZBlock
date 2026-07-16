@@ -27,7 +27,7 @@ pub const EntityTypeInfo = struct {
 pub const entity_infos = [_]EntityTypeInfo{
     .{
         .name = "player",
-        .model_id = ModelId.fromName("CesiumMan"),
+        .model_id = ModelId.fromName("Human"),
         .health = 100,
         .move_speed = 4.0,
         .run_speed = 6.0,
@@ -42,7 +42,7 @@ pub const entity_infos = [_]EntityTypeInfo{
     },
     .{
         .name = "zombie",
-        .model_id = ModelId.fromName("CesiumMan"),
+        .model_id = ModelId.fromName("Human"),
         .health = 50,
         .move_speed = 1.0,
         .run_speed = 2.0,

@@ -1,7 +1,6 @@
 const io = @import("imports.zig").io;
 const winsock = @import("winsock.zig");
 // game.zig
-//
 // ⚠️ 重要：Zig 的 allocator.create() 不应用结构体字段默认值。
 //    所有 `= default_value` 的字段都必须在 init() 中显式初始化，
 //    否则字段值为内存垃圾（不是默认值）。
@@ -294,8 +293,8 @@ pub fn start(self: *Game) !void {
 /// 重建投影矩阵。窗口缩放后调用。
 pub fn rebuildProjMatrix(self: *Game) void {
     const aspect = self.window.width / self.window.height;
-    const far = @as(f32, @floatFromInt(self.server.chunk_radius)) * @as(f32, @floatFromInt(BlockWorld.CHUNK_WIDTH)) * 1.5 + BlockWorld.CHUNK_WIDTH * 4;
-    self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.01, far);
+    const far = @as(f32, @floatFromInt((self.server.chunk_radius + 4) * BlockWorld.CHUNK_WIDTH_I32));
+    self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.005, far);
 }
 
 /// 窗口缩放后重建 SSR 离屏纹理和 bind group
@@ -366,6 +365,17 @@ fn initGame(self: *Game) !void {
     // 玩家模型（统一实体类型，主机客机都能看见对方）
     const pinfo = EntityTypeId.fromName("player").info();
     self.server.registry.add(player_entity, Comps.ModelName{ .id = pinfo.model_id });
+
+    // 为玩家添加动画状态
+    {
+        const bc = modelBoneCount(&self.res_manager, pinfo.model_id);
+        if (self.server.animation_system.allocBoneSlot(bc)) |bone_offset| {
+            self.server.registry.add(player_entity, Comps.AnimationState{
+                .clip_name = ClipName.idle.toString(),
+                .bone_offset = bone_offset,
+            });
+        }
+    }
 
     // 先恢复玩家存档位置（如果有存档）--- 必须在加载区块之前
     // 原因：区块需要围绕玩家实际所在位置加载，而不是硬编码的 (8,8)。
@@ -458,7 +468,10 @@ fn initGame(self: *Game) !void {
         var anim_iter = anim_view.entityIterator();
         while (anim_iter.next()) |ent| {
             if (!self.server.registry.has(Comps.AnimationState, ent)) {
-                if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                const mn = self.server.registry.tryGet(Comps.ModelName, ent) orelse continue;
+                const bc = modelBoneCount(&self.res_manager, mn.id);
+                if (bc == 0) continue;
+                if (self.server.animation_system.allocBoneSlot(bc)) |bone_offset| {
                     self.server.registry.add(ent, Comps.AnimationState{
                         .clip_name = ClipName.walk.toString(),
                         .bone_offset = bone_offset,
@@ -742,7 +755,7 @@ pub fn deinit(self: *@This()) void {
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
     Log.info(.startup, "startSave begin '{s}'", .{name});
-    self.server.chunk_radius = 4;
+    self.server.chunk_radius = 16;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
     // 如果是从 returnToMenu 回来的，Server 已经被重建，只需要重建 BlockWorld
@@ -765,7 +778,7 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
     self.network.last_snapshot_serial = std.math.maxInt(u64);
     self.network.host_snap_valid = false;
-    self.server.chunk_radius = 4;
+    self.server.chunk_radius = 16;
     self.network.mode = .client;
 
     self.network.net_thread = null;
@@ -1005,8 +1018,10 @@ fn hostNetworkThread(self: *Game) void {
                 self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
                 self.server.registry.add(entity, Comps.Collider{ .width = pinfo.collider_width, .height = pinfo.collider_height });
                 self.server.registry.add(entity, Comps.Facing{});
-                // 不加 MoveIntent/MoveSpeed/JumpVelocity/OnGround，服务端不对远程客机玩家跑物理解算
-                if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                self.server.registry.add(entity, Comps.MoveIntent{});
+                // 服务端不对远程客机玩家跑物理解算（MoveIntent 只用于动画状态同步）
+                const bc = modelBoneCount(&self.res_manager, pinfo.model_id);
+                if (self.server.animation_system.allocBoneSlot(bc)) |bone_offset| {
                     self.server.registry.add(entity, Comps.AnimationState{
                         .clip_name = ClipName.idle.toString(),
                         .bone_offset = bone_offset,
@@ -1048,6 +1063,10 @@ fn hostNetworkThread(self: *Game) void {
                 .place_face = input.place_face,
                 .attack_entity = input.attack_entity,
                 .attack_target_raw = input.attack_target_raw,
+                .wants_fly = input.wants_fly,
+                .is_moving = input.is_moving,
+                .is_sprinting = input.is_sprinting,
+                .is_sneaking = input.is_sneaking,
             }) catch {};
         }
 
@@ -1190,6 +1209,13 @@ fn buildPaletteJson(palette: []const BlockState, allocator: std.mem.Allocator) [
     }
     buf.append(allocator, ']') catch unreachable;
     return buf.toOwnedSlice(allocator) catch unreachable;
+}
+
+/// 获取模型的骨骼数（无骨骼返回 0）
+fn modelBoneCount(res_manager: *ResManager, model_id: RendCTX.ModelId) u32 {
+    const model = res_manager.getOrLoadModel(model_id);
+    if (model.skeleton) |skel| return skel.joint_count;
+    return 0;
 }
 
 /// 读取 WASD/跳/潜行/冲刺，直接写入 MoveIntent 组件（主机/客机共用）
@@ -1354,7 +1380,7 @@ fn predictBlockAction(self: *Game, target: *Vec3i, place_face: *u8, attack_targe
                         }
                     }
                 }
-                // if (!can_place) return; // ← 注释这行关闭实体重叠检查
+                if (!can_place) return; // ← 注释这行关闭实体重叠检查
                 target.* = place_pos;
                 place_face.* = @intFromEnum(facing);
                 self.server.block_world.setBlock(place_pos, BlockState{ .block_id = BlockId.fromInt(sel.item_id), .facing = facing }) catch {};
@@ -1410,7 +1436,8 @@ fn clientTick(self: *Game) !void {
     // 键盘 → MoveIntent（与主机/单人游戏一致的逻辑）
     produceMoveIntent(self);
     // 飞行切换（双击空格）
-    if (self.network.server_wants_fly) {
+    const wants_fly = self.network.server_wants_fly;
+    if (wants_fly) {
         self.network.server_wants_fly = false;
         const rp = self.network.remote_player.?;
         if (self.server.registry.has(Comps.Flying, rp)) {
@@ -1442,6 +1469,14 @@ fn clientTick(self: *Game) !void {
         intent.attack_entity = true;
         intent.attack_target_raw = attack_raw;
     }
+
+    // 采集移动状态（发送给主机，用于动画同步）
+    if (self.server.registry.tryGet(Comps.MoveIntent, self.network.remote_player.?)) |mi| {
+        intent.is_moving = mi.direction.len2() > 0.001;
+        intent.is_sprinting = mi.sprint;
+        intent.is_sneaking = mi.sneak;
+    }
+    intent.wants_fly = wants_fly;
 
     Network.sendInput(@as(winsock.socket_t, @intCast(self.network.client_fd)), &intent);
 }
@@ -1575,7 +1610,8 @@ fn clientReceivePackets(self: *Game) void {
             self.server.registry.add(entity, Comps.Collider{ .width = einfo.collider_width, .height = einfo.collider_height });
             self.server.registry.add(entity, Comps.Velocity{ .vec = Vec3.zero });
             self.server.registry.add(entity, Comps.Facing{});
-            if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+            const bc = modelBoneCount(&self.res_manager, einfo.model_id);
+            if (self.server.animation_system.allocBoneSlot(bc)) |bone_offset| {
                 self.server.registry.add(entity, Comps.AnimationState{
                     .clip_name = ClipName.fromId(snap.clip_name_id).toString(),
                     .bone_offset = bone_offset,
@@ -1631,7 +1667,10 @@ fn clientReceivePackets(self: *Game) void {
         var ai = av.entityIterator();
         while (ai.next()) |ent| {
             if (!self.server.registry.has(Comps.AnimationState, ent)) {
-                if (self.server.animation_system.allocBoneSlot()) |bone_offset| {
+                const mn = self.server.registry.tryGet(Comps.ModelName, ent) orelse continue;
+                const bc = modelBoneCount(&self.res_manager, mn.id);
+                if (bc == 0) continue;
+                if (self.server.animation_system.allocBoneSlot(bc)) |bone_offset| {
                     self.server.registry.add(ent, Comps.AnimationState{
                         .clip_name = ClipName.idle.toString(),
                         .bone_offset = bone_offset,
@@ -1741,7 +1780,10 @@ fn pollServerSnapshot(self: *Game) void {
             while (ai.next()) |ent| {
                 const st = av.get(ent);
                 if (st.bone_offset >= 0xFFFF0000) {
-                    const new_bo = self.server.animation_system.allocBoneSlot() orelse continue;
+                    const mn = self.server.registry.tryGet(Comps.ModelName, ent) orelse continue;
+                    const bc = modelBoneCount(&self.res_manager, mn.id);
+                    if (bc == 0) continue;
+                    const new_bo = self.server.animation_system.allocBoneSlot(bc) orelse continue;
                     st.bone_offset = new_bo;
                 }
             }
@@ -1770,7 +1812,8 @@ fn syncCameraFromPlayer(self: *Game) void {
             const rend_now = @as(i64, @truncate(std.Io.Timestamp.now(io, .awake).nanoseconds));
             const rend_time = rend_now -| 33_000_000;
             const render_pos = pos.interpPos(rend_time);
-            const eye = render_pos.add(Vec3.new(0, 1.6, 0));
+            // 眼睛在脚底位置上方1.7m的位置
+            const eye = render_pos.add(Vec3.new(0, 1.7, 0));
             self.camera.position = eye;
             self.ubo.camera_pos = eye;
             self.ubo.view_matrix = Mat4.lookAt(eye, eye.add(self.camera.front), self.camera.up);

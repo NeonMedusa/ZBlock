@@ -40,6 +40,9 @@ pub const PlayerInput = struct {
     place_face: u8 = 0,
     attack_entity: bool = false,
     attack_target_raw: u32 = 0,
+    is_moving: bool = false,
+    is_sprinting: bool = false,
+    is_sneaking: bool = false,
 };
 
 /// 服务端状态。独立线程运行，通过输入队列与主线程通信。
@@ -49,6 +52,7 @@ pub const Server = struct {
     registry: ECS.Registry,
     block_world: BlockWorld,
     animation_system: AnimationSystem,
+    res_manager: *ResManager = undefined,
     tick_count: u64 = 0,
     player_id: u32 = 0,
     flying: bool = false,
@@ -104,6 +108,7 @@ pub const Server = struct {
     /// 启动服务端线程
     pub fn start(self: *Server, res_manager: *ResManager) !void {
         self.running = true;
+        self.res_manager = res_manager;
         self.server_thread = try std.Thread.spawn(.{}, serverThreadFn, .{ self, res_manager });
     }
 
@@ -214,6 +219,19 @@ pub const Server = struct {
                 if (self.registry.tryGet(Comps.Facing, entity)) |facing| {
                     facing.yaw = -input.cam_yaw + std.math.pi / 2.0;
                     facing.pitch = input.cam_pitch;
+                }
+                // 同步动画状态（不跑物理，但 MoveIntent 供 updateAnimation 识别移动态）
+                if (self.registry.tryGet(Comps.MoveIntent, entity)) |mi| {
+                    mi.direction = if (input.is_moving) Vec3.new(1, 0, 0) else Vec3.zero;
+                    mi.sprint = input.is_sprinting;
+                    mi.sneak = input.is_sneaking;
+                }
+                if (input.wants_fly) {
+                    if (self.registry.has(Comps.Flying, entity)) {
+                        _ = self.registry.remove(Comps.Flying, entity);
+                    } else {
+                        self.registry.add(entity, Comps.Flying{});
+                    }
                 }
             } else {
                 // ── 主机玩家：MoveIntent 已由主线程 produceMoveIntent 写入，
@@ -375,7 +393,9 @@ pub const Server = struct {
         self.registry.add(entity, Comps.Health{ .current = info.health, .max = info.health });
         self.registry.add(entity, Comps.Facing{});
         self.registry.add(entity, Comps.ModelName{ .id = info.model_id });
-        if (self.animation_system.allocBoneSlot()) |bone_offset| {
+        const model = self.res_manager.getOrLoadModel(info.model_id);
+        const bc = if (model.skeleton) |s| s.joint_count else 0;
+        if (self.animation_system.allocBoneSlot(bc)) |bone_offset| {
             self.registry.add(entity, Comps.AnimationState{
                 .clip_name = ClipName.idle.toString(),
                 .bone_offset = bone_offset,
@@ -785,22 +805,47 @@ pub const Server = struct {
 
     /// 根据 AI 状态设置动画 clip 和移速
     fn updateAnimation(self: *Server) void {
-        var av = self.registry.view(.{ Comps.AIAgent, Comps.AnimationState, Comps.MoveSpeed }, .{});
-        var ai = av.entityIterator();
-        while (ai.next()) |e| {
-            const agent = av.get(Comps.AIAgent, e);
-            const anim = av.get(Comps.AnimationState, e);
-            const speed = av.get(Comps.MoveSpeed, e);
-            const info2 = agent.type_id.info();
-            switch (agent.state) {
-                .idle, .wandering => {
-                    anim.clip_name = if (agent.state == .idle) ClipName.idle.toString() else ClipName.walk.toString();
-                    speed.value = info2.move_speed;
-                },
-                .chasing, .fleeing => {
+        // ── AI 实体 ──
+        {
+            var av = self.registry.view(.{ Comps.AIAgent, Comps.AnimationState, Comps.MoveSpeed }, .{});
+            var ai = av.entityIterator();
+            while (ai.next()) |e| {
+                const agent = av.get(Comps.AIAgent, e);
+                const anim = av.get(Comps.AnimationState, e);
+                const speed = av.get(Comps.MoveSpeed, e);
+                const info2 = agent.type_id.info();
+                switch (agent.state) {
+                    .idle, .wandering => {
+                        anim.clip_name = if (agent.state == .idle) ClipName.idle.toString() else ClipName.walk.toString();
+                        speed.value = info2.move_speed;
+                    },
+                    .chasing, .fleeing => {
+                        anim.clip_name = ClipName.run.toString();
+                        speed.value = info2.run_speed;
+                    },
+                }
+            }
+        }
+
+        // ── 玩家实体 ──
+        {
+            var pv = self.registry.view(.{ Comps.Player, Comps.AnimationState, Comps.MoveIntent }, .{});
+            var pi = pv.entityIterator();
+            while (pi.next()) |e| {
+                const anim = pv.get(Comps.AnimationState, e);
+                const intent = pv.get(Comps.MoveIntent, e);
+                const flying = self.registry.has(Comps.Flying, e);
+                const moving = intent.direction.len2() > 0.001;
+
+                if (flying) {
+                    anim.clip_name = if (moving) ClipName.run.toString() else ClipName.idle.toString();
+                } else if (intent.sprint and moving) {
                     anim.clip_name = ClipName.run.toString();
-                    speed.value = info2.run_speed;
-                },
+                } else if (moving) {
+                    anim.clip_name = ClipName.walk.toString();
+                } else {
+                    anim.clip_name = ClipName.idle.toString();
+                }
             }
         }
     }

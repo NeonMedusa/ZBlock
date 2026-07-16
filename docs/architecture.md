@@ -127,8 +127,7 @@ src/
 确保精确匹配不被回收实体干扰。
 
 动画相关：
-- `allocBoneSlot` 只在主线程调用（initGame / pollServerSnapshot / clientReceivePackets）
-- 服务端线程和网络线程不分配骨骼槽，避免竞态
+- `allocBoneSlot` 使用原子自增，可被多线程安全调用（服务端线程/spawnEnemy、网络线程/hostNetworkThread、主线程/initGame）
 - `animation_system.update` 只在主线程调用（pollServerSnapshot / clientReceivePackets）
 
 ### 动态区块加载/卸载
@@ -302,7 +301,7 @@ packed_pos (32 bits):
   updateAI()            ← 寻路 + 路径跟随（block_world）
   updateEntities()
   updateChunks()
-  updateAnimation()     ← 按 AI 状态设 clip_name + move_speed
+  updateAnimation()     ← AI 按 agent.state、玩家按 MoveIntent 设 clip_name
   publishSnapshot()     ← 含 entity_type_id + clip_name_id
 
 客机:

@@ -1,129 +1,6 @@
 # DESIGN.md
 
-## 当前架构（2026-06-18）
-
-### 环境
-
-| 组件 | 版本 |
-|------|------|
-| Zig | 0.16.0 |
-| ECS | prime31/zig-ecs (master, 2026-05-18) |
-| SQLite | fridge (zig16 branch, 2026-05-07) |
-| GLFW | 3.4 |
-| WGPU | wgpu-native (x86_64-windows) |
-| zgltf | 最新 master |
-| zigimg | 最新 master (zig16 适配) |
-
-### 与 0.15.2 的关键迁移差异
-
-| 旧 API | 新 API | 说明 |
-|--------|--------|------|
-| `std.Thread.Mutex` | `std.Io.Mutex` | 需要传 `io` 参数 |
-| `std.Thread.Condition` | `std.Io.Condition` | `timedWait` 被移除，改用 sleep 轮询 |
-| `std.Thread.RwLock` | `std.Io.RwLock` | 需要传 `io` 参数 |
-| `std.time.Timer` / `nanoTimestamp` | `std.Io.Timestamp.now(io, .awake)` | |
-| `std.fs.cwd()` | `std.Io.Dir.cwd(io)` | |
-| `ArrayListUnmanaged = .{},` | `= .empty` | |
-| `GeneralPurposeAllocator` | `DebugAllocator(.{})` | |
-| `std.crypto.random` | `Io.random(buf)` 或 PRNG | |
-| `std.posix.socket/bind/...` | 手写 `winsock.zig` (Windows) | 0.16 移除了中等抽象层 |
-
-### 进程架构
-
-所有模式（单人/主机/客机）共享同一份可执行文件。三种运行模式由 `game.network.mode` 区分：
-
-| 模式 | `network.mode` | 服务端线程 | 网络线程 | 渲染 |
-|------|---------------|-----------|---------|------|
-| 单人 | `.single` | 运行（物理/AI/动画） | 无 | 同步相机 |
-| 主机 | `.host` | 运行 | 接受 TCP + 收发 | 同步相机 |
-| 客机 | `.client` | 运行（仅 tick） | 无（TCP 在主线程收） | state 包驱动 |
-
-### 线程模型
-
-```
-主线程:
-  collectPlayerInput(player_id) → pushInput(队列)
-  tick(): clientReceivePackets() / host 逻辑
-  渲染: getSnapPos() → lerp(prev, curr, accumulator/TICK_DT)
-
-服务端线程(独立线程, 固定 30Hz):
-  1. Sleep 到下一个 tick 截止时间（分块 1~5ms，可响应停止信号）
-  2. drain 所有输入
-  3. 处理每个输入 → MoveIntent/朝向/break/place/fly
-  4. updatePhysics (30Hz 固定, 与输入数量无关)
-  5. updateAI (最近玩家追踪)
-  6. animation_system.update
-  7. updateEntities (生命值/消失)
-  8. updateChunks (所有玩家的区块加载/卸载)
-  9. publishSnapshot → 快照缓冲区(mutex保护)
-  10. 推进 next_tick 截止时间，落后时不补帧
-
-网络线程(独立线程, 仅 host 模式):
-  accept → 创建远程玩家实体
-  循环: recvInput → pushInput(player_id=1)
-        读 server.snapshots → sendState
-        读 server.pending_chunks → sendChunk
-        读 server.pending_unloads → sendChunkUnload
-```
-
-### 玩家移动分工
-
-- **客机玩家**：`produceMoveIntent` → 本地 `updatePhysics` → 每 tick 提交位置给服务器
-- **主机玩家**：`produceMoveIntent` → 服务端 `updatePhysics`，不经过网络
-- **服务端**：远程客机直接应用提交的位置（不跑物理），AI 实体继续跑物理和寻路
-- **动作**（break/place/fly/camera）：主机和客机都提交目标坐标，服务端执行并广播 block_update
-- **输入队列**：仅用于主机玩家的动作，移动字段已移除
-
-### 快照与插值
-
-```
-服务端 tick 结束 → publishSnapshot()
-  → snapshots[64] (mutex 保护, 含完整 ECS.Entity{index,version} + 位置/朝向)
-  → hostNetworkThread 读 snapshots 组包
-  → sendState(tick_count, host_time, entities)
-
-主线程:
-  主机: pollServerSnapshot()
-    → 复制到 render_snapshots 缓冲区
-    → 推入实体 3 槽环形缓冲区
-  客机: clientReceivePackets()（每帧非阻塞）
-    → 复制到 render_snapshots 缓冲区
-    → 推入实体 3 槽环形缓冲区
-
-  渲染（主机/客机统一）:
-    搜索 3 槽环缓冲，render_time = now - 33ms
-    → 找到 bracket → lerp(pos[older], pos[newer], alpha)
-    → 缓冲区不足（count < 2）→ 返回最新原始位置
-```
-
-注：3 槽环缓冲无需持久化时间参考，alpha 永不为零，无速度断续感。
-`EntitySnapshot.entity` 存储完整 {index, version}，不被回收实体干扰。
-
-### 实体攻击与掉落
-
-**流程（信任客机）：**
-
-1. 客机本地 raycast 检测实体（遍历 Position+Collider，不依赖 BVH）
-2. 命中非自身实体 → 设置 attack_entity + attack_target_raw 发给服务端
-3. 服务端 `handleActionAttack`：直接扣血，死亡时计算掉落
-4. 掉落写入 `pending_drops[]` → 网络线程过滤写入 `ServerState.drops`
-5. 客机收到后匹配 `target_player_id` → `tryItemToInventory`
-
-**主机模式**：伤害/掉落全在 `predictBlockAction` 本地完成，不经过网络。
-
-**防双拿**：掉落由服务端计算，`target_player_id` 唯一指定归属，客机不做本地掉落预测。
-
-### 客机收包
-
-- `clientTick()` 30Hz 发位置/速度（物理在本地跑）
-- `clientReceivePackets()` 每帧非阻塞收包
-- 统一处理 tag=2（chunk）、tag=1（state）、tag=3（unload）
-- state 内含 entities + block_updates + drops
-- 所有实体通过 3 槽环缓冲做插值渲染
-
----
-
-设计文档：方块物理精细化相关议题。
+设计文档：未来规划与问题记录
 
 ---
 
@@ -457,72 +334,24 @@ getBlockWorldAABB(x, y, z, block_state) -> []AABB
 - 客机有独立的本地物理/逻辑副本（预测回路）
 - 需要可靠 UDP 库（Laminar/enet）或多通道 TCP 改造
 
-### 非完整方块 mesh 架构
-
-水面是游戏中第一个非完整方块，采用独立的渲染管线和顶点格式：
-
-- **不透明方块**：`ChunkVertex`（4B），非索引（6 顶点/面），共享 bind group 1（材质纹理），`pipeline_chunk`
-- **树叶/半透明方块**：`ChunkVertex`（4B），非索引（6 顶点/面），独立 `pipeline_foliage`
-  - `cullMode = Back`，`depthWrite = true`，`depthCompare = GreaterEqual`
-  - 片段着色器 `fs_foliage`：`alpha < 0.5 → discard`，利用 `GreaterEqual` 遮挡水
-  - 渲染顺序：Pass1 实心块 → Pass2 水 → 树叶（在 Pass2 内水之后绘制）
-- **水面**：`StaticVertex`（32B），索引（4 顶点+6 索引/面），独立管线，Alpha blend + 波纹动画
-
-树叶使用独立管线的原因：
-1. 需要 alpha discard（`fs_foliage`）防止半透明像素写深度
-2. 需要 `depthCompare = GreaterEqual` 而非 `Greater`，以正确遮挡水
-3. 需要 `depthWrite = true` 确保树叶间前后正确排序
-
-水面使用独立管线的原因：
-1. Alpha 混合（`SrcAlpha / OneMinusSrcAlpha`）需要单独的 blend state
-2. 顶点着色器需要波纹位移（其他方块不需要）
-3. 片元着色器需要水色 + 透明度
-
-**水面 mesh 生成**（`chunk_mesh.zig`）：
-
-每个水面方块在 `buildChunkMeshCPU` 中独立生成顶点数据，存入 `water_vertices`/`water_indices`。
-相对于不透明方块（`ChunkVertex` 4B 压缩 + 非索引 6 顶/面），水面 mesh 的不同之处：
-
-- `StaticVertex`（32B/顶点）：完整浮点坐标，精确支持 0.8 格高度
-- `u32` 索引画法（4 顶点 + 6 索引/面）：节省顶点 buffer 带宽
-- 顶面斜坡：邻接满高水方块时抬升至 1.0，否则降至 0.8
-- 跨区块查询：通过 `nb_west/east/north/south` 指针查邻居 chunk
-
-**水面着色器**（`water_shader.wgsl`）：
-- **波浪**：旋转UV + 3层噪声 + 有限差分法线（Sildurs 式）
-- **统一反射层**：`scene_reflect = mix(天空颜色, SSR颜色, ssr_fade)`
-- **Fresnel**：Schlick `0.02+0.98*(1-NdotV)^5`，混合 `refracted` 与 `lit_water + scene_reflect`
-- **折射**：场景纹理采样 + 线性深度吸收（水深→深蓝）
-- **阴影响应**：`shadow_darken = mix(0.75, 1.0, shadow)` 乘法暗化；日月高光乘 `shadow`
-- **SSR**：10 步指数步进 + 5 步二分搜索，边缘淡出 + 假阳性抑制，竖直水面跳过
-- **日月高光**：`smoothstep(0.995, 1.0)` 窄反射峰，`shadow_vp` 白天太阳、晚上月亮
-
-后续非完整方块（半砖、楼梯、栅栏等）的 mesh 复杂度更高，可能需要更灵活的方块模型系统。
-
----
-
 ### 讨论记录
 
-- 2026-06-15：决定骨骼动画在客机本地计算，不传输矩阵。状态同步为主机权威。物理物体按重要性分层处理。
-- 2026-06-19：发现 zig-ecs 并非线程安全，服务端线程写 Position 会踩坏 AnimationState 的 bone_offset。
-  当前方案：pollServerSnapshot 中检测非法 bone_offset 并重新分配。
-  将来做物理骨骼动画时，要么给 zig-ecs 加读写锁，要么换支持并发的 ECS（如 EnTT）。
-- 2026-06-19：chunk 顶点编码修复。`ChunkVertex.bx/by/bz` 在 `@intFromFloat` 前加 `+ 0.01` epsilon。
-  根因推测：x/y/z 为 0 时，浮点运算引入的微小负数误差被 `@intFromFloat` 向零截断后，
-  与相邻面的正数值坍缩到相同整数，导致退化三角形（零面积面）。
-  epsilon 将这些值推到远离零的稳定区域，保证每个面的顶点落在正确整数位置。
-  注：`ZBlock_内存调色板` 分支也需要此修复，届时手动改 `chunk_mesh.zig` 三行即可。
+- 2026-06-19：zig-ecs 非线程安全，服务端线程写 Position 会踩坏 AnimationState 的 bone_offset。
+  当前方案：`pollServerSnapshot` 中检测非法 `bone_offset`（DebugAllocator 填充值 0xAAAAAAAA）并重新分配。
+  缺陷：此检测仅在 Debug 模式可靠，ReleaseFast 下无填充，损坏可能静默导致骨骼矩阵错乱。
+  将来：给 zig-ecs 加读写锁，或换支持并发的 ECS（如 EnTT）。
 
-- 2026-06-27：ReleaseFast 下 `resolveClip` 遍历 `model.animations` 读 `clip.name` 偶发崩溃。
-  根因疑似编译器优化导致 `clip.name` 的内存读取被跳过。
-  修复：用 `@memcpy` 将 `clip.name` 拷贝到局部变量再访问，强制编译器做真实内存读取。
-  简单测试无法复现，需要完整项目环境（多线程 ECS + 复杂调用链）才能触发。
-- 2026-07-09：程序化榕树生成（`tree_gen.zig`）。`pipeline_foliage` 独立管线（`fs_foliage` + alpha discard + `cullMode=Back` + `depthWrite=true` + `depthCompare=GreaterEqual`）。
-- 2026-07-10：根因定位 ~0.1MB/s 内存泄漏：`render.zig` 阴影 pass 缺少 `wgpuRenderPassEncoderRelease`（~1-4KB/帧，60fps → 60-240KB/s）。
-- 2026-07-10：`NeighborChunks` 结构体统一管理四邻域指针，`neighborAtXZ` helper 消除跨区块查询重复代码。
-- 2026-07-10：`disconnectClient` → `returnToMenu` 合并，消除断线双重释放竞态。
-- 2026-07-10：`pending_unloads` 消费修复，主机模式下客机现在能正确卸载远离的区块。
-- 2026-07-10：`orderedRemove(0)` 改为 swap 整列（O(n²) → O(1)）。多处 `catch {}` 泄漏修复。
+- 2026-06-27：ReleaseFast 下 `resolveClip` 读 `clip.name` 偶发崩溃，根因未明。
+  当前方案：`@memcpy` 到局部变量再访问，绕过编译器优化。
+  条件：需要完整项目环境（多线程 ECS + 复杂调用链）才能复现，简单测试不可重现。
+
+- 2026-07-15：SSR 水面噪点。反向 Z + 24 位深度，far > 320 时深度精度不足，SSR 步进产生噪点。
+  当前约束：`far = (chunk_radius + 4) * 16`，半径 16 时 far=320。
+  长期方案：SSR 根据距离淡出回天空反射，或 `depth_copy` 升到 32 位。
+
+- 2026-07-15：Human.glb 自制模型骨骼数 128+，超过 `MAX_BONES=128` 导致数组越界崩溃。
+  当前方案：加载时 `@min(joint_count, MAX_BONES)` 截断，爆出告警。
+  约束：超过 128 骨骼的模型会被截断，动画可能不完整。
 
 ---
 
@@ -716,6 +545,15 @@ Mesh worker:  不变，从 pending 取 origin → 从 chunks 读数据
 | 蘑菇（洞穴） | cave air、低光 | P2 |
 | 矿石团 | stone 内部 | P3（可走 terrain） |
 | 建筑预制 | 额外邻居范围 | P3 |
+
+**当前（2026-07-15）简化方案**：限制树干位置在 chunk 内部（距边界 4 格），树冠半径缩小到 2-3 格，确保树冠不跨出 chunk 边界。参考了另一个体素游戏的实现——树冠直径不超过 5 格，树干至少离边界 2-3 格。
+
+此方案避免了议题六中两阶段生成的全部复杂度，但代价是：
+- 树林密度受限（chunk 边界的 margin 减小了可种树面积）
+- 大型树（树冠 > 5 格）无法实现
+- 未来做密集森林/洞穴/地牢时仍需两阶段生成
+
+两阶段生成方案保留在议题六中，等需要密集 populate（草、花、建筑）时再实现。
 
 ### 武器系统方案
 

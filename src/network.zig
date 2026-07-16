@@ -23,6 +23,10 @@ pub const ClientInput = struct {
     place_face: u8 = 0,
     attack_entity: bool = false,
     attack_target_raw: u32 = 0, // 服务端 ECS.Entity 编码为 u32
+    is_moving: bool = false,
+    is_sprinting: bool = false,
+    is_sneaking: bool = false,
+    wants_fly: bool = false,
 };
 
 /// 服务端 → 客户端：实体状态快照
