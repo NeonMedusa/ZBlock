@@ -15,6 +15,7 @@ src/
 ├── camera3d.zig           — 3D 相机（yaw/pitch/射线）
 ├── input.zig              — 键盘鼠标输入
 ├── window.zig             — GLFW 窗口管理
+├── config.zig             — 用户设置（语言/用户名/区块半径，JSON 配置）
 ├── keybinds.zig           — 按键绑定（JSON 配置）
 │
 ├── ui_system.zig          — UI 系统（SDF 文字 + 矩形渲染）

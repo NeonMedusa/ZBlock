@@ -149,18 +149,23 @@ pub const Keybinds = struct {
         if (std.fs.path.dirname(path)) |dir| std.Io.Dir.cwd().createDirPath(io, dir) catch {};
         const file = try std.Io.Dir.cwd().createFile(io, path, .{});
         defer file.close(io);
-        try file.writeStreamingAll(io, "{\n");
+
+        var buf: std.ArrayListUnmanaged(u8) = .empty;
+        defer buf.deinit(std.heap.page_allocator);
+        const a = std.heap.page_allocator;
+        try buf.appendSlice(a, "{\n");
         inline for (@typeInfo(Action).@"enum".fields, 0..) |field, i| {
             const b = self.bindings[i];
-            try file.writeStreamingAll(io, "    \"");
-            try file.writeStreamingAll(io, field.name);
-            try file.writeStreamingAll(io, "\": \"");
-            try file.writeStreamingAll(io, bindingName(b));
-            try file.writeStreamingAll(io, "\"");
-            if (i < Action.count() - 1) try file.writeStreamingAll(io, ",");
-            try file.writeStreamingAll(io, "\n");
+            try buf.appendSlice(a, "    \"");
+            try buf.appendSlice(a, field.name);
+            try buf.appendSlice(a, "\": \"");
+            try buf.appendSlice(a, bindingName(b));
+            try buf.appendSlice(a, "\"");
+            if (i < Action.count() - 1) try buf.appendSlice(a, ",");
+            try buf.appendSlice(a, "\n");
         }
-        try file.writeStreamingAll(io, "}\n");
+        try buf.appendSlice(a, "}\n");
+        try file.writeStreamingAll(io, buf.items);
     }
 
     /// 恢复默认键位并写入配置文件

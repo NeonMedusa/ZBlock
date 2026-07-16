@@ -6,13 +6,13 @@ const winsock = @import("winsock.zig");
 //    否则字段值为内存垃圾（不是默认值）。
 //    已在此踩坑的字段：player_id, remote_player, flying, network_mode
 //    新增字段时务必检查 init() 是否有对应初始化。
-const Algebra = @import("algebra.zig");
 const Gctx = @import("gctx.zig");
 const Window = @import("window.zig");
 const Render = @import("render.zig");
 const Camera3D = @import("camera3d.zig");
 const RenderPipeline = @import("render_pipeline.zig");
 const WaterPipeline = @import("water_pipeline.zig");
+const Config = @import("config.zig");
 const UiSystem = @import("ui_system.zig");
 const Input = @import("input.zig");
 const ECS = @import("zigecs");
@@ -20,13 +20,10 @@ const RendCTX = @import("rend_ctx.zig");
 const ClipName = RendCTX.ClipName;
 const Comps = @import("components.zig").Components;
 const Wgpu = @import("imports.zig").Wgpu;
-const Glfw = @import("imports.zig").Glfw;
-const Gltf = @import("imports.zig").Gltf;
 const Vec3 = @import("algebra.zig").Vec3;
 const ResManager = @import("rend_ctx.zig").ResManager;
 const Model = @import("rend_ctx.zig").Model;
 const SceneUniform = @import("rend_ctx.zig").SceneUniform;
-const zigimg = @import("zigimg");
 
 allocator: std.mem.Allocator,
 window: Window,
@@ -681,13 +678,16 @@ pub fn init(allocator: std.mem.Allocator) !*@This() {
 
     // 加载游戏设置（含语言、玩家名）
     {
-        const lang = loadSettingsLang(allocator);
-        defer allocator.free(lang);
+        const cfg = Config.Settings.load(allocator) catch Config.Settings{};
+        const lang = cfg.language.toString();
         // 加载语言文件，失败时逐级回退：指定语言 → en → key 本身
         if (i18n.init(allocator, lang)) {} else |_| {
             if (i18n.init(allocator, "en")) {} else |_| {}
         }
-        self.player_name = loadSettingsName(allocator);
+        // ↓ 取消下行注释以强制随机用户名（多人游戏调试用，忽略配置文件）
+        //self.player_name = randomPlayerName(allocator);
+        self.player_name = if (cfg.player_name.len > 0) cfg.player_name else randomPlayerName(allocator);
+        self.server.chunk_radius = cfg.chunk_radius;
     }
 
     self.menu_state = .MainMenu;
@@ -755,10 +755,8 @@ pub fn deinit(self: *@This()) void {
 /// 切换存档（由存档管理界面调用）
 pub fn startSave(self: *Game, name: []const u8) !void {
     Log.info(.startup, "startSave begin '{s}'", .{name});
-    self.server.chunk_radius = 16;
     rebuildProjMatrix(self);
     self.save_manager = try SaveManager.init(self.allocator, name);
-    // 如果是从 returnToMenu 回来的，Server 已经被重建，只需要重建 BlockWorld
     self.server.block_world = try BlockWorld.BlockWorld.init(self.allocator, &self.gctx, &self.render_pipeline, self.server.chunk_radius, name);
     try self.server.block_world.spawnWorker();
     try self.server.block_world.spawnAStarWorker();
@@ -778,7 +776,6 @@ pub fn startClient(self: *Game, host_ip: [4]u8) !void {
 
     self.network.last_snapshot_serial = std.math.maxInt(u64);
     self.network.host_snap_valid = false;
-    self.server.chunk_radius = 16;
     self.network.mode = .client;
 
     self.network.net_thread = null;
@@ -1946,38 +1943,7 @@ const Network = @import("network.zig");
 const Log = @import("log.zig");
 const i18n = @import("i18n.zig");
 
-/// 从 settings.json 读取语言设置，失败时返回 "zh"（堆分配，调用方需 free）
-fn loadSettingsLang(allocator: std.mem.Allocator) []const u8 {
-    const data = std.Io.Dir.cwd().readFileAlloc(io, "config/settings.json", allocator, .limited(4096)) catch {
-        return allocator.dupe(u8, "zh") catch "zh";
-    };
-    defer allocator.free(data);
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
-        return allocator.dupe(u8, "zh") catch "zh";
-    };
-    defer parsed.deinit();
-    if (parsed.value.object.get("language")) |v| {
-        return allocator.dupe(u8, v.string) catch "zh";
-    }
-    return allocator.dupe(u8, "zh") catch "zh";
-}
-
-/// 从 settings.json 读取玩家名，失败时返回随机名
-fn loadSettingsName(allocator: std.mem.Allocator) []const u8 {
-    const data = std.Io.Dir.cwd().readFileAlloc(io, "config/settings.json", allocator, .limited(4096)) catch {
-        return randomPlayerName(allocator);
-    };
-    defer allocator.free(data);
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch {
-        return randomPlayerName(allocator);
-    };
-    defer parsed.deinit();
-    if (parsed.value.object.get("player_name")) |v| {
-        return allocator.dupe(u8, v.string) catch randomPlayerName(allocator);
-    }
-    return randomPlayerName(allocator);
-}
-
+/// 生成随机用户名
 fn randomPlayerName(allocator: std.mem.Allocator) []const u8 {
     var buf: [4]u8 = undefined;
     io.random(&buf);

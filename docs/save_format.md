@@ -50,7 +50,7 @@ CREATE TABLE "EntityRow" (
 
 每个玩家一个独立文件，以玩家名命名（如 `players/NeonMedsua.json`），自定义文本格式：
 
-用户名由 `config/user_name.json` 配置：`{ "name": "NeonMedsua" }`，首次启动自动生成 `user_\<随机数字\>`。
+用户名由 `config/settings.json` 配置（`player_name` 字段），留空则随机生成 `user_XXXX`。语言（`language`）和区块加载半径（`chunk_radius`）也在同一文件配置。
 
 ```
 pos:8.0,130.0,8.0

@@ -354,7 +354,10 @@ pub const Server = struct {
             const surface_y = self.block_world.getSurfaceY(@intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
             if (surface_y) |y| {
                 const pos = Vec3.new(sx, @as(f32, @floatFromInt(y)), sz);
-                if (rng.float(f32) < 0.5) {
+                const roll = rng.float(f32);
+                if (roll < 0.33) {
+                    self.spawnEnemy("zombie", pos);
+                } else if (roll < 0.66) {
                     self.spawnEnemy("fox", pos);
                 } else {
                     self.spawnEnemy("deer", pos);
