@@ -228,7 +228,6 @@ fn wave_bump(coord: vec2f) -> vec3f {
 }
 
 // SSR 步进：指数步长 + 触及表面时二分搜索
-// 10 步 = 刚好覆盖远平面，少于 10 步最后一步间距过大→闪烁
 fn ssr_march(dir: vec3f, origin: vec3f, dither: f32) -> vec2f {
     for (var i = 0; i < 10; i++) {
         let t = exp2(f32(i) + dither) - 1.0;
@@ -236,7 +235,7 @@ fn ssr_march(dir: vec3f, origin: vec3f, dither: f32) -> vec2f {
         let pos = view_to_screen_uv(vp);
         if (pos.x < 0.0 || pos.y < 0.0 || pos.x > 1.0 || pos.y > 1.0 ||
             pos.z < 0.0 || pos.z > 1.0) {
-            return pos.xy; // 出界 UV → border 自然淡出
+            return pos.xy;
         }
         let tex_dim = vec2f(textureDimensions(depth_tex));
         let depth = textureLoad(depth_tex, vec2i(pos.xy * tex_dim), 0);
@@ -252,13 +251,14 @@ fn ssr_march(dir: vec3f, origin: vec3f, dither: f32) -> vec2f {
             return view_to_screen_uv((lo + hi) * 0.5).xy;
         }
     }
-    return vec2f(0.5, 0.5);
+    return vec2f(-1.0);
 }
 
 struct SSRResult { color: vec3f, fade: f32, };
 
 fn reflection_calc(dir: vec3f, origin: vec3f, dither: f32, uv_offset: vec2f) -> SSRResult {
     let pos = ssr_march(dir, origin, dither);
+    if (pos.x < 0.0) { return SSRResult(vec3f(0.0), 0.0); }
     let uv = pos.xy + uv_offset;
     // 抑制假阳性：SSR UV 离起点太近（<0.005≈5像素）→水面下方→丢弃
     let suppress = select(1.0, 0.0, distance(uv, view_to_screen_uv(origin).xy) < 0.005);
@@ -281,13 +281,12 @@ fn water_refraction(view_pos: vec3f, water_ndc: f32, wave_xy: vec2f, screen_pos:
     var uv = screen_pos / tex_size;
     uv += wave_xy * (0.02 / (1.0 + length(view_pos) * 0.4));
     let underwater = textureSample(ssr_color, ssr_sampler, clamp(uv, vec2f(0.001), vec2f(0.999))).rgb;
-    // 从投影矩阵提取 near/far，线性化深度
-    let proj_a = scene_uniform.proj_matrix[2][2];
-    let proj_b = scene_uniform.proj_matrix[3][2];
-    let far = proj_b / proj_a;
-    let near = proj_a * far / (1.0 + proj_a);
+    // 从投影矩阵提取 near，线性化深度
+    let proj_b = scene_uniform.proj_matrix[3][2]; // m[3][2] = near（无限远）或 far*near/(far-near)（有限）
     let scene_depth = textureLoad(depth_tex, vec2i(clamp(uv * tex_size, vec2f(0.0), tex_size - 1.0)), 0);
-    let water_depth = abs(-far * near / (water_ndc * (far - near) + near) - (-far * near / (scene_depth * (far - near) + near)));
+    // 无限远反 Z：ndc.z = near / (-view_z) → linear_z = -near / ndc.z
+    // 有限反 Z 在 near<<far 时同样适用。scene_depth=0（天空）时用极小值防止除零。
+    let water_depth = abs(proj_b / max(water_ndc, 1e-10) - proj_b / max(scene_depth, 1e-10));
     let absorption = (1.0 / -((water_depth * water_depth * WATER_ABSORPTION) + 1.125)) + 1.0;
     return mix(underwater, WATER_COLOR, clamp(absorption, 0.0, 1.0));
 }

@@ -793,6 +793,20 @@ pub const Mat4 = struct {
         };
     }
 
+    /// 反向深度无限远投影矩阵——近平面映射到1，无穷远映射到0。
+    /// 无远平面，任何距离零 Z-fighting。适用于 Vulkan/D3D12 NDC [0,1]。
+    pub fn perspectiveReversedZInfinite(fovy: f32, aspect: f32, near: f32) Mat4 {
+        const f = 1.0 / @tan(fovy * 0.5 * PI / 180.0);
+        return Mat4{
+            .m = .{
+                .{ f / aspect, 0, 0, 0 },
+                .{ 0, f, 0, 0 },
+                .{ 0, 0, 0, -1 },
+                .{ 0, 0, near, 0 },
+            },
+        };
+    }
+
     pub fn orthographic(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) Mat4 {
         var result = zero();
 

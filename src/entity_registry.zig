@@ -42,7 +42,7 @@ pub const entity_infos = [_]EntityTypeInfo{
     },
     .{
         .name = "zombie",
-        .model_id = ModelId.fromName("Human"),
+        .model_id = ModelId.fromName("Zombie"),
         .health = 50,
         .move_speed = 1.0,
         .run_speed = 2.0,

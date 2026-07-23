@@ -353,6 +353,8 @@ pub const Server = struct {
             const sz: f32 = ppos.vec.z + @sin(angle) * r;
             const surface_y = self.block_world.getSurfaceY(@intFromFloat(@floor(sx)), @intFromFloat(@floor(sz)));
             if (surface_y) |y| {
+                // 不在水上/水中刷怪
+                if (self.block_world.isSwimmableBlock(@intFromFloat(@floor(sx)), y, @intFromFloat(@floor(sz)))) continue;
                 const pos = Vec3.new(sx, @as(f32, @floatFromInt(y)), sz);
                 const roll = rng.float(f32);
                 if (roll < 0.33) {

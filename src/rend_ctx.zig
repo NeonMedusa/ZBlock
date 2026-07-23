@@ -277,14 +277,11 @@ pub const ModelInfo = struct {
 
 const model_infos = [_]ModelInfo{
     .{ .name = "foo", .path = "resources/models/foo.glb" },
-    .{ .name = "CesiumMan", .path = "resources/models/CesiumMan.glb" },
     .{ .name = "Wolf", .path = "resources/models/Wolf.glb" },
-    .{ .name = "Buggy", .path = "resources/models/Buggy.glb" },
-    .{ .name = "BarramundiFish", .path = "resources/models/BarramundiFish.glb" },
-    .{ .name = "Avocado", .path = "resources/models/Avocado.glb" },
     .{ .name = "Deer", .path = "resources/models/Deer.glb" },
     .{ .name = "Fox", .path = "resources/models/Fox.glb" },
     .{ .name = "Human", .path = "resources/models/Human.glb" },
+    .{ .name = "Zombie", .path = "resources/models/Zombie.glb" },
 };
 
 pub const MAX_MODELS = model_infos.len;
@@ -895,12 +892,7 @@ pub const SceneUniform = struct {
     _pad2: f32 = undefined,
     pub fn init(window: Window) @This() {
         const aspect_ratio: f32 = window.width / window.height;
-        const proj_matrix = Mat4.perspectiveReversedZ(
-            70,
-            aspect_ratio,
-            0.1,
-            500,
-        );
+        const proj_matrix = Mat4.perspectiveReversedZInfinite(70, aspect_ratio, 0.01);
         const view_matrix = Mat4.lookAt(Vec3.new(0.0, 0.0, 0.0), Vec3.unit_z, Vec3.up);
         return .{
             .proj_matrix = proj_matrix,

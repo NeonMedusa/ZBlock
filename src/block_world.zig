@@ -1367,7 +1367,7 @@ pub const BlockWorld = struct {
                             };
                             const stale_hits = if (self.stale_targets.get(stale_key)) |c| c else @as(u32, 0);
                             if (stale_hits < 3) {
-                                const cur_max_steps: u32 = if (stale_hits >= 2) @as(u32, 200) else @as(u32, 3000);
+                                const cur_max_steps: u32 = if (stale_hits >= 2) @as(u32, 200) else @as(u32, 5000);
                                 var astar = Pathfind.initAStar(self.allocator, self, pos.vec, agent.target, entity_height_blocks, max_step_up) catch continue;
                                 astar.max_steps = cur_max_steps;
                                 // 防泄漏 defer：任何失败路径释放 astar

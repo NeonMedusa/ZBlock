@@ -290,8 +290,7 @@ pub fn start(self: *Game) !void {
 /// 重建投影矩阵。窗口缩放后调用。
 pub fn rebuildProjMatrix(self: *Game) void {
     const aspect = self.window.width / self.window.height;
-    const far = @as(f32, @floatFromInt((self.server.chunk_radius + 4) * BlockWorld.CHUNK_WIDTH_I32));
-    self.ubo.proj_matrix = Mat4.perspectiveReversedZ(70, aspect, 0.005, far);
+    self.ubo.proj_matrix = Mat4.perspectiveReversedZInfinite(70, aspect, 0.01);
 }
 
 /// 窗口缩放后重建 SSR 离屏纹理和 bind group
