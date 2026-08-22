@@ -10,6 +10,11 @@
 
 虽然不太可能，但还是欢迎 PR。
 
+<img width="1920" height="1032" alt="4f7fce34d23cb4abb660ab0113100cf6" src="https://github.com/user-attachments/assets/6220f650-204e-4bff-8ca3-6e1a09a0407a" />
+<img width="1920" height="1032" alt="c18a70fb09ba099c44c42444126aa796" src="https://github.com/user-attachments/assets/c2896fc0-1298-43e0-8a11-8b21faf2dc7f" />
+<img width="1920" height="1032" alt="3b5235c656f7f1a4cd5fedb2f3316e0d" src="https://github.com/user-attachments/assets/defaeee7-a926-4510-b7bc-d81066e4231b" />
+<img width="1920" height="1032" alt="501e7bc9d10f28fb83d2df822fe39c0c" src="https://github.com/user-attachments/assets/f7d31c6c-a0e7-43b7-b5d0-de559e37bb5c" />
+
 ---
 
 ## 构建
@@ -23,7 +28,6 @@
 ```bash
 git clone --recursive https://github.com/NeonMedusa/ZBlock.git
 cd ZBlock
-git checkout ZBlock
 zig build run
 ```
 
@@ -98,17 +102,20 @@ zig build -Dcpu=baseline -Doptimize=ReleaseFast run
   - 每次世界方块数据持久化
   - 实体数据持久化
 
-### ❌ 未实现（仅列出我觉得重要、但做起来太麻烦的项）
+### ❌ 未实现（仅列出我觉得比较重要的项）
 
-- 武器、工具、盔甲系统，配套的第一/第三人称动画
+- 武器、工具、盔甲系统，配套的第一/第三人称动画（简单来说，是不同mesh、模型对同一套骨骼的绑定）
 - 骨骼动画淡入淡出、多动画混合
-- 真正可远程游玩的多人游戏
+- 真正可远程游玩的多人游戏（目前仅测试过本地回环联机，未测试远程联机的可用性，一个比较简单可做的改进是，先实现可手动输入的ip和端口。将来可能需要重写整个网络层，改用udp协议实现失败重发、服务器验算、分叉回退等）
 - 跨区块的树、洞穴、建筑生成
 - 水的流动与蔓延
 - 非完整方块、非 AABB 碰撞
-- 物理骨骼动画
+- 受击部位区分、物理骨骼动画（每个骨骼绑定一个胶囊或者其他形状的碰撞箱）
 - CPU 侧光照系统
-- 物品掉落
+- 物品掉落与拾取
+- 生态群系，不同的群系有不同的地形生成
+- bvh树的完整实现（用于优化碰撞检测）
+- 粒子特效
 
 ## 技术栈
 
